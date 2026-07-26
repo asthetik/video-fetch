@@ -1,0 +1,8 @@
+# Stable rustfmt settings for Rust 1.97 / edition 2024.
+edition = "2024"
+style_edition = "2024"
+
+reorder_imports = true
+use_field_init_shorthand = true
+use_try_shorthand = true
+newline_style = "Unix"
