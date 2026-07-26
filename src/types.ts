@@ -28,6 +28,11 @@ export interface VideoMeta {
   platform: string;
 }
 
+/**
+ * Job record from `list_jobs` / enqueue / cancel / retry.
+ * `speed` / `eta` / byte fields are NOT persisted by the backend — they only
+ * appear via `download://progress` events and are cleared on reload/done/failed.
+ */
 export interface DownloadJob {
   id: string;
   url: string;
@@ -40,6 +45,12 @@ export interface DownloadJob {
   progress: number;
   error?: string | null;
   output_path?: string | null;
+  /** Bytes/sec; live from progress events only. */
+  speed?: number | null;
+  /** Seconds remaining; live from progress events only. */
+  eta?: number | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
 }
 
 export interface AppSettings {

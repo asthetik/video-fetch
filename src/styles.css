@@ -419,6 +419,12 @@ body {
   transition: width 0.2s ease;
 }
 
+.queue-progress-meta {
+  margin: 0 0 0.45rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .queue-error {
   margin: 0 0 0.45rem;
   font-size: 0.78rem;
