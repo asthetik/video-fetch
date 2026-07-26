@@ -1,8 +1,12 @@
+import { HomePage } from "./pages/HomePage";
+import "./styles.css";
+
 export default function App() {
   return (
-    <div style={{ padding: 24, fontFamily: "system-ui" }}>
-      <h1>影取</h1>
-      <p>VideoFetch scaffold</p>
+    <div className="app">
+      <main className="app-main">
+        <HomePage />
+      </main>
     </div>
   );
 }
