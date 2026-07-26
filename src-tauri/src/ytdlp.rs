@@ -164,7 +164,7 @@ fn map_video_meta(v: &serde_json::Value, has_cookies: bool) -> AppResult<VideoMe
             .and_then(|x| x.as_str())
             .map(str::to_string);
     }
-    let formats = parse_formats(media_source, has_cookies);
+    let formats = finalize_formats_for_pages(parse_formats(media_source, has_cookies), pages.len());
 
     Ok(VideoMeta {
         id,
@@ -326,19 +326,69 @@ fn is_audio_only_format(f: &serde_json::Value) -> bool {
     height_none && vcodec.map(|v| v.is_empty()).unwrap_or(true)
 }
 
+/// Prefix for multi-P height preferences (`vh1080` → max 1080p per part).
+pub const HEIGHT_FORMAT_PREFIX: &str = "vh";
+
+/// Standard heights offered for multi-P even when P1's source is lower.
+const MULTI_PAGE_QUALITY_LADDER: &[u32] = &[1080, 720, 480, 360];
+
+pub fn parse_height_format_id(format_id: &str) -> Option<u32> {
+    format_id
+        .strip_prefix(HEIGHT_FORMAT_PREFIX)?
+        .parse()
+        .ok()
+        .filter(|h| *h > 0)
+}
+
+/// Multi-P anthologies often diverge in max resolution across parts. Expose a
+/// height ladder (not P1 DASH ids) so later parts with 1080p remain selectable
+/// when P1 only has 480p. Single-P keeps detailed codec/bitrate options.
+pub fn finalize_formats_for_pages(
+    formats: Vec<FormatOption>,
+    page_count: usize,
+) -> Vec<FormatOption> {
+    if page_count <= 1 {
+        return formats;
+    }
+    multi_page_quality_ladder(&formats)
+}
+
+fn multi_page_quality_ladder(observed: &[FormatOption]) -> Vec<FormatOption> {
+    use std::collections::BTreeSet;
+
+    let mut heights: BTreeSet<u32> = observed.iter().filter_map(|f| f.height).collect();
+    for &h in MULTI_PAGE_QUALITY_LADDER {
+        heights.insert(h);
+    }
+
+    heights
+        .into_iter()
+        .rev()
+        .map(|h| FormatOption {
+            format_id: format!("{HEIGHT_FORMAT_PREFIX}{h}"),
+            label: format!("{h}p"),
+            height: Some(h),
+            fps: None,
+            tbr: None,
+            requires_login: false,
+        })
+        .collect()
+}
+
 /// Build a yt-dlp `-f` selector for Bilibili DASH.
 ///
-/// Prefer the exact `format_id` (usually from the resolved page, often P1), then
-/// fall back to `bestvideo+bestaudio` / `best`. Bilibili multi-P anthologies use
-/// per-cid DASH ids, so P1's id is often missing on other parts; without the
-/// `bestvideo` alternative yt-dlp errors with "Requested format is not available"
-/// and does not honor a bare `/best` fallback for missing numeric ids.
+/// Height preferences (`vh1080`) pick the best stream at or below that height on
+/// each part. Exact numeric ids (usually from a single-P resolve) are preferred
+/// first, then `bestvideo+bestaudio` / `best` — needed because multi-P DASH ids
+/// are per-cid and P1's id is often missing elsewhere.
 pub fn dash_format_selector(format_id: &str) -> String {
     if format_id.contains('+') || format_id.contains('/') {
-        format_id.to_string()
-    } else {
-        format!("{format_id}+bestaudio/bestvideo+bestaudio/best")
+        return format_id.to_string();
     }
+    if let Some(height) = parse_height_format_id(format_id) {
+        return format!("bestvideo[height<={height}]+bestaudio/best");
+    }
+    format!("{format_id}+bestaudio/bestvideo+bestaudio/best")
 }
 
 fn resolution_label(height: Option<u32>, fps: Option<u32>) -> String {
@@ -869,8 +919,41 @@ mod tests {
             meta.thumbnail.as_deref(),
             Some("https://example.com/p1.jpg")
         );
-        assert_eq!(meta.formats.len(), 1);
-        assert_eq!(meta.formats[0].format_id, "80");
+        // Multi-P uses a height ladder so later parts aren't stuck to P1 DASH ids.
+        let ids: Vec<_> = meta.formats.iter().map(|f| f.format_id.as_str()).collect();
+        assert_eq!(ids, vec!["vh1080", "vh720", "vh480", "vh360"]);
+        assert_eq!(meta.formats[0].label, "1080p");
+    }
+
+    #[test]
+    fn multi_page_ladder_adds_1080_when_p1_only_has_480() {
+        let v = serde_json::json!({
+            "id": "BV1xx",
+            "title": "合集",
+            "webpage_url": "https://www.bilibili.com/video/BV1xx",
+            "formats": [],
+            "entries": [
+                {
+                    "id": "BV1xx_p1",
+                    "title": "P1",
+                    "playlist_index": 1,
+                    "formats": [
+                        {"format_id": "30032", "height": 480, "fps": 30, "vcodec": "avc1", "tbr": 300.0}
+                    ]
+                },
+                {
+                    "id": "BV1xx_p2",
+                    "title": "P2",
+                    "playlist_index": 2,
+                    "formats": [
+                        {"format_id": "30112", "height": 1080, "fps": 30, "vcodec": "avc1", "tbr": 2000.0}
+                    ]
+                }
+            ]
+        });
+        let meta = video_meta_from_yt_dlp_json(&v).unwrap();
+        let ids: Vec<_> = meta.formats.iter().map(|f| f.format_id.as_str()).collect();
+        assert_eq!(ids, vec!["vh1080", "vh720", "vh480", "vh360"]);
     }
 
     #[test]
@@ -920,5 +1003,19 @@ mod tests {
         );
         assert_eq!(dash_format_selector("80+bestaudio"), "80+bestaudio");
         assert_eq!(dash_format_selector("bestvideo/best"), "bestvideo/best");
+    }
+
+    #[test]
+    fn dash_format_selector_uses_height_cap_for_vh_prefs() {
+        assert_eq!(
+            dash_format_selector("vh1080"),
+            "bestvideo[height<=1080]+bestaudio/best"
+        );
+        assert_eq!(
+            dash_format_selector("vh720"),
+            "bestvideo[height<=720]+bestaudio/best"
+        );
+        assert_eq!(parse_height_format_id("vh1080"), Some(1080));
+        assert_eq!(parse_height_format_id("80"), None);
     }
 }
