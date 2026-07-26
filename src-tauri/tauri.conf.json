@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "影取",
+  "productName": "VideoFetch",
   "version": "0.1.0",
   "identifier": "app.videofetch.desktop",
   "build": {
@@ -35,6 +35,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
   }
 }
