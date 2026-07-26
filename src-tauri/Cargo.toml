@@ -26,7 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 url = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
 async-trait = "0.1"
 keyring = "4"
