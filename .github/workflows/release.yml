@@ -77,6 +77,22 @@ jobs:
           CI: true
         run: npx tauri build
 
+      - name: Normalize Windows MSI filename
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in src-tauri/target/release/bundle/msi/*.msi; do
+            base=$(basename "$f")
+            # VideoFetch_0.1.0_x64_en-US.msi -> VideoFetch_0.1.0_x64-setup.msi
+            if [[ "$base" =~ ^(.+_[^_]+)_[A-Za-z]{2}-[A-Za-z]{2}\.msi$ ]]; then
+              dest="$(dirname "$f")/${BASH_REMATCH[1]}-setup.msi"
+              mv "$f" "$dest"
+              echo "Renamed $base -> $(basename "$dest")"
+            fi
+          done
+
       - name: Upload installers
         uses: actions/upload-artifact@v5
         with:
