@@ -24,9 +24,32 @@ jobs:
           node-version: "24"
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Verify tag matches package versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          EXPECTED="${TAG#v}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected tag format: $TAG" >&2
+            exit 1
+          fi
+          PKG=$(node -p "require('./package.json').version")
+          TAURI=$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")
+          CARGO=$(node -p "require('fs').readFileSync('src-tauri/Cargo.toml','utf8').match(/^\s*version\s*=\s*\"([^\"]+)\"/m)[1]")
+          echo "tag=$TAG expected=$EXPECTED pkg=$PKG tauri=$TAURI cargo=$CARGO"
+          if [[ "$PKG" != "$EXPECTED" || "$TAURI" != "$EXPECTED" || "$CARGO" != "$EXPECTED" ]]; then
+            echo "Version mismatch: tag $TAG must match package.json, tauri.conf.json, and Cargo.toml ($EXPECTED)" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
 
       - name: Install Tauri Linux deps
         if: matrix.platform == 'ubuntu-latest'
@@ -37,6 +60,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Cache sidecar binaries
+        uses: actions/cache@v5
+        with:
+          path: src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch_sidecars.py') }}
 
       - name: Fetch sidecar binaries
         run: python scripts/fetch_sidecars.py
@@ -66,5 +95,6 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           generate_release_notes: true
           files: artifacts/**/*
