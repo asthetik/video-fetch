@@ -7,6 +7,10 @@
 
 轻量桌面视频下载器。当前支持哔哩哔哩（B 站）。
 
+<p align="center">
+  <img src="docs/images/home.png" alt="影取主页：粘贴链接、选择清晰度与分 P、下载队列" width="720" />
+</p>
+
 ## 快速安装
 
 1. 打开本仓库 [Releases](https://github.com/asthetik/videofetch/releases)
