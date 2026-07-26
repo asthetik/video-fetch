@@ -156,7 +156,7 @@ def main() -> None:
     ytdlp_out = bin_dir / f"yt-dlp-{triple}{ext}"
     ffmpeg_out = bin_dir / f"ffmpeg-{triple}{ext}"
 
-    print(f"Fetching sidecars for {triple} ({system}/{machine}) → {bin_dir}")
+    print(f"Fetching sidecars for {triple} ({system}/{machine}) -> {bin_dir}")
 
     need_ytdlp = not ytdlp_out.is_file() or ytdlp_out.stat().st_size == 0
     need_ffmpeg = not ffmpeg_out.is_file() or ffmpeg_out.stat().st_size == 0
