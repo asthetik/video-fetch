@@ -326,12 +326,18 @@ fn is_audio_only_format(f: &serde_json::Value) -> bool {
     height_none && vcodec.map(|v| v.is_empty()).unwrap_or(true)
 }
 
-/// Merge selected video format with best audio for Bilibili DASH.
+/// Build a yt-dlp `-f` selector for Bilibili DASH.
+///
+/// Prefer the exact `format_id` (usually from the resolved page, often P1), then
+/// fall back to `bestvideo+bestaudio` / `best`. Bilibili multi-P anthologies use
+/// per-cid DASH ids, so P1's id is often missing on other parts; without the
+/// `bestvideo` alternative yt-dlp errors with "Requested format is not available"
+/// and does not honor a bare `/best` fallback for missing numeric ids.
 pub fn dash_format_selector(format_id: &str) -> String {
     if format_id.contains('+') || format_id.contains('/') {
         format_id.to_string()
     } else {
-        format!("{format_id}+bestaudio/best")
+        format!("{format_id}+bestaudio/bestvideo+bestaudio/best")
     }
 }
 
@@ -903,8 +909,15 @@ mod tests {
     }
 
     #[test]
-    fn dash_format_selector_merges_bestaudio() {
-        assert_eq!(dash_format_selector("80"), "80+bestaudio/best");
+    fn dash_format_selector_merges_bestaudio_with_bestvideo_fallback() {
+        assert_eq!(
+            dash_format_selector("80"),
+            "80+bestaudio/bestvideo+bestaudio/best"
+        );
+        assert_eq!(
+            dash_format_selector("30112"),
+            "30112+bestaudio/bestvideo+bestaudio/best"
+        );
         assert_eq!(dash_format_selector("80+bestaudio"), "80+bestaudio");
         assert_eq!(dash_format_selector("bestvideo/best"), "bestvideo/best");
     }
