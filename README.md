@@ -25,7 +25,31 @@
 2. 下载对应系统的安装包（macOS `.dmg` / Windows `.msi` 或 `.exe` / Linux `.AppImage`）
 3. 安装或解压后运行
 
-未做代码签名时，系统可能提示「未验证开发者」或 SmartScreen；按系统提示允许一次即可。
+当前发布包**未做 Apple / Windows 代码签名**，各系统注意：
+
+### macOS
+
+从浏览器下载后，系统常提示「VideoFetch.app is damaged and can’t be opened」。这是 Gatekeeper 隔离未签名应用，不是安装包损坏。
+
+把 App 拖到「应用程序」后，在终端执行：
+
+```bash
+xattr -cr /Applications/VideoFetch.app
+```
+
+然后再打开即可。若 App 不在该路径，把上面路径换成实际位置。
+
+### Windows
+
+可能出现 SmartScreen「未知发布者」提示，选择「仍要运行」即可。
+
+### Linux
+
+`.AppImage` 一般可直接运行；若无执行权限：
+
+```bash
+chmod +x VideoFetch_*.AppImage
+```
 
 ## 快速下载
 
