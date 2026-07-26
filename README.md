@@ -1,5 +1,10 @@
 # 影取（VideoFetch）
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![CI](https://github.com/asthetik/videofetch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asthetik/videofetch/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/asthetik/videofetch)](https://github.com/asthetik/videofetch/releases)
+[![Downloads](https://img.shields.io/github/downloads/asthetik/videofetch/total)](https://github.com/asthetik/videofetch/releases)
+
 轻量桌面视频下载器。当前支持哔哩哔哩（B 站）。
 
 ## 快速安装
