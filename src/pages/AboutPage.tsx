@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import packageJson from "../../package.json";
 
 const REPO_URL = "https://github.com/asthetik/videofetch";
 const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
 const THIRD_PARTY_URL = `${REPO_URL}/blob/main/THIRD_PARTY.md`;
-const FALLBACK_VERSION = "0.1.0";
+/** Same source as release bumps (`package.json`); Tauri runtime may refine via getVersion(). */
+const PKG_VERSION = packageJson.version;
 
 async function openExternal(url: string) {
   try {
@@ -16,12 +18,12 @@ async function openExternal(url: string) {
 }
 
 export function AboutPage() {
-  const [version, setVersion] = useState(FALLBACK_VERSION);
+  const [version, setVersion] = useState(PKG_VERSION);
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
-      .catch(() => setVersion(FALLBACK_VERSION));
+      .catch(() => setVersion(PKG_VERSION));
   }, []);
 
   return (
