@@ -12,6 +12,10 @@
 轻量桌面视频下载器。当前支持哔哩哔哩（B 站）。
 
 <p align="center">
+  <img src="docs/images/home-multipage.png" alt="影取主页：多 P 视频勾选分 P 后下载" width="720" />
+</p>
+
+<p align="center">
   <img src="docs/images/home.png" alt="影取主页：粘贴链接、选择清晰度、下载队列" width="720" />
 </p>
 
