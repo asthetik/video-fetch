@@ -1,0 +1,151 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  DeleteConfirmDialog,
+  type DeleteChoice,
+} from "../components/DeleteConfirmDialog";
+import { api } from "../lib/tauri";
+import type { DownloadJob, JobStatus } from "../types";
+
+const STATUS_LABEL: Record<JobStatus, string> = {
+  pending: "等待中",
+  running: "下载中",
+  done: "完成",
+  failed: "失败",
+};
+
+function parentDir(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  return idx > 0 ? filePath.slice(0, idx) : filePath;
+}
+
+function jobLabel(job: DownloadJob): string {
+  return job.page_index > 1 ? `${job.title} · P${job.page_index}` : job.title;
+}
+
+export function HistoryPage() {
+  const [jobs, setJobs] = useState<DownloadJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
+
+  const loadJobs = useCallback(async () => {
+    const list = await api.listJobs();
+    setJobs(list.filter((j) => j.status === "done" || j.status === "failed"));
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void loadJobs();
+  }, [loadJobs]);
+
+  async function handleOpenFile(job: DownloadJob) {
+    if (!job.output_path) {
+      return;
+    }
+    await api.openPath(job.output_path);
+  }
+
+  async function handleOpenFolder(job: DownloadJob) {
+    if (!job.output_path) {
+      return;
+    }
+    await api.openPath(parentDir(job.output_path));
+  }
+
+  async function applyDelete(job: DownloadJob, choice: DeleteChoice) {
+    setPendingDelete(null);
+    if (choice === "cancel") {
+      return;
+    }
+
+    setActionError(null);
+    try {
+      await api.deleteJob(job.id, choice === "record_and_file");
+      setJobs((prev) => prev.filter((j) => j.id !== job.id));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+      await loadJobs();
+    }
+  }
+
+  return (
+    <div className="history-page">
+      <h2 className="page-title">下载历史</h2>
+      <p className="page-desc">已完成或失败的下载任务</p>
+
+      {loading && <p className="queue-empty">加载中…</p>}
+      {actionError && <p className="url-hint error">{actionError}</p>}
+      {!loading && jobs.length === 0 && (
+        <p className="queue-empty">暂无历史记录</p>
+      )}
+
+      {!loading && jobs.length > 0 && (
+        <ul className="queue-list">
+          {jobs.map((job) => (
+            <li key={job.id} className="queue-item">
+              <div className="queue-item-header">
+                <p className="queue-title">
+                  {job.title}
+                  {job.page_index > 1 ? ` · P${job.page_index}` : ""}
+                </p>
+                <span className={`queue-status ${job.status}`}>
+                  {STATUS_LABEL[job.status]}
+                </span>
+              </div>
+
+              {job.output_path && (
+                <p className="history-path">{job.output_path}</p>
+              )}
+              {job.error && <p className="queue-error">{job.error}</p>}
+
+              <div className="queue-actions">
+                {job.status === "done" && job.output_path && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleOpenFile(job)}
+                    >
+                      打开文件
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleOpenFolder(job)}
+                    >
+                      打开文件夹
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger"
+                  onClick={() => {
+                    setActionError(null);
+                    setPendingDelete(job);
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        jobTitle={pendingDelete ? jobLabel(pendingDelete) : ""}
+        filePath={pendingDelete?.output_path}
+        onChoose={(choice) => {
+          if (pendingDelete) {
+            void applyDelete(pendingDelete, choice);
+          } else {
+            setPendingDelete(null);
+          }
+        }}
+      />
+    </div>
+  );
+}
