@@ -158,10 +158,25 @@ def main() -> None:
 
     print(f"Fetching sidecars for {triple} ({system}/{machine}) → {bin_dir}")
 
+    need_ytdlp = not ytdlp_out.is_file() or ytdlp_out.stat().st_size == 0
+    need_ffmpeg = not ffmpeg_out.is_file() or ffmpeg_out.stat().st_size == 0
+
+    if not need_ytdlp and not need_ffmpeg:
+        print("Sidecars already present, skipping download:")
+        for p in (ytdlp_out, ffmpeg_out):
+            print(f"  {p} ({p.stat().st_size} bytes)")
+        return
+
     with tempfile.TemporaryDirectory(prefix="videofetch-sidecars-") as tmp_s:
         tmp = Path(tmp_s)
-        fetch_ytdlp(system, ytdlp_out)
-        fetch_ffmpeg(system, machine, ffmpeg_out, tmp)
+        if need_ytdlp:
+            fetch_ytdlp(system, ytdlp_out)
+        else:
+            print(f"Keeping cached yt-dlp: {ytdlp_out}")
+        if need_ffmpeg:
+            fetch_ffmpeg(system, machine, ffmpeg_out, tmp)
+        else:
+            print(f"Keeping cached ffmpeg: {ffmpeg_out}")
 
     print("Sidecars ready:")
     for p in (ytdlp_out, ffmpeg_out):
