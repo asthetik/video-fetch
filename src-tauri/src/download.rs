@@ -1264,10 +1264,12 @@ mod tests {
     #[tokio::test]
     async fn raising_concurrency_allows_parallel_downloads() {
         let dir = tempfile::tempdir().unwrap();
+        // Hold downloads long enough that CI scheduling still leaves a window
+        // where both jobs are Running after concurrency is raised.
         let (manager, _rx) = test_manager(
             dir.path(),
             &dir.path().join("work"),
-            Arc::new(MockDownloader::slow_success(300)),
+            Arc::new(MockDownloader::slow_success(2_000)),
         );
 
         let mut a = sample_job("job-conc-a");
@@ -1278,25 +1280,34 @@ mod tests {
         manager.enqueue(b, false).unwrap();
 
         // Default concurrency is 1 — only one should be running.
-        sleep(Duration::from_millis(80)).await;
-        let jobs = manager.list().unwrap();
-        let running = jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Running)
-            .count();
-        let pending = jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Pending)
-            .count();
-        assert_eq!(running, 1);
-        assert_eq!(pending, 1);
+        let mut saw_one_running = false;
+        for _ in 0..100 {
+            let jobs = manager.list().unwrap();
+            let running = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
+            let pending = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Pending)
+                .count();
+            if running == 1 && pending == 1 {
+                saw_one_running = true;
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            saw_one_running,
+            "expected one running and one pending under concurrency 1"
+        );
 
         let mut settings = test_settings(dir.path());
         settings.concurrency = 2;
         manager.update_settings(settings).unwrap();
 
         // After raising the limit, the waiting job should start.
-        for _ in 0..50 {
+        for _ in 0..150 {
             let jobs = manager.list().unwrap();
             let running = jobs
                 .iter()

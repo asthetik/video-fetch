@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { AuthStatus } from "./components/AuthStatus";
+import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
+import { AboutPage } from "./pages/AboutPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import "./styles.css";
 
 type Page = "home" | "history" | "settings" | "about";
@@ -12,7 +15,7 @@ const NAV_ITEMS: { id: Page; label: string }[] = [
   { id: "about", label: "关于" },
 ];
 
-export default function App() {
+function App() {
   const [page, setPage] = useState<Page>("home");
 
   return (
@@ -37,16 +40,19 @@ export default function App() {
       </header>
 
       <main className="app-main">
+        {/* Keep home mounted so pasted URL and resolved video survive tab switches. */}
         <div
           className={page === "home" ? undefined : "page-hidden"}
           aria-hidden={page !== "home"}
         >
           <HomePage />
         </div>
-        {page === "history" && <p className="page-placeholder">历史（即将接入）</p>}
-        {page === "settings" && <p className="page-placeholder">设置（即将接入）</p>}
-        {page === "about" && <p className="page-placeholder">关于（即将接入）</p>}
+        {page === "history" && <HistoryPage />}
+        {page === "settings" && <SettingsPage />}
+        {page === "about" && <AboutPage />}
       </main>
     </div>
   );
 }
+
+export default App;

@@ -18,8 +18,8 @@
 
 需要大会员清晰度时，可在应用内登录 B 站或导入 cookies。
 
-安装包**内置 yt-dlp / ffmpeg**，一般无需另行安装。第三方许可证见 `THIRD_PARTY.md`（随后续提交加入）。
+安装包**内置 yt-dlp / ffmpeg**，一般无需另行安装。第三方许可证见 [`THIRD_PARTY.md`](./THIRD_PARTY.md)。
 
 ## 许可证
 
-Apache-2.0。详见 `LICENSE`。
+Apache-2.0。详见 [`LICENSE`](./LICENSE)。
