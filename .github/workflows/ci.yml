@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Cache sidecar binaries
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: src-tauri/binaries
           key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch_sidecars.py') }}
