@@ -234,7 +234,6 @@ pub async fn resolve_url(
                 for format in &mut meta.formats {
                     format.requires_login = false;
                 }
-                // Rebuild multi-P height ladder for caches written before vh* prefs.
                 meta.formats = ytdlp::finalize_formats_for_pages(
                     std::mem::take(&mut meta.formats),
                     meta.pages.len(),
