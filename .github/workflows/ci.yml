@@ -25,6 +25,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - name: Install Tauri Linux deps
         run: |
           sudo apt-get update
@@ -32,6 +35,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Cache sidecar binaries
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch_sidecars.py') }}
       - name: Fetch sidecar binaries
         run: python scripts/fetch_sidecars.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
