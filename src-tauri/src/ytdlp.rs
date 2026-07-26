@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -16,6 +17,69 @@ pub struct YtDlpConfig {
     pub ffmpeg_path: Option<PathBuf>,
 }
 
+/// Structured download progress from yt-dlp (percent is 0.0..=100.0).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProgressUpdate {
+    pub percent: f64,
+    pub speed: Option<f64>,
+    pub eta: Option<u64>,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YtDlpProgressJson {
+    status: Option<String>,
+    downloaded_bytes: Option<f64>,
+    total_bytes: Option<f64>,
+    total_bytes_estimate: Option<f64>,
+    speed: Option<f64>,
+    eta: Option<f64>,
+    #[serde(rename = "_percent")]
+    percent: Option<f64>,
+}
+
+fn bytes_opt(v: Option<f64>) -> Option<u64> {
+    v.filter(|n| n.is_finite() && *n >= 0.0).map(|n| n as u64)
+}
+
+fn parse_progress_json(line: &str) -> Option<ProgressUpdate> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let parsed: YtDlpProgressJson = serde_json::from_str(trimmed).ok()?;
+    let downloaded = bytes_opt(parsed.downloaded_bytes);
+    let total = bytes_opt(parsed.total_bytes).or_else(|| bytes_opt(parsed.total_bytes_estimate));
+    let speed = parsed.speed.filter(|n| n.is_finite() && *n > 0.0);
+    let eta = parsed
+        .eta
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| n.round() as u64);
+
+    let percent = if parsed.status.as_deref() == Some("finished") {
+        100.0
+    } else if let (Some(done), Some(all)) = (downloaded, total) {
+        if all > 0 {
+            ((done as f64) * 100.0 / (all as f64)).clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    } else {
+        let p = parsed.percent?;
+        p.clamp(0.0, 100.0)
+    };
+
+    Some(ProgressUpdate {
+        percent,
+        speed,
+        eta,
+        downloaded_bytes: downloaded,
+        total_bytes: total,
+    })
+}
+
+/// Legacy `[download] 45.3% of …` text progress (percent only).
 pub fn parse_progress_line(line: &str) -> Option<f64> {
     let line = line.trim();
     // yt-dlp ≥2024 often prints `[download] …%` progress on stdout when piped.
@@ -28,10 +92,21 @@ pub fn parse_progress_line(line: &str) -> Option<f64> {
     })
 }
 
+/// Prefer JSON progress lines; fall back to legacy text percent parsing.
+pub fn parse_progress_update(line: &str) -> Option<ProgressUpdate> {
+    if let Some(update) = parse_progress_json(line) {
+        return Some(update);
+    }
+    parse_progress_line(line).map(|percent| ProgressUpdate {
+        percent,
+        ..Default::default()
+    })
+}
+
 /// True when a stdout line is a progress/status line rather than `--print` filepath output.
 fn is_ytdlp_status_line(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.starts_with('[') || parse_progress_line(trimmed).is_some()
+    trimmed.starts_with('[') || trimmed.starts_with('{')
 }
 
 #[cfg(test)]
@@ -372,7 +447,7 @@ pub struct DownloadRequest<'a> {
 /// Spawn yt-dlp to download a single video and stream progress from stdout/stderr.
 pub async fn download(
     req: DownloadRequest<'_>,
-    on_progress: impl Fn(f64) + Send,
+    on_progress: impl Fn(ProgressUpdate) + Send,
 ) -> AppResult<PathBuf> {
     let DownloadRequest {
         cfg,
@@ -408,6 +483,9 @@ pub async fn download(
         .arg("--no-playlist")
         .arg("--newline")
         .arg("--progress")
+        // Emit one JSON object per progress tick (public fields under `progress`).
+        .arg("--progress-template")
+        .arg("download:%(progress)j")
         .arg("--print")
         .arg("after_move:filepath");
 
@@ -459,9 +537,9 @@ pub async fn download(
             line = stdout_lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(line)) => {
-                        // Recent yt-dlp prints download progress on stdout when piped.
-                        if let Some(p) = parse_progress_line(&line) {
-                            on_progress(p);
+                        // JSON template + legacy text progress both appear on stdout when piped.
+                        if let Some(update) = parse_progress_update(&line) {
+                            on_progress(update);
                         } else if !is_ytdlp_status_line(&line) {
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
@@ -479,8 +557,12 @@ pub async fn download(
             line = stderr_lines.next_line(), if !stderr_done => {
                 match line {
                     Ok(Some(line)) => {
-                        if let Some(p) = parse_progress_line(&line) {
-                            on_progress(p);
+                        // Legacy only: avoid double-firing when JSON also lands on stderr.
+                        if let Some(percent) = parse_progress_line(&line) {
+                            on_progress(ProgressUpdate {
+                                percent,
+                                ..Default::default()
+                            });
                         }
                         if stderr_tail.len() > 8192 {
                             let split = stderr_tail.len().saturating_sub(4096);
@@ -557,6 +639,13 @@ mod tests {
     fn parses_percent_progress() {
         let line = "[download]  45.3% of  10.00MiB at  1.00MiB/s ETA 00:05";
         assert_eq!(parse_progress_line(line), Some(45.3));
+        assert_eq!(
+            parse_progress_update(line),
+            Some(ProgressUpdate {
+                percent: 45.3,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -568,6 +657,54 @@ mod tests {
     #[test]
     fn ignores_non_download_lines() {
         assert_eq!(parse_progress_line("[info] downloading"), None);
+        assert_eq!(parse_progress_update("[info] downloading"), None);
+    }
+
+    #[test]
+    fn parses_json_progress() {
+        let line = r#"{"status":"downloading","downloaded_bytes":4530000,"total_bytes":10000000,"speed":1048576.0,"eta":5.2}"#;
+        let update = parse_progress_update(line).expect("json progress");
+        assert!((update.percent - 45.3).abs() < 0.01);
+        assert_eq!(update.speed, Some(1048576.0));
+        assert_eq!(update.eta, Some(5));
+        assert_eq!(update.downloaded_bytes, Some(4_530_000));
+        assert_eq!(update.total_bytes, Some(10_000_000));
+    }
+
+    #[test]
+    fn parses_finished_json_progress_as_100() {
+        let line = r#"{"status":"finished","downloaded_bytes":1000,"total_bytes":1000,"speed":null,"eta":null}"#;
+        let update = parse_progress_update(line).expect("finished");
+        assert_eq!(update.percent, 100.0);
+        assert_eq!(update.speed, None);
+        assert_eq!(update.eta, None);
+    }
+
+    #[test]
+    fn parses_json_progress_with_total_bytes_estimate() {
+        let line = r#"{"status":"downloading","downloaded_bytes":2500,"total_bytes":null,"total_bytes_estimate":10000,"speed":100.0,"eta":75}"#;
+        let update = parse_progress_update(line).expect("estimate");
+        assert_eq!(update.percent, 25.0);
+        assert_eq!(update.total_bytes, Some(10_000));
+        assert_eq!(update.eta, Some(75));
+    }
+
+    #[test]
+    fn parses_json_progress_with_percent_only() {
+        let line = r#"{"status":"downloading","_percent":12.5,"speed":null,"eta":null}"#;
+        let update = parse_progress_update(line).expect("_percent");
+        assert_eq!(update.percent, 12.5);
+        assert_eq!(update.downloaded_bytes, None);
+        assert_eq!(update.total_bytes, None);
+    }
+
+    #[test]
+    fn ignores_malformed_json_progress() {
+        assert_eq!(parse_progress_update("{not-json"), None);
+        assert_eq!(
+            parse_progress_update(r#"{"status":"downloading","speed":1.0}"#),
+            None
+        );
     }
 
     #[test]
@@ -577,6 +714,9 @@ mod tests {
         ));
         assert!(is_ytdlp_status_line(
             "[Merger] Merging formats into \"a.mp4\""
+        ));
+        assert!(is_ytdlp_status_line(
+            r#"{"status":"downloading","downloaded_bytes":1,"total_bytes":10}"#
         ));
         assert!(!is_ytdlp_status_line("/tmp/video.mp4"));
     }

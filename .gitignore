@@ -32,3 +32,4 @@ src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 
 .superpowers/
+docs/superpowers/

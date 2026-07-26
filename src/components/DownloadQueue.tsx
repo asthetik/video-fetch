@@ -13,6 +13,10 @@ interface DownloadProgressPayload {
   status: JobStatus;
   error?: string | null;
   output_path?: string | null;
+  speed?: number | null;
+  eta?: number | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
 }
 
 const STATUS_LABEL: Record<JobStatus, string> = {
@@ -22,13 +26,83 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   failed: "失败",
 };
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const digits = unit === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
+function formatSpeed(bps?: number | null): string | null {
+  if (bps == null || !Number.isFinite(bps) || bps <= 0) {
+    return null;
+  }
+  return `${formatBytes(bps)}/s`;
+}
+
+function formatEta(seconds?: number | null): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function progressMeta(job: DownloadJob): string | null {
+  if (job.status !== "running") {
+    return null;
+  }
+  const parts: string[] = [];
+  const speed = formatSpeed(job.speed);
+  if (speed) {
+    parts.push(speed);
+  }
+  const eta = formatEta(job.eta);
+  if (eta) {
+    parts.push(`剩余 ${eta}`);
+  }
+  if (
+    job.downloaded_bytes != null &&
+    job.total_bytes != null &&
+    job.total_bytes > 0
+  ) {
+    parts.push(
+      `${formatBytes(job.downloaded_bytes)} / ${formatBytes(job.total_bytes)}`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function mergeJob(existing: DownloadJob, patch: DownloadProgressPayload): DownloadJob {
+  const terminal = patch.status === "done" || patch.status === "failed";
   return {
     ...existing,
     progress: patch.progress,
     status: patch.status,
     error: patch.error ?? existing.error,
     output_path: patch.output_path ?? existing.output_path,
+    speed: terminal ? null : (patch.speed ?? existing.speed ?? null),
+    eta: terminal ? null : (patch.eta ?? existing.eta ?? null),
+    downloaded_bytes: terminal
+      ? null
+      : (patch.downloaded_bytes ?? existing.downloaded_bytes ?? null),
+    total_bytes: terminal
+      ? null
+      : (patch.total_bytes ?? existing.total_bytes ?? null),
   };
 }
 
@@ -153,73 +227,78 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
       )}
       {!loading && displayJobs.length > 0 && (
         <ul className="queue-list">
-          {displayJobs.map((job) => (
-            <li key={job.id} className="queue-item">
-              <div className="queue-item-header">
-                <p className="queue-title">
-                  {job.title}
-                  {job.page_index > 1 ? ` · P${job.page_index}` : ""}
-                </p>
-                <span className={`queue-status ${job.status}`}>
-                  {STATUS_LABEL[job.status]}
-                  {(job.status === "running" || job.status === "pending") &&
-                    job.status === "running" &&
-                    ` ${Math.round(job.progress * 100)}%`}
-                </span>
-              </div>
-
-              {(job.status === "running" || job.status === "pending") && (
-                <div className="progress-bar">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${Math.round(job.progress * 100)}%` }}
-                  />
+          {displayJobs.map((job) => {
+            const meta = progressMeta(job);
+            return (
+              <li key={job.id} className="queue-item">
+                <div className="queue-item-header">
+                  <p className="queue-title">
+                    {job.title}
+                    {job.page_index > 1 ? ` · P${job.page_index}` : ""}
+                  </p>
+                  <span className={`queue-status ${job.status}`}>
+                    {STATUS_LABEL[job.status]}
+                    {(job.status === "running" || job.status === "pending") &&
+                      job.status === "running" &&
+                      ` ${Math.round(job.progress * 100)}%`}
+                  </span>
                 </div>
-              )}
 
-              {job.error && <p className="queue-error">{job.error}</p>}
+                {(job.status === "running" || job.status === "pending") && (
+                  <div className="progress-bar">
+                    <div
+                      className="progress-fill"
+                      style={{ width: `${Math.round(job.progress * 100)}%` }}
+                    />
+                  </div>
+                )}
 
-              <div className="queue-actions">
-                {(job.status === "pending" || job.status === "running") && (
+                {meta && <p className="queue-progress-meta">{meta}</p>}
+
+                {job.error && <p className="queue-error">{job.error}</p>}
+
+                <div className="queue-actions">
+                  {(job.status === "pending" || job.status === "running") && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleCancel(job.id)}
+                    >
+                      取消
+                    </button>
+                  )}
+                  {job.status === "failed" && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleRetry(job.id)}
+                    >
+                      重试
+                    </button>
+                  )}
+                  {job.status === "done" && job.output_path && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleOpenFolder(job)}
+                    >
+                      打开文件夹
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className="btn btn-sm"
-                    onClick={() => void handleCancel(job.id)}
+                    className="btn btn-sm btn-danger"
+                    onClick={() => {
+                      setActionError(null);
+                      setPendingDelete(job);
+                    }}
                   >
-                    取消
+                    删除
                   </button>
-                )}
-                {job.status === "failed" && (
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => void handleRetry(job.id)}
-                  >
-                    重试
-                  </button>
-                )}
-                {job.status === "done" && job.output_path && (
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => void handleOpenFolder(job)}
-                  >
-                    打开文件夹
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn btn-sm btn-danger"
-                  onClick={() => {
-                    setActionError(null);
-                    setPendingDelete(job);
-                  }}
-                >
-                  删除
-                </button>
-              </div>
-            </li>
-          ))}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
 

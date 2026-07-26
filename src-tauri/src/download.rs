@@ -18,7 +18,7 @@ use crate::models::{
     AppSettings, DownloadConflict, DownloadJob, JobConflict, JobStatus, VideoMeta,
 };
 use crate::naming;
-use crate::ytdlp::{self, YtDlpConfig, kill_download};
+use crate::ytdlp::{self, ProgressUpdate, YtDlpConfig, kill_download};
 
 pub const PROGRESS_EVENT: &str = "download://progress";
 
@@ -31,6 +31,14 @@ pub struct DownloadProgressEvent {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
 }
 
 pub trait ProgressEmitter: Send + Sync {
@@ -65,7 +73,7 @@ pub trait Downloader: Send + Sync {
     async fn run(
         &self,
         job: &DownloadJob,
-        on_progress: Box<dyn Fn(f64) + Send>,
+        on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
     ) -> Result<PathBuf, String>;
 }
 
@@ -97,7 +105,7 @@ impl Downloader for YtDlpDownloader {
     async fn run(
         &self,
         job: &DownloadJob,
-        on_progress: Box<dyn Fn(f64) + Send>,
+        on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
     ) -> Result<PathBuf, String> {
         let work = fsutil::work_dir_for(&self.work_root, &job.id);
         if let Err(e) = fs::create_dir_all(&work) {
@@ -481,11 +489,11 @@ impl DownloadManager {
         let progress = Arc::clone(&self.progress);
         let on_progress = {
             let job_id = job_id.clone();
-            Box::new(move |p: f64| {
+            Box::new(move |update: ProgressUpdate| {
                 if let Ok(db) = db.lock()
                     && let Ok(mut current) = db.get_job(&job_id)
                 {
-                    current.progress = p / 100.0;
+                    current.progress = update.percent / 100.0;
                     current.status = JobStatus::Running;
                     let _ = db.update_job(&current);
                     progress.emit_progress(DownloadProgressEvent {
@@ -494,9 +502,13 @@ impl DownloadManager {
                         status: current.status.clone(),
                         error: current.error.clone(),
                         output_path: current.output_path.clone(),
+                        speed: update.speed,
+                        eta: update.eta,
+                        downloaded_bytes: update.downloaded_bytes,
+                        total_bytes: update.total_bytes,
                     });
                 }
-            }) as Box<dyn Fn(f64) + Send>
+            }) as Box<dyn Fn(ProgressUpdate) + Send>
         };
 
         let result = self.downloader.run(&running, on_progress).await;
@@ -584,6 +596,10 @@ impl DownloadManager {
             status: job.status.clone(),
             error: job.error.clone(),
             output_path: job.output_path.clone(),
+            speed: None,
+            eta: None,
+            downloaded_bytes: None,
+            total_bytes: None,
         });
     }
 
@@ -676,6 +692,8 @@ mod tests {
         delay_ms: u64,
         cancelled: Arc<Mutex<HashMap<String, bool>>>,
         reported_progress: Arc<Mutex<Option<f64>>>,
+        /// When set, emitted instead of a percent-only update.
+        rich_progress: Option<ProgressUpdate>,
     }
 
     impl MockDownloader {
@@ -686,6 +704,18 @@ mod tests {
                 delay_ms: 0,
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
+                rich_progress: None,
+            }
+        }
+
+        fn success_with_update(update: ProgressUpdate) -> Self {
+            Self {
+                progress: update.percent,
+                succeed: true,
+                delay_ms: 0,
+                cancelled: Arc::new(Mutex::new(HashMap::new())),
+                reported_progress: Arc::new(Mutex::new(None)),
+                rich_progress: Some(update),
             }
         }
 
@@ -696,6 +726,7 @@ mod tests {
                 delay_ms: 0,
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
+                rich_progress: None,
             }
         }
 
@@ -706,6 +737,7 @@ mod tests {
                 delay_ms,
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
+                rich_progress: None,
             }
         }
 
@@ -721,7 +753,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
-            on_progress: Box<dyn Fn(f64) + Send>,
+            on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             if self.delay_ms > 0 {
                 for _ in 0..self.delay_ms / 10 {
@@ -738,10 +770,15 @@ mod tests {
                 }
             }
 
-            if self.progress > 0.0 {
-                on_progress(self.progress);
+            if self.progress > 0.0 || self.rich_progress.is_some() {
+                let update = self.rich_progress.clone().unwrap_or(ProgressUpdate {
+                    percent: self.progress,
+                    ..Default::default()
+                });
+                let percent = update.percent;
+                on_progress(update);
                 if let Ok(mut slot) = self.reported_progress.lock() {
-                    *slot = Some(self.progress);
+                    *slot = Some(percent);
                 }
             }
 
@@ -764,7 +801,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
-            _on_progress: Box<dyn Fn(f64) + Send>,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             let work = fsutil::work_dir_for(&self.work_root, &job.id);
             std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -918,6 +955,56 @@ mod tests {
         assert!((done.progress - 1.0).abs() < f64::EPSILON);
         assert!(done.output_path.is_some());
         assert!(saw_running || saw_half);
+    }
+
+    #[tokio::test]
+    async fn enqueue_emits_structured_progress_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        let (manager, mut rx) = test_manager(
+            dir.path(),
+            &work_root,
+            Arc::new(MockDownloader::success_with_update(ProgressUpdate {
+                percent: 40.0,
+                speed: Some(1_048_576.0),
+                eta: Some(12),
+                downloaded_bytes: Some(4_000_000),
+                total_bytes: Some(10_000_000),
+            })),
+        );
+        let job = manager
+            .enqueue(sample_job("job-rich-progress"), false)
+            .unwrap();
+
+        let mut saw_structured = false;
+        for _ in 0..100 {
+            while let Ok(event) = rx.try_recv() {
+                if event.id == job.id
+                    && event.status == JobStatus::Running
+                    && (event.progress - 0.4).abs() < f64::EPSILON
+                    && event.speed == Some(1_048_576.0)
+                    && event.eta == Some(12)
+                    && event.downloaded_bytes == Some(4_000_000)
+                    && event.total_bytes == Some(10_000_000)
+                {
+                    saw_structured = true;
+                }
+            }
+            if manager
+                .list()
+                .unwrap()
+                .iter()
+                .any(|j| j.id == job.id && j.status == JobStatus::Done)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            saw_structured,
+            "expected DownloadProgressEvent with speed/eta/bytes"
+        );
     }
 
     #[tokio::test]
@@ -1180,7 +1267,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
-                _on_progress: Box<dyn Fn(f64) + Send>,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 self.called.store(true, Ordering::SeqCst);
                 Err("downloader should not run".into())
@@ -1228,7 +1315,7 @@ mod tests {
                 async fn run(
                     &self,
                     _job: &DownloadJob,
-                    _on_progress: Box<dyn Fn(f64) + Send>,
+                    _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
                 ) -> Result<PathBuf, String> {
                     if self
                         .attempt
