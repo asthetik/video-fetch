@@ -77,11 +77,16 @@ jobs:
           CI: true
         run: npx tauri build
 
-      - name: Upload bundles
+      - name: Upload installers
         uses: actions/upload-artifact@v5
         with:
           name: bundles-${{ matrix.platform }}
-          path: src-tauri/target/release/bundle/**/*
+          path: |
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*-setup.exe
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.deb
           if-no-files-found: error
 
   release:
@@ -97,4 +102,9 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.msi
+            artifacts/**/*-setup.exe
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
