@@ -1,5 +1,9 @@
 # 影取（VideoFetch）
 
+<p align="center">
+  <img src="docs/images/icon.png" alt="影取图标" width="128" />
+</p>
+
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![CI](https://github.com/asthetik/videofetch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asthetik/videofetch/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/asthetik/videofetch)](https://github.com/asthetik/videofetch/releases)
