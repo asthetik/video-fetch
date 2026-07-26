@@ -29,7 +29,7 @@ url = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
 async-trait = "0.1"
-keyring = "3"
+keyring = "4"
 tauri-plugin-dialog = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 which = "8"
