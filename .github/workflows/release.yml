@@ -17,9 +17,9 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -57,12 +57,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Cache sidecar binaries
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: src-tauri/binaries
           key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch_sidecars.py') }}
