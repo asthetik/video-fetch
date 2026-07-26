@@ -32,7 +32,7 @@ async-trait = "0.1"
 keyring = "3"
 tauri-plugin-dialog = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-which = "7"
+which = "8"
 tauri-plugin-shell = "2"
 
 [dev-dependencies]
