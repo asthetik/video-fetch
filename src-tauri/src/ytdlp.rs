@@ -152,19 +152,19 @@ fn map_video_meta(v: &serde_json::Value, has_cookies: bool) -> AppResult<VideoMe
 
     let pages = parse_pages(v, &title, &id);
 
-    // Playlist / multi-P JSON often has empty top-level formats; use first entry.
-    let media_source = media_source_value(v);
     let mut thumbnail = v
         .get("thumbnail")
         .and_then(|x| x.as_str())
         .map(str::to_string);
     if thumbnail.is_none() {
+        let media_source = media_source_value(v);
         thumbnail = media_source
             .get("thumbnail")
             .and_then(|x| x.as_str())
             .map(str::to_string);
     }
-    let formats = finalize_formats_for_pages(parse_formats(media_source, has_cookies), pages.len());
+    let formats =
+        finalize_formats_for_pages(collect_formats_from_playlist(v, has_cookies), pages.len());
 
     Ok(VideoMeta {
         id,
@@ -176,6 +176,21 @@ fn map_video_meta(v: &serde_json::Value, has_cookies: bool) -> AppResult<VideoMe
         formats,
         platform,
     })
+}
+
+/// Gather video formats from the playlist JSON: top-level plus every entry that
+/// already carries a `formats` list (not only the first page).
+fn collect_formats_from_playlist(v: &serde_json::Value, has_cookies: bool) -> Vec<FormatOption> {
+    let mut out = parse_formats(v, has_cookies);
+    if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
+        for entry in entries {
+            out.extend(parse_formats(entry, has_cookies));
+        }
+    }
+    if out.is_empty() {
+        out = parse_formats(media_source_value(v), has_cookies);
+    }
+    out
 }
 
 /// Prefer top-level formats; fall back to the first playlist entry when empty.
@@ -329,8 +344,12 @@ fn is_audio_only_format(f: &serde_json::Value) -> bool {
 /// Prefix for multi-P height preferences (`vh1080` → max 1080p per part).
 pub const HEIGHT_FORMAT_PREFIX: &str = "vh";
 
-/// Standard heights offered for multi-P even when P1's source is lower.
-const MULTI_PAGE_QUALITY_LADDER: &[u32] = &[1080, 720, 480, 360];
+/// Cap on pages probed when the anthology is large.
+const MULTI_PAGE_FORMAT_SAMPLES: usize = 8;
+
+/// Probe every page when the anthology has at most this many parts (avoids gaps
+/// like skipping P8 when count is 9 and the sample cap is 8).
+const MULTI_PAGE_FULL_PROBE_AT_MOST: usize = 16;
 
 pub fn parse_height_format_id(format_id: &str) -> Option<u32> {
     format_id
@@ -340,9 +359,8 @@ pub fn parse_height_format_id(format_id: &str) -> Option<u32> {
         .filter(|h| *h > 0)
 }
 
-/// Multi-P anthologies often diverge in max resolution across parts. Expose a
-/// height ladder (not P1 DASH ids) so later parts with 1080p remain selectable
-/// when P1 only has 480p. Single-P keeps detailed codec/bitrate options.
+/// Multi-P: collapse to unique heights seen in `formats` (one `vh{N}` option each).
+/// Single-P: return `formats` unchanged (keep codec/bitrate detail).
 pub fn finalize_formats_for_pages(
     formats: Vec<FormatOption>,
     page_count: usize,
@@ -350,29 +368,94 @@ pub fn finalize_formats_for_pages(
     if page_count <= 1 {
         return formats;
     }
-    multi_page_quality_ladder(&formats)
+    multi_page_quality_from_observed(&formats)
 }
 
-fn multi_page_quality_ladder(observed: &[FormatOption]) -> Vec<FormatOption> {
+fn distinct_heights(formats: &[FormatOption]) -> Vec<u32> {
     use std::collections::BTreeSet;
+    formats
+        .iter()
+        .filter_map(|f| f.height.filter(|h| *h > 0))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 
-    let mut heights: BTreeSet<u32> = observed.iter().filter_map(|f| f.height).collect();
-    for &h in MULTI_PAGE_QUALITY_LADDER {
-        heights.insert(h);
+fn multi_page_quality_from_observed(observed: &[FormatOption]) -> Vec<FormatOption> {
+    use std::collections::BTreeMap;
+
+    // height -> max fps (label only)
+    let mut by_height: BTreeMap<u32, Option<u32>> = BTreeMap::new();
+    for f in observed {
+        let Some(h) = f.height.filter(|h| *h > 0) else {
+            continue;
+        };
+        let entry = by_height.entry(h).or_insert(None);
+        *entry = match (*entry, f.fps) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
 
-    heights
+    by_height
         .into_iter()
         .rev()
-        .map(|h| FormatOption {
+        .map(|(h, fps)| FormatOption {
             format_id: format!("{HEIGHT_FORMAT_PREFIX}{h}"),
-            label: format!("{h}p"),
+            label: resolution_label(Some(h), fps),
             height: Some(h),
-            fps: None,
+            fps,
             tbr: None,
             requires_login: false,
         })
         .collect()
+}
+
+/// 1-based page indexes to probe for formats.
+///
+/// Returns every page when `page_count <= max_samples`; otherwise first, last,
+/// and evenly spaced intermediates (at most `max_samples` indexes).
+pub fn sample_page_indices(page_count: u32, max_samples: usize) -> Vec<u32> {
+    if page_count == 0 || max_samples == 0 {
+        return Vec::new();
+    }
+    if page_count as usize <= max_samples {
+        return (1..=page_count).collect();
+    }
+    use std::collections::BTreeSet;
+    let mut set = BTreeSet::new();
+    let last_i = (max_samples - 1) as u32;
+    for i in 0..max_samples {
+        let idx = 1 + (i as u32) * (page_count - 1) / last_i;
+        set.insert(idx.clamp(1, page_count));
+    }
+    set.into_iter().collect()
+}
+
+fn page_url_for_index(base: &str, page_index: u32) -> String {
+    let Ok(mut u) = url::Url::parse(base) else {
+        return if page_index <= 1 {
+            base.to_string()
+        } else {
+            format!("{base}?p={page_index}")
+        };
+    };
+    let pairs: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, _)| k != "p")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    {
+        let mut qp = u.query_pairs_mut();
+        qp.clear();
+        for (k, v) in &pairs {
+            qp.append_pair(k, v);
+        }
+        if page_index > 1 {
+            qp.append_pair("p", &page_index.to_string());
+        }
+    }
+    u.to_string()
 }
 
 /// Build a yt-dlp `-f` selector for Bilibili DASH.
@@ -485,7 +568,109 @@ pub async fn resolve_meta(
     let v: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| AppError::Message(format!("yt-dlp 输出不是有效 JSON: {e}")))?;
 
-    video_meta_from_yt_dlp_json_with_cookies(&v, has_cookies)
+    let mut meta = video_meta_from_yt_dlp_json_with_cookies(&v, has_cookies)?;
+    if meta.pages.len() > 1 {
+        enrich_multi_page_formats_by_sampling(cfg, cookies_path, &mut meta).await;
+    }
+    Ok(meta)
+}
+
+/// Probe additional parts when playlist `-J` only filled formats for early entries.
+///
+/// Skips probing when the playlist JSON already exposed ≥2 distinct heights.
+/// Anthologies with ≤`MULTI_PAGE_FULL_PROBE_AT_MOST` parts probe every page;
+/// larger ones probe at most `MULTI_PAGE_FORMAT_SAMPLES` (skipping page 1 when
+/// its formats are already present).
+async fn enrich_multi_page_formats_by_sampling(
+    cfg: &YtDlpConfig,
+    cookies_path: Option<&Path>,
+    meta: &mut VideoMeta,
+) {
+    let known_heights = distinct_heights(&meta.formats);
+    if known_heights.len() >= 2 {
+        return;
+    }
+
+    let page_count = meta.pages.len();
+    let max_samples = if page_count <= MULTI_PAGE_FULL_PROBE_AT_MOST {
+        page_count
+    } else {
+        MULTI_PAGE_FORMAT_SAMPLES
+    };
+    let mut indices = sample_page_indices(page_count as u32, max_samples);
+    if !known_heights.is_empty() {
+        indices.retain(|&i| i != 1);
+    }
+    if indices.is_empty() {
+        return;
+    }
+
+    let base = if meta.webpage_url.is_empty() {
+        return;
+    } else {
+        meta.webpage_url.clone()
+    };
+
+    let mut observed = meta.formats.clone();
+    let mut handles = Vec::new();
+    let sem = Arc::new(tokio::sync::Semaphore::new(4));
+    for index in indices {
+        let page_url = page_url_for_index(&base, index);
+        let cfg = cfg.clone();
+        let cookies = cookies_path.map(Path::to_path_buf);
+        let permit = Arc::clone(&sem);
+        handles.push(tokio::spawn(async move {
+            let _permit = permit.acquire_owned().await.ok()?;
+            let formats = fetch_formats_for_url(&cfg, &page_url, cookies.as_deref()).await;
+            Some((index, page_url, formats))
+        }));
+    }
+
+    let mut failed = 0usize;
+    for handle in handles {
+        match handle.await {
+            Ok(Some((_, _, Some(formats)))) => observed.extend(formats),
+            Ok(Some((index, page_url, None))) => {
+                failed += 1;
+                eprintln!("videofetch: format probe failed for page {index} ({page_url})");
+            }
+            Ok(None) | Err(_) => {
+                failed += 1;
+                eprintln!("videofetch: format probe task failed");
+            }
+        }
+    }
+    if failed > 0 {
+        eprintln!(
+            "videofetch: {failed} multi-P format probe(s) failed; quality list may be incomplete"
+        );
+    }
+
+    meta.formats = finalize_formats_for_pages(observed, meta.pages.len());
+}
+
+async fn fetch_formats_for_url(
+    cfg: &YtDlpConfig,
+    url: &str,
+    cookies_path: Option<&Path>,
+) -> Option<Vec<FormatOption>> {
+    let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
+    cmd.arg("-J").arg("--no-playlist");
+    if let Some(path) = cfg.ffmpeg_path.as_ref() {
+        cmd.arg("--ffmpeg-location").arg(path);
+    }
+    let has_cookies = cookies_path.is_some_and(|p| p.exists());
+    if let Some(cookies) = cookies_path.filter(|p| p.exists()) {
+        cmd.arg("--cookies").arg(cookies);
+    }
+    cmd.arg(url);
+
+    let output = cmd.output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    Some(parse_formats(&v, has_cookies))
 }
 
 /// Inputs for a single yt-dlp download spawn.
@@ -919,14 +1104,13 @@ mod tests {
             meta.thumbnail.as_deref(),
             Some("https://example.com/p1.jpg")
         );
-        // Multi-P uses a height ladder so later parts aren't stuck to P1 DASH ids.
         let ids: Vec<_> = meta.formats.iter().map(|f| f.format_id.as_str()).collect();
-        assert_eq!(ids, vec!["vh1080", "vh720", "vh480", "vh360"]);
-        assert_eq!(meta.formats[0].label, "1080p");
+        assert_eq!(ids, vec!["vh1080", "vh720"]);
+        assert!(meta.formats[0].label.starts_with("1080p"));
     }
 
     #[test]
-    fn multi_page_ladder_adds_1080_when_p1_only_has_480() {
+    fn multi_page_unions_heights_from_all_entries() {
         let v = serde_json::json!({
             "id": "BV1xx",
             "title": "合集",
@@ -946,14 +1130,27 @@ mod tests {
                     "title": "P2",
                     "playlist_index": 2,
                     "formats": [
-                        {"format_id": "30112", "height": 1080, "fps": 30, "vcodec": "avc1", "tbr": 2000.0}
+                        {"format_id": "30112", "height": 1080, "fps": 30, "vcodec": "avc1", "tbr": 2000.0},
+                        {"format_id": "30116", "height": 2160, "fps": 60, "vcodec": "avc1", "tbr": 8000.0}
                     ]
                 }
             ]
         });
         let meta = video_meta_from_yt_dlp_json(&v).unwrap();
         let ids: Vec<_> = meta.formats.iter().map(|f| f.format_id.as_str()).collect();
-        assert_eq!(ids, vec!["vh1080", "vh720", "vh480", "vh360"]);
+        assert_eq!(ids, vec!["vh2160", "vh1080", "vh480"]);
+        assert_eq!(meta.formats[0].label, "2160p60");
+    }
+
+    #[test]
+    fn sample_page_indices_includes_ends_and_respects_cap() {
+        assert_eq!(sample_page_indices(3, 8), vec![1, 2, 3]);
+        assert_eq!(sample_page_indices(9, 9), (1..=9).collect::<Vec<_>>());
+        assert_eq!(sample_page_indices(9, 16), (1..=9).collect::<Vec<_>>());
+        let sampled = sample_page_indices(200, 8);
+        assert_eq!(sampled.first(), Some(&1));
+        assert_eq!(sampled.last(), Some(&200));
+        assert!(sampled.len() <= 8);
     }
 
     #[test]
