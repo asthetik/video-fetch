@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{FormatOption, PageItem, VideoMeta};
-use crate::platform::detect_platform;
+use crate::platform::{canonicalize_video_url, detect_platform};
 
 #[derive(Debug, Clone)]
 pub struct YtDlpConfig {
@@ -299,7 +299,7 @@ fn parse_formats(v: &serde_json::Value, _has_cookies: bool) -> Vec<FormatOption>
 
             let label = build_format_label(height, fps, vcodec, tbr, dynamic_range);
             // Formats returned by yt-dlp for the current cookie state are downloadable
-            // as-is; do not mark them "需登录" by resolution heuristics.
+            // as-is; do not mark them "login required" by resolution heuristics.
             let requires_login = false;
 
             Some(FormatOption {
@@ -540,6 +540,8 @@ pub async fn resolve_meta(
         return Err(AppError::Message(missing_yt_dlp_message()));
     }
 
+    let url = canonicalize_video_url(url);
+
     let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
     // Keep playlist entries so Bilibili multi-P `pages` can be mapped.
     cmd.arg("-J");
@@ -553,7 +555,7 @@ pub async fn resolve_meta(
         cmd.arg("--cookies").arg(cookies);
     }
 
-    cmd.arg(url);
+    cmd.arg(&url);
 
     let output = cmd
         .output()
@@ -683,6 +685,15 @@ pub struct DownloadRequest<'a> {
     pub output_dir: &'a Path,
     pub cookies_path: Option<&'a Path>,
     pub children: &'a Arc<Mutex<HashMap<String, tokio::process::Child>>>,
+    pub cancelled: &'a Arc<Mutex<HashMap<String, bool>>>,
+}
+
+fn job_is_cancelled(cancelled: &Arc<Mutex<HashMap<String, bool>>>, job_id: &str) -> bool {
+    cancelled
+        .lock()
+        .ok()
+        .and_then(|m| m.get(job_id).copied())
+        .unwrap_or(false)
 }
 
 /// Spawn yt-dlp to download a single video and stream progress from stdout/stderr.
@@ -699,6 +710,7 @@ pub async fn download(
         output_dir,
         cookies_path,
         children,
+        cancelled,
     } = req;
 
     if !cfg.yt_dlp_path.exists() {
@@ -714,6 +726,8 @@ pub async fn download(
         }
     }
 
+    let url = canonicalize_video_url(url);
+
     let output_spec = output_dir.join(output_template);
     let selector = dash_format_selector(format_id);
     let mut cmd = Command::new(&cfg.yt_dlp_path);
@@ -727,8 +741,14 @@ pub async fn download(
         // Emit one JSON object per progress tick (public fields under `progress`).
         .arg("--progress-template")
         .arg("download:%(progress)j")
+        // Prefer UTF-8 so non-ASCII titles don't garble `--print` paths on Windows.
+        .arg("--encoding")
+        .arg("utf-8")
         .arg("--print")
         .arg("after_move:filepath");
+
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
 
     if let Some(path) = cfg.ffmpeg_path.as_ref() {
         cmd.arg("--ffmpeg-location").arg(path);
@@ -738,7 +758,7 @@ pub async fn download(
         cmd.arg("--cookies").arg(cookies);
     }
 
-    cmd.arg(url);
+    cmd.arg(&url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
@@ -763,6 +783,12 @@ pub async fn download(
         guard.insert(job_id.to_string(), child);
     }
 
+    // Cancel may have raced before the child was registered; honor it now.
+    if job_is_cancelled(cancelled, job_id) {
+        kill_download(children, job_id);
+        return Err(AppError::Message("用户取消下载".into()));
+    }
+
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();
     let mut final_path: Option<PathBuf> = None;
@@ -775,6 +801,12 @@ pub async fn download(
             break;
         }
         tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                if job_is_cancelled(cancelled, job_id) {
+                    kill_download(children, job_id);
+                    return Err(AppError::Message("用户取消下载".into()));
+                }
+            }
             line = stdout_lines.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(line)) => {
@@ -866,10 +898,30 @@ pub fn kill_download(
         return false;
     };
     if let Some(mut child) = guard.remove(job_id) {
-        let _ = child.start_kill();
+        kill_child_process_tree(&mut child);
         return true;
     }
     false
+}
+
+/// Terminate yt-dlp and any children (e.g. ffmpeg). On Windows, `Child::start_kill`
+/// only kills the root process and leaves downloads running in the tree.
+fn kill_child_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    {
+        if let Some(pid) = child.id() {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+            return;
+        }
+    }
+    let _ = child.start_kill();
 }
 
 #[cfg(test)]
@@ -959,7 +1011,7 @@ mod tests {
         assert!(is_ytdlp_status_line(
             r#"{"status":"downloading","downloaded_bytes":1,"total_bytes":10}"#
         ));
-        assert!(!is_ytdlp_status_line("/tmp/video.mp4"));
+        assert!(!is_ytdlp_status_line("virtual/out/video.mp4"));
     }
 
     #[test]

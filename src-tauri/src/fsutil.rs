@@ -63,11 +63,8 @@ mod tests {
 
     #[test]
     fn work_dir_for_joins_job_id() {
-        let root = PathBuf::from("/tmp/download-work");
-        assert_eq!(
-            work_dir_for(&root, "job-abc"),
-            PathBuf::from("/tmp/download-work/job-abc")
-        );
+        let root = PathBuf::from("virtual-download-work");
+        assert_eq!(work_dir_for(&root, "job-abc"), root.join("job-abc"));
     }
 
     #[test]

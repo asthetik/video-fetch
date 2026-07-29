@@ -25,8 +25,7 @@ pub fn validate_output_template(template: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("文件名模板不能为空".into());
     }
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
+    if looks_like_absolute_path(trimmed) {
         return Err("文件名模板不能使用绝对路径".into());
     }
     for seg in trimmed.split(['/', '\\']) {
@@ -35,6 +34,19 @@ pub fn validate_output_template(template: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// True for OS-absolute paths and for Unix-style roots that Windows does not
+/// treat as absolute (e.g. `/virtual/...`).
+fn looks_like_absolute_path(template: &str) -> bool {
+    if Path::new(template).is_absolute() {
+        return true;
+    }
+    if template.starts_with('/') || template.starts_with('\\') {
+        return true;
+    }
+    let bytes = template.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// Replace datetime tokens with a concrete local-time string so yt-dlp does not
@@ -250,7 +262,9 @@ mod tests {
     fn validate_output_template_rejects_parent_segments() {
         assert!(validate_output_template("../../%(title)s.%(ext)s").is_err());
         assert!(validate_output_template("%(uploader)s/../%(title)s.%(ext)s").is_err());
-        assert!(validate_output_template("/tmp/%(title)s.%(ext)s").is_err());
+        assert!(validate_output_template("/virtual/%(title)s.%(ext)s").is_err());
+        assert!(validate_output_template("C:/virtual/%(title)s.%(ext)s").is_err());
+        assert!(validate_output_template("\\\\virtual\\share\\%(title)s.%(ext)s").is_err());
         assert!(validate_output_template("%(title)s [%(id)s].%(ext)s").is_ok());
         assert!(validate_output_template("%(uploader)s/%(title)s.%(ext)s").is_ok());
     }

@@ -82,6 +82,7 @@ pub struct YtDlpDownloader {
     work_root: PathBuf,
     cookies_path: Option<PathBuf>,
     children: Arc<Mutex<HashMap<String, Child>>>,
+    cancelled: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 impl YtDlpDownloader {
@@ -90,12 +91,14 @@ impl YtDlpDownloader {
         work_root: PathBuf,
         cookies_path: Option<PathBuf>,
         children: Arc<Mutex<HashMap<String, Child>>>,
+        cancelled: Arc<Mutex<HashMap<String, bool>>>,
     ) -> Self {
         Self {
             cfg,
             work_root,
             cookies_path,
             children,
+            cancelled,
         }
     }
 }
@@ -125,6 +128,7 @@ impl Downloader for YtDlpDownloader {
                 output_dir: &work,
                 cookies_path: self.cookies_path.as_deref(),
                 children: &self.children,
+                cancelled: &self.cancelled,
             },
             on_progress,
         )
@@ -155,6 +159,7 @@ pub struct DownloadManager {
 }
 
 impl DownloadManager {
+    #[cfg(test)]
     pub fn new(
         db: Db,
         settings: AppSettings,
@@ -162,6 +167,26 @@ impl DownloadManager {
         progress: Arc<dyn ProgressEmitter>,
         children: Arc<Mutex<HashMap<String, Child>>>,
         work_root: PathBuf,
+    ) -> AppResult<Self> {
+        Self::new_with_cancelled(
+            db,
+            settings,
+            downloader,
+            progress,
+            children,
+            work_root,
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+    }
+
+    fn new_with_cancelled(
+        db: Db,
+        settings: AppSettings,
+        downloader: Arc<dyn Downloader>,
+        progress: Arc<dyn ProgressEmitter>,
+        children: Arc<Mutex<HashMap<String, Child>>>,
+        work_root: PathBuf,
+        cancelled: Arc<Mutex<HashMap<String, bool>>>,
     ) -> AppResult<Self> {
         let concurrency = settings.concurrency.max(1) as usize;
         Ok(Self {
@@ -174,7 +199,7 @@ impl DownloadManager {
             semaphore: Arc::new(Semaphore::new(concurrency)),
             concurrency_limit: Arc::new(AtomicUsize::new(concurrency)),
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
-            cancelled: Arc::new(Mutex::new(HashMap::new())),
+            cancelled,
         })
     }
 
@@ -187,13 +212,17 @@ impl DownloadManager {
         work_root: PathBuf,
     ) -> AppResult<Self> {
         let children = Arc::new(Mutex::new(HashMap::new()));
+        let cancelled = Arc::new(Mutex::new(HashMap::new()));
         let downloader = Arc::new(YtDlpDownloader::new(
             cfg,
             work_root.clone(),
             cookies_path,
             Arc::clone(&children),
+            Arc::clone(&cancelled),
         )) as Arc<dyn Downloader>;
-        Self::new(db, settings, downloader, progress, children, work_root)
+        Self::new_with_cancelled(
+            db, settings, downloader, progress, children, work_root, cancelled,
+        )
     }
 
     /// When `save_as_copy` is true, skip duplicate-done and local-file checks but never bypass
@@ -298,6 +327,12 @@ impl DownloadManager {
         }
 
         kill_download(&self.children, id);
+
+        if let Ok(mut tasks) = self.running_tasks.lock()
+            && let Some(handle) = tasks.remove(id)
+        {
+            handle.abort();
+        }
 
         let db = self.db.lock().map_err(lock_err)?;
         let mut job = db.get_job(id)?;
@@ -487,12 +522,26 @@ impl DownloadManager {
 
         let db = Arc::clone(&self.db);
         let progress = Arc::clone(&self.progress);
+        let cancelled = Arc::clone(&self.cancelled);
         let on_progress = {
             let job_id = job_id.clone();
             Box::new(move |update: ProgressUpdate| {
+                if cancelled
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&job_id).copied())
+                    .unwrap_or(false)
+                {
+                    return;
+                }
                 if let Ok(db) = db.lock()
                     && let Ok(mut current) = db.get_job(&job_id)
                 {
+                    // Do not resurrect a cancelled/failed/done job from late progress ticks.
+                    if current.status != JobStatus::Running && current.status != JobStatus::Pending
+                    {
+                        return;
+                    }
                     current.progress = update.percent / 100.0;
                     current.status = JobStatus::Running;
                     let _ = db.update_job(&current);
@@ -519,13 +568,34 @@ impl DownloadManager {
         }
 
         match result {
-            Ok(work_path) => {
-                if let Err(e) = self.complete_relocation(&job_id, &running, &work_path, &save_dir) {
-                    let _ = self.fail_job(&job_id, e);
+            Ok(reported_path) => {
+                let work_path = resolve_work_product(&work, &reported_path);
+                match work_path {
+                    Some(path) => {
+                        if let Err(e) =
+                            self.complete_relocation(&job_id, &running, &path, &save_dir)
+                        {
+                            let _ = self.fail_job(&job_id, e);
+                        }
+                    }
+                    None => {
+                        let _ = self.fail_job(
+                            &job_id,
+                            format!(
+                                "下载完成但未找到输出文件（yt-dlp 回报: {}）",
+                                reported_path.display()
+                            ),
+                        );
+                    }
                 }
             }
             Err(err) => {
-                let _ = self.fail_job(&job_id, err);
+                // Prefer the cancel marker over a kill/pipe race error from yt-dlp.
+                if self.is_cancelled(&job_id) {
+                    let _ = self.cancel(&job_id);
+                } else {
+                    let _ = self.fail_job(&job_id, err);
+                }
             }
         }
 
@@ -643,6 +713,15 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
 
 const OUTPUT_EXTS: &[&str] = &["mp4", "mkv", "webm", "flv", "mov"];
 
+/// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
+/// Needed because `--print after_move:filepath` can be garbled on Windows locales.
+fn resolve_work_product(work: &Path, reported: &Path) -> Option<PathBuf> {
+    if reported.is_file() {
+        return Some(reported.to_path_buf());
+    }
+    fsutil::find_work_product(work)
+}
+
 /// True when a recorded path or the predicted output name already exists on disk.
 fn local_output_exists(
     save_dir: &Path,
@@ -694,9 +773,15 @@ mod tests {
         reported_progress: Arc<Mutex<Option<f64>>>,
         /// When set, emitted instead of a percent-only update.
         rich_progress: Option<ProgressUpdate>,
+        /// Isolated scratch dir for mock output files (not the OS shared temp root).
+        scratch: tempfile::TempDir,
     }
 
     impl MockDownloader {
+        fn new_scratch() -> tempfile::TempDir {
+            tempfile::tempdir().expect("mock scratch dir")
+        }
+
         fn success(progress: f64) -> Self {
             Self {
                 progress,
@@ -705,6 +790,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: None,
+                scratch: Self::new_scratch(),
             }
         }
 
@@ -716,6 +802,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: Some(update),
+                scratch: Self::new_scratch(),
             }
         }
 
@@ -727,6 +814,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: None,
+                scratch: Self::new_scratch(),
             }
         }
 
@@ -738,6 +826,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: None,
+                scratch: Self::new_scratch(),
             }
         }
 
@@ -786,7 +875,7 @@ mod tests {
                 return Err("mock download failed".into());
             }
 
-            let path = PathBuf::from(format!("/tmp/{}.mp4", job.id));
+            let path = self.scratch.path().join(format!("{}.mp4", job.id));
             std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
             Ok(path)
         }
@@ -794,6 +883,8 @@ mod tests {
 
     struct WorkDirMockDownloader {
         work_root: PathBuf,
+        /// When set, return this path instead of the real work-dir file (simulates garbled yt-dlp print).
+        reported_path: Option<PathBuf>,
     }
 
     #[async_trait]
@@ -807,7 +898,7 @@ mod tests {
             std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
             let path = work.join("demo.mp4");
             std::fs::write(&path, b"video").map_err(|e| e.to_string())?;
-            Ok(path)
+            Ok(self.reported_path.clone().unwrap_or(path))
         }
     }
 
@@ -904,6 +995,33 @@ mod tests {
             &work_root,
             Arc::new(WorkDirMockDownloader {
                 work_root: work_root.clone(),
+                reported_path: None,
+            }),
+        );
+        let job = manager.enqueue(sample_job(job_id), false).unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Done).await;
+
+        assert!(save_dir.join("demo.mp4").is_file());
+        assert!(!work_root.join(job_id).exists());
+    }
+
+    /// yt-dlp `--print after_move:filepath` can return a path that does not exist on disk
+    /// (common on Windows when console encoding mangles non-ASCII filenames). Retry already
+    /// recovers via `find_work_product`; first completion must do the same.
+    #[tokio::test]
+    async fn relocates_via_work_dir_when_reported_path_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("download-work");
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+
+        let job_id = "job-bad-report";
+        let (manager, _rx) = test_manager(
+            &save_dir,
+            &work_root,
+            Arc::new(WorkDirMockDownloader {
+                work_root: work_root.clone(),
+                reported_path: Some(dir.path().join("does-not-exist-garbled.mp4")),
             }),
         );
         let job = manager.enqueue(sample_job(job_id), false).unwrap();
@@ -951,7 +1069,13 @@ mod tests {
             .into_iter()
             .find(|j| j.id == job.id)
             .unwrap();
-        assert_eq!(done.status, JobStatus::Done);
+        assert_eq!(
+            done.status,
+            JobStatus::Done,
+            "job error: {:?} progress={}",
+            done.error,
+            done.progress
+        );
         assert!((done.progress - 1.0).abs() < f64::EPSILON);
         assert!(done.output_path.is_some());
         assert!(saw_running || saw_half);
@@ -1052,6 +1176,94 @@ mod tests {
         assert_eq!(cancelled.error.as_deref(), Some("用户取消下载"));
     }
 
+    type ProgressCallback = Box<dyn Fn(ProgressUpdate) + Send>;
+    type ProgressSink = Arc<Mutex<Option<ProgressCallback>>>;
+
+    /// Late yt-dlp progress must not flip a cancelled job back to Running.
+    ///
+    /// The progress callback is stashed outside the downloader future so we can
+    /// invoke it after `cancel()` aborts the JoinHandle (abort alone must not
+    /// make this test pass).
+    #[tokio::test]
+    async fn cancel_ignores_progress_after_cancel() {
+        use tokio::sync::Notify;
+
+        let dir = tempfile::tempdir().unwrap();
+        let after_first = Arc::new(Notify::new());
+        let progress_sink: ProgressSink = Arc::new(Mutex::new(None));
+
+        struct LateProgressMock {
+            after_first: Arc<Notify>,
+            progress_sink: ProgressSink,
+        }
+
+        #[async_trait]
+        impl Downloader for LateProgressMock {
+            async fn run(
+                &self,
+                _job: &DownloadJob,
+                on_progress: ProgressCallback,
+            ) -> Result<PathBuf, String> {
+                on_progress(ProgressUpdate {
+                    percent: 10.0,
+                    ..Default::default()
+                });
+                *self.progress_sink.lock().map_err(|e| e.to_string())? = Some(on_progress);
+                self.after_first.notify_one();
+                std::future::pending::<()>().await;
+                Err("unreachable".into())
+            }
+        }
+
+        let (manager, mut rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(LateProgressMock {
+                after_first: Arc::clone(&after_first),
+                progress_sink: Arc::clone(&progress_sink),
+            }),
+        );
+        let job = manager
+            .enqueue(sample_job("job-cancel-progress"), false)
+            .unwrap();
+
+        after_first.notified().await;
+        let cancelled = manager.cancel(&job.id).unwrap();
+        assert_eq!(cancelled.status, JobStatus::Failed);
+
+        let late = progress_sink
+            .lock()
+            .unwrap()
+            .take()
+            .expect("progress callback should be stashed before cancel");
+        late(ProgressUpdate {
+            percent: 90.0,
+            ..Default::default()
+        });
+        sleep(Duration::from_millis(50)).await;
+
+        let final_job = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == job.id)
+            .unwrap();
+        assert_eq!(final_job.status, JobStatus::Failed);
+        assert_eq!(final_job.error.as_deref(), Some("用户取消下载"));
+        assert!(final_job.progress < 0.5);
+
+        let mut saw_running_after_cancel = false;
+        while let Ok(event) = rx.try_recv() {
+            if event.id == job.id && event.status == JobStatus::Running && event.progress >= 0.9 {
+                saw_running_after_cancel = true;
+            }
+        }
+        assert!(
+            !saw_running_after_cancel,
+            "late progress must not emit Running after cancel"
+        );
+    }
+
     #[tokio::test]
     async fn dedupe_skips_when_local_file_exists() {
         let dir = tempfile::tempdir().unwrap();
@@ -1128,7 +1340,7 @@ mod tests {
         let mut done = sample_job("done-1");
         done.status = JobStatus::Done;
         done.progress = 1.0;
-        done.output_path = Some("/tmp/demo.mp4".into());
+        done.output_path = Some("virtual/demo.mp4".into());
         db.insert_job(&done).unwrap();
 
         let (manager, _rx) = test_manager(
@@ -1309,6 +1521,7 @@ mod tests {
             let attempt = Arc::clone(&attempt);
             struct RetryMock {
                 attempt: Arc<AtomicBool>,
+                scratch: tempfile::TempDir,
             }
             #[async_trait]
             impl Downloader for RetryMock {
@@ -1324,13 +1537,16 @@ mod tests {
                     {
                         Err("first attempt failed".into())
                     } else {
-                        let path = PathBuf::from("/tmp/retry.mp4");
+                        let path = self.scratch.path().join("retry.mp4");
                         std::fs::write(&path, b"x").map_err(|e| e.to_string())?;
                         Ok(path)
                     }
                 }
             }
-            Arc::new(RetryMock { attempt }) as Arc<dyn Downloader>
+            Arc::new(RetryMock {
+                attempt,
+                scratch: tempfile::tempdir().expect("retry scratch"),
+            }) as Arc<dyn Downloader>
         };
 
         let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader);

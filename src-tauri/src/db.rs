@@ -415,7 +415,7 @@ mod tests {
             status: JobStatus::Done,
             progress: 1.0,
             error: None,
-            output_path: Some("/tmp/demo.mp4".into()),
+            output_path: Some("virtual/demo.mp4".into()),
         }
     }
 

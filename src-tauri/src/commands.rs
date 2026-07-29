@@ -210,6 +210,7 @@ pub async fn resolve_url(
     force: Option<bool>,
 ) -> AppResult<VideoMeta> {
     let force = force.unwrap_or(false);
+    let url = platform::canonicalize_video_url(&url);
     if platform::detect_platform(&url).is_none() {
         return Err(AppError::Message(
             "暂不支持该链接，最小可行产品仅支持 B 站".into(),
@@ -280,6 +281,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     let save_as_copy = args.save_as_copy;
     let uploader = args.uploader;
     let save_dir = Path::new(&settings.save_dir);
+    let base_url = platform::canonicalize_video_url(&args.url);
 
     let mut last = None;
     for page_index in args.page_indexes {
@@ -298,7 +300,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
 
         let job = DownloadJob {
             id: String::new(),
-            url: page_url(&args.url, page_index),
+            url: page_url(&base_url, page_index),
             video_id: args.video_id.clone(),
             page_index,
             format_id: args.format_id.clone(),
