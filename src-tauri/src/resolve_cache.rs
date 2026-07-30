@@ -8,15 +8,32 @@ const STRIP_QUERY_PARAMS: &[&str] = &["spm_id_from", "vd_source", "from_spmid", 
 
 pub fn extract_bilibili_id(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url.trim()).ok()?;
-    let path = parsed.path();
-    let bv_start = path.find("BV")?;
-    let rest = &path[bv_start..];
+    if let Some(from_path) = bv_id_in_str(parsed.path()) {
+        return Some(from_path);
+    }
+    for (key, value) in parsed.query_pairs() {
+        if key == "bvid"
+            && let Some(from_query) = bv_id_in_str(&value)
+        {
+            return Some(from_query);
+        }
+    }
+    None
+}
+
+fn bv_id_in_str(s: &str) -> Option<String> {
+    let bv_start = s.find("BV")?;
+    let rest = &s[bv_start..];
     let end = rest
         .char_indices()
         .find(|(_, c)| !c.is_ascii_alphanumeric())
         .map(|(i, _)| i)
         .unwrap_or(rest.len());
-    Some(rest[..end].to_string())
+    let id = &rest[..end];
+    if id.len() < 3 {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 pub fn normalize_url_for_cache(url: &str) -> String {
@@ -88,6 +105,16 @@ mod tests {
         assert_eq!(
             extract_bilibili_id("https://www.bilibili.com/video/BV1xx411c7mD?p=2&spm_id_from=x"),
             Some("BV1xx411c7mD".into())
+        );
+    }
+
+    #[test]
+    fn extract_bv_from_watchlater_query() {
+        assert_eq!(
+            extract_bilibili_id(
+                "https://www.bilibili.com/list/watchlater?oid=1&bvid=BV1xRM8ziEo7&spm_id_from=x"
+            ),
+            Some("BV1xRM8ziEo7".into())
         );
     }
 

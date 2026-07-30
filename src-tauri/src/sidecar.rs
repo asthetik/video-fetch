@@ -117,9 +117,9 @@ mod tests {
 
     #[test]
     fn pick_tool_path_prefers_bundled_then_env_then_system() {
-        let bundled = PathBuf::from("/app/yt-dlp");
-        let env = PathBuf::from("/env/yt-dlp");
-        let system = PathBuf::from("/usr/bin/yt-dlp");
+        let bundled = PathBuf::from("virtual/bundled/yt-dlp");
+        let env = PathBuf::from("virtual/env/yt-dlp");
+        let system = PathBuf::from("virtual/system/yt-dlp");
         assert_eq!(
             pick_tool_path(
                 Some(bundled.clone()),
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn pick_tool_path_skips_system_when_fallback_disabled() {
-        let system = PathBuf::from("/usr/bin/yt-dlp");
+        let system = PathBuf::from("virtual/system/yt-dlp");
         assert_eq!(pick_tool_path(None, None, Some(system), false), None);
     }
 
