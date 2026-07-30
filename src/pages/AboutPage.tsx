@@ -31,7 +31,7 @@ export function AboutPage() {
       <h2 className="page-title">关于</h2>
 
       <section className="settings-section">
-        <h3>影取（VideoFetch）</h3>
+        <h3>Video Fetch</h3>
         <p className="about-copy">
           轻量桌面视频下载器；当前支持哔哩哔哩（B 站），下载引擎为 yt-dlp。
         </p>

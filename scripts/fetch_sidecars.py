@@ -22,6 +22,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+YTDLP_LATEST = "https://github.com/yt-dlp/yt-dlp/releases/latest/download"
+FFMPEG_LATEST = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+
 
 def die(msg: str, code: int = 1) -> None:
     print(msg, file=sys.stderr)
@@ -62,16 +65,55 @@ def make_executable(path: Path) -> None:
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def fetch_ytdlp(system: str, out: Path) -> None:
-    print("Downloading yt-dlp...")
+def ytdlp_download_url(system: str, machine: str) -> str:
+    m = machine.lower()
     if system == "Darwin":
-        url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
-    elif system == "Linux":
-        url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-    elif system == "Windows":
-        url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-    else:
-        die(f"Unsupported OS for yt-dlp: {system}")
+        return f"{YTDLP_LATEST}/yt-dlp_macos"
+    if system == "Linux":
+        if m in {"x86_64", "amd64"}:
+            return f"{YTDLP_LATEST}/yt-dlp_linux"
+        if m in {"aarch64", "arm64"}:
+            return f"{YTDLP_LATEST}/yt-dlp_linux_aarch64"
+        raise ValueError(f"Unsupported Linux arch for yt-dlp: {machine}")
+    if system == "Windows":
+        if m in {"aarch64", "arm64"}:
+            return f"{YTDLP_LATEST}/yt-dlp_arm64.exe"
+        if m in {"x86_64", "amd64", "x64"}:
+            return f"{YTDLP_LATEST}/yt-dlp.exe"
+        raise ValueError(f"Unsupported Windows arch for yt-dlp: {machine}")
+    raise ValueError(f"Unsupported OS for yt-dlp: {system}")
+
+
+def ffmpeg_download_url(system: str, machine: str) -> str | None:
+    """Return archive URL, or None for Darwin (evermeet handled separately)."""
+    m = machine.lower()
+    if system == "Darwin":
+        return None
+    if system == "Linux":
+        if m in {"x86_64", "amd64"}:
+            arch = "linux64"
+        elif m in {"aarch64", "arm64"}:
+            arch = "linuxarm64"
+        else:
+            raise ValueError(f"Unsupported Linux arch for ffmpeg: {machine}")
+        return f"{FFMPEG_LATEST}/ffmpeg-master-latest-{arch}-gpl.tar.xz"
+    if system == "Windows":
+        if m in {"aarch64", "arm64"}:
+            tag = "winarm64"
+        elif m in {"x86_64", "amd64", "x64"}:
+            tag = "win64"
+        else:
+            raise ValueError(f"Unsupported Windows arch for ffmpeg: {machine}")
+        return f"{FFMPEG_LATEST}/ffmpeg-master-latest-{tag}-gpl.zip"
+    raise ValueError(f"Unsupported OS for ffmpeg: {system}")
+
+
+def fetch_ytdlp(system: str, machine: str, out: Path) -> None:
+    print("Downloading yt-dlp...")
+    try:
+        url = ytdlp_download_url(system, machine)
+    except ValueError as e:
+        die(str(e))
     download(url, out)
     make_executable(out)
 
@@ -101,17 +143,12 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, tmp: Path) -> None:
         return
 
     if system == "Linux":
-        if machine in {"x86_64", "amd64"}:
-            arch = "linux64"
-        elif machine in {"aarch64", "arm64"}:
-            arch = "linuxarm64"
-        else:
-            die(f"Unsupported Linux arch for ffmpeg: {machine}")
+        try:
+            url = ffmpeg_download_url(system, machine)
+        except ValueError as e:
+            die(str(e))
+        assert url is not None
         archive = tmp / "ffmpeg.tar.xz"
-        url = (
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-            f"ffmpeg-master-latest-{arch}-gpl.tar.xz"
-        )
         download(url, archive)
         with tarfile.open(archive, mode="r:xz") as tf:
             tf.extractall(tmp)
@@ -126,11 +163,12 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, tmp: Path) -> None:
         return
 
     if system == "Windows":
+        try:
+            url = ffmpeg_download_url(system, machine)
+        except ValueError as e:
+            die(str(e))
+        assert url is not None
         zip_path = tmp / "ffmpeg.zip"
-        url = (
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-            "ffmpeg-master-latest-win64-gpl.zip"
-        )
         download(url, zip_path)
         extract_dir = tmp / "ffmpeg-win"
         extract_dir.mkdir()
@@ -170,7 +208,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="videofetch-sidecars-") as tmp_s:
         tmp = Path(tmp_s)
         if need_ytdlp:
-            fetch_ytdlp(system, ytdlp_out)
+            fetch_ytdlp(system, machine, ytdlp_out)
         else:
             print(f"Keeping cached yt-dlp: {ytdlp_out}")
         if need_ffmpeg:
