@@ -57,6 +57,10 @@ export function reducePageTransition(
       if (state.phase !== "exiting" || state.pendingPage === null) {
         return state;
       }
+      // Cancelled back to the page still on screen — finish without re-enter.
+      if (state.pendingPage === state.displayedPage) {
+        return { ...state, phase: "idle", pendingPage: null };
+      }
       return {
         displayedPage: state.pendingPage,
         phase: "entering",

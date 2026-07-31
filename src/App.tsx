@@ -63,7 +63,7 @@ function App() {
           {/* Keep home mounted so pasted URL and resolved video survive tab switches. */}
           <div
             className={displayedPage === "home" ? undefined : "page-hidden"}
-            aria-hidden={displayedPage !== "home"}
+            aria-hidden={displayedPage !== "home" ? true : undefined}
             {...(displayedPage !== "home" ? { inert: true } : {})}
           >
             <HomePage

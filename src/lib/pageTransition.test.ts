@@ -84,4 +84,18 @@ describe("reducePageTransition", () => {
       pendingPage: null,
     });
   });
+
+  it("exitDone returns idle when pending equals displayed (cancel)", () => {
+    let s = createPageTransitionState("home");
+    s = reducePageTransition(s, { type: "target", page: "history" });
+    s = reducePageTransition(s, { type: "target", page: "home" });
+    assert.equal(s.phase, "exiting");
+    assert.equal(s.pendingPage, "home");
+    s = reducePageTransition(s, { type: "exitDone" });
+    assert.deepEqual(s, {
+      displayedPage: "home",
+      phase: "idle",
+      pendingPage: null,
+    });
+  });
 });

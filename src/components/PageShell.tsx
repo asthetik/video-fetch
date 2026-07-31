@@ -15,6 +15,8 @@ interface PageShellProps {
   children: ReactNode;
 }
 
+type ExpectedComplete = "exit" | "enter" | null;
+
 export function PageShell({
   phase,
   reducedMotion,
@@ -24,46 +26,54 @@ export function PageShell({
 }: PageShellProps) {
   const [enterActive, setEnterActive] = useState(false);
   const phaseTokenRef = useRef(0);
-  const acceptedTokenRef = useRef<number | null>(null);
+  const expectedCompleteRef = useRef<ExpectedComplete>(null);
 
   useEffect(() => {
     if (reducedMotion) {
-      acceptedTokenRef.current = null;
+      expectedCompleteRef.current = null;
       setEnterActive(false);
       return;
     }
 
     if (phase === "entering") {
       const token = ++phaseTokenRef.current;
-      // Disarm until enter-active so a late exit transitionend cannot complete enter.
-      acceptedTokenRef.current = null;
+      // Do not accept completion until enter transition has actually started.
+      expectedCompleteRef.current = null;
       setEnterActive(false);
       const id = requestAnimationFrame(() => {
         if (phaseTokenRef.current !== token) return;
         setEnterActive(true);
-        acceptedTokenRef.current = token;
+        expectedCompleteRef.current = "enter";
       });
       return () => cancelAnimationFrame(id);
     }
 
     if (phase === "exiting") {
-      const token = ++phaseTokenRef.current;
-      acceptedTokenRef.current = token;
+      phaseTokenRef.current += 1;
+      expectedCompleteRef.current = "exit";
       setEnterActive(false);
       return;
     }
 
-    acceptedTokenRef.current = null;
+    expectedCompleteRef.current = null;
     setEnterActive(false);
   }, [phase, reducedMotion]);
 
   function handleTransitionEnd(event: TransitionEvent<HTMLDivElement>) {
     if (event.target !== event.currentTarget) return;
     if (event.propertyName !== "opacity") return;
-    if (acceptedTokenRef.current !== phaseTokenRef.current) return;
 
-    if (phase === "exiting") onExitComplete();
-    if (phase === "entering" && enterActive) onEnterComplete();
+    const expected = expectedCompleteRef.current;
+    if (expected === "exit" && phase === "exiting") {
+      // Disarm immediately so a late exit event cannot complete a later enter.
+      expectedCompleteRef.current = null;
+      onExitComplete();
+      return;
+    }
+    if (expected === "enter" && phase === "entering" && enterActive) {
+      expectedCompleteRef.current = null;
+      onEnterComplete();
+    }
   }
 
   const className = [
