@@ -417,15 +417,25 @@ mod tests {
     }
 
     #[test]
-    fn dual_store_survives_without_keyring_write() {
+    fn dual_store_file_roundtrip_without_requiring_keyring() {
         let dir = tempfile::tempdir().unwrap();
         let store = DualStore::new(dir.path());
-        store
-            .set(r#"[{"domain":".bilibili.com","include_subdomains":true,"path":"/","secure":true,"expiration":0,"name":"SESSDATA","value":"abc"}]"#)
-            .unwrap();
+        let payload = r#"[{"domain":".bilibili.com","include_subdomains":true,"path":"/","secure":true,"expiration":0,"name":"SESSDATA","value":"abc"}]"#;
+        store.set(payload).unwrap();
+
+        let path = dir.path().join("auth_cookies.json");
+        assert!(
+            path.is_file(),
+            "debug/release DualStore must persist auth_cookies.json"
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("SESSDATA"));
+
         let got = store.get().unwrap().unwrap();
         assert!(got.contains("SESSDATA"));
+
         store.delete().unwrap();
+        assert!(!path.exists());
         assert!(store.get().unwrap().is_none());
     }
 }
