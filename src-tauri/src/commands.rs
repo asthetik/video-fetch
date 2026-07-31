@@ -14,7 +14,10 @@ use crate::download::{
     cleanup_orphan_work_dirs,
 };
 use crate::error::{AppError, AppResult};
-use crate::models::{AppSettings, AuthStatus, DownloadConflict, DownloadJob, JobStatus, VideoMeta};
+use crate::models::{
+    AppSettings, AuthStatus, CancelAllResult, ClearFinishedResult, DownloadConflict, DownloadJob,
+    JobStatus, VideoMeta,
+};
 use crate::naming;
 use crate::platform;
 use crate::resolve_cache;
@@ -325,6 +328,16 @@ pub fn list_jobs(state: State<'_, AppState>) -> AppResult<Vec<DownloadJob>> {
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     state.downloads.cancel(&id)
+}
+
+#[tauri::command]
+pub fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
+    state.downloads.cancel_all()
+}
+
+#[tauri::command]
+pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishedResult> {
+    state.downloads.clear_finished()
 }
 
 #[tauri::command]

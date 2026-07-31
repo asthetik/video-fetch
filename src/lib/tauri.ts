@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { VideoMeta, DownloadJob, AppSettings, AuthStatus } from "../types";
+import type {
+  VideoMeta,
+  DownloadJob,
+  AppSettings,
+  AuthStatus,
+  CancelAllResult,
+  ClearFinishedResult,
+} from "../types";
 
 export interface EnqueueArgs {
   url: string;
@@ -35,6 +42,8 @@ export const api = {
   enqueue: (args: EnqueueArgs) => invoke<DownloadJob>("enqueue_download", { args }),
   listJobs: () => invoke<DownloadJob[]>("list_jobs"),
   cancelJob: (id: string) => invoke<DownloadJob>("cancel_job", { id }),
+  cancelAllJobs: () => invoke<CancelAllResult>("cancel_all_jobs"),
+  clearFinishedJobs: () => invoke<ClearFinishedResult>("clear_finished_jobs"),
   retryJob: (id: string) => invoke<DownloadJob>("retry_job", { id }),
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),
