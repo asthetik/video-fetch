@@ -45,8 +45,12 @@ impl KeyringStore for SystemKeyringStore {
     }
 }
 
-/// Keyring when available, always mirrored to a local JSON file under the app cache
-/// (unsigned Mac apps often cannot reliably use the login keychain without prompting / failing).
+/// Dual storage for auth cookies JSON.
+///
+/// - **release:** prefer OS keyring, always mirror to `auth_cookies.json`
+///   (unsigned Mac apps may prompt or fail on keyring).
+/// - **debug:** file only — never call keyring (avoids login-keychain prompts in `tauri dev`).
+///
 /// Treat `auth_cookies.json` as a secret; DualStore sets owner-only perms on Unix.
 pub struct DualStore {
     keyring: SystemKeyringStore,
@@ -64,7 +68,9 @@ impl DualStore {
 
 impl KeyringStore for DualStore {
     fn get(&self) -> AppResult<Option<String>> {
-        if let Ok(Some(value)) = self.keyring.get() {
+        if !cfg!(debug_assertions)
+            && let Ok(Some(value)) = self.keyring.get()
+        {
             return Ok(Some(value));
         }
         if self.file_path.exists() {
@@ -78,7 +84,9 @@ impl KeyringStore for DualStore {
     }
 
     fn set(&self, value: &str) -> AppResult<()> {
-        let _ = self.keyring.set(value);
+        if !cfg!(debug_assertions) {
+            let _ = self.keyring.set(value);
+        }
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -88,7 +96,9 @@ impl KeyringStore for DualStore {
     }
 
     fn delete(&self) -> AppResult<()> {
-        let _ = self.keyring.delete();
+        if !cfg!(debug_assertions) {
+            let _ = self.keyring.delete();
+        }
         if self.file_path.exists() {
             fs::remove_file(&self.file_path)?;
         }
@@ -417,15 +427,25 @@ mod tests {
     }
 
     #[test]
-    fn dual_store_survives_without_keyring_write() {
+    fn dual_store_file_roundtrip_without_requiring_keyring() {
         let dir = tempfile::tempdir().unwrap();
         let store = DualStore::new(dir.path());
-        store
-            .set(r#"[{"domain":".bilibili.com","include_subdomains":true,"path":"/","secure":true,"expiration":0,"name":"SESSDATA","value":"abc"}]"#)
-            .unwrap();
+        let payload = r#"[{"domain":".bilibili.com","include_subdomains":true,"path":"/","secure":true,"expiration":0,"name":"SESSDATA","value":"abc"}]"#;
+        store.set(payload).unwrap();
+
+        let path = dir.path().join("auth_cookies.json");
+        assert!(
+            path.is_file(),
+            "debug/release DualStore must persist auth_cookies.json"
+        );
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("SESSDATA"));
+
         let got = store.get().unwrap().unwrap();
         assert!(got.contains("SESSDATA"));
+
         store.delete().unwrap();
+        assert!(!path.exists());
         assert!(store.get().unwrap().is_none());
     }
 }
