@@ -112,14 +112,15 @@ pub fn check_download_conflict(
     )
 }
 
-pub fn default_save_dir(app_dir: &Path) -> PathBuf {
-    dirs_fallback_downloads().unwrap_or_else(|| app_dir.join("downloads"))
+fn fallback_save_dir(app_dir: &Path) -> PathBuf {
+    app_dir.join("downloads")
 }
 
-fn dirs_fallback_downloads() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join("Downloads").join("影取"))
+/// Prefer the OS Downloads folder (locale-aware). Fall back to app data.
+pub fn default_save_dir(app: &AppHandle, app_dir: &Path) -> PathBuf {
+    app.path()
+        .download_dir()
+        .unwrap_or_else(|_| fallback_save_dir(app_dir))
 }
 
 fn rematerialize_cookies(state: &AppState) -> AppResult<Option<PathBuf>> {
@@ -577,10 +578,15 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
 
     let mut settings = settings_store::load_settings(&app_dir)?;
     if settings.save_dir.is_empty() {
-        settings.save_dir = default_save_dir(&app_dir).to_string_lossy().into();
+        settings.save_dir = default_save_dir(app, &app_dir).to_string_lossy().into();
         let _ = settings_store::save_settings(&app_dir, &settings);
     }
-    std::fs::create_dir_all(&settings.save_dir)?;
+    if std::fs::create_dir_all(&settings.save_dir).is_err() {
+        let fb = fallback_save_dir(&app_dir);
+        std::fs::create_dir_all(&fb)?;
+        settings.save_dir = fb.to_string_lossy().into();
+        let _ = settings_store::save_settings(&app_dir, &settings);
+    }
 
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
@@ -642,6 +648,12 @@ mod tests {
             page_url("https://www.bilibili.com/video/BV1xx?p=2", 1),
             "https://www.bilibili.com/video/BV1xx"
         );
+    }
+
+    #[test]
+    fn fallback_save_dir_joins_downloads_under_app_dir() {
+        let app_dir = PathBuf::from("/tmp/videofetch-app-data");
+        assert_eq!(fallback_save_dir(&app_dir), app_dir.join("downloads"));
     }
 
     #[test]
