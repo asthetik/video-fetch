@@ -307,18 +307,18 @@ pub async fn resolve_url(
     // complete on a slow/hung view once yt-dlp is done (view client also has a timeout).
     let ytdlp_result = tokio::select! {
         view_res = &mut view_task => {
-            if let Ok(Ok(partial)) = view_res {
-                if is_current() {
-                    let _ = app.emit(
-                        RESOLVE_PARTIAL_EVENT,
-                        &ResolveMetaEvent {
-                            request_id,
-                            meta: partial.clone(),
-                        },
-                    );
-                    emitted_partial = true;
-                    view_meta = Some(partial);
-                }
+            if let Ok(Ok(partial)) = view_res
+                && is_current()
+            {
+                let _ = app.emit(
+                    RESOLVE_PARTIAL_EVENT,
+                    &ResolveMetaEvent {
+                        request_id,
+                        meta: partial.clone(),
+                    },
+                );
+                emitted_partial = true;
+                view_meta = Some(partial);
             }
             match ytdlp_task.await {
                 Ok(inner) => inner,
@@ -332,19 +332,18 @@ pub async fn resolve_url(
             };
             // Short grace so a nearly-done view can still merge; then abort.
             match tokio::time::timeout(Duration::from_millis(300), &mut view_task).await {
-                Ok(Ok(Ok(partial))) => {
-                    if is_current() {
-                        let _ = app.emit(
-                            RESOLVE_PARTIAL_EVENT,
-                            &ResolveMetaEvent {
-                                request_id,
-                                meta: partial.clone(),
-                            },
-                        );
-                        emitted_partial = true;
-                        view_meta = Some(partial);
-                    }
+                Ok(Ok(Ok(partial))) if is_current() => {
+                    let _ = app.emit(
+                        RESOLVE_PARTIAL_EVENT,
+                        &ResolveMetaEvent {
+                            request_id,
+                            meta: partial.clone(),
+                        },
+                    );
+                    emitted_partial = true;
+                    view_meta = Some(partial);
                 }
+                Ok(Ok(Ok(_))) => {}
                 _ => {
                     view_task.abort();
                 }
