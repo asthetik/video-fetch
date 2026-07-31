@@ -25,6 +25,8 @@ interface VideoCardProps {
   onEnqueued: () => void;
   onRefresh: () => void;
   refreshing?: boolean;
+  formatsLoading?: boolean;
+  formatsError?: string | null;
 }
 
 export function VideoCard({
@@ -34,6 +36,8 @@ export function VideoCard({
   onEnqueued,
   onRefresh,
   refreshing = false,
+  formatsLoading = false,
+  formatsError = null,
 }: VideoCardProps) {
   const [selectedFormatId, setSelectedFormatId] = useState("");
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
@@ -148,19 +152,38 @@ export function VideoCard({
         <label className="field-label" htmlFor="format-select">
           清晰度
         </label>
-        <select
-          id="format-select"
-          className="format-select"
-          value={selectedFormatId}
-          onChange={(e) => setSelectedFormatId(e.target.value)}
-        >
-          {sortedFormats.map((f) => (
-            <option key={f.format_id} value={f.format_id}>
-              {f.label}
-            </option>
-          ))}
-        </select>
-        {showLoginHint && (
+        {formatsLoading && meta.formats.length === 0 ? (
+          <p className="loading-text">正在获取清晰度…</p>
+        ) : (
+          <select
+            id="format-select"
+            className="format-select"
+            value={selectedFormatId}
+            onChange={(e) => setSelectedFormatId(e.target.value)}
+            disabled={formatsLoading || meta.formats.length === 0}
+          >
+            {sortedFormats.map((f) => (
+              <option key={f.format_id} value={f.format_id}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        )}
+        {formatsError && (
+          <p className="url-hint error">
+            清晰度获取失败：{formatsError}
+            <button
+              type="button"
+              className="btn btn-sm"
+              style={{ marginLeft: "0.5rem" }}
+              onClick={onRefresh}
+              disabled={refreshing || downloading}
+            >
+              重试
+            </button>
+          </p>
+        )}
+        {showLoginHint && !formatsLoading && (
           <p className="login-hint">登录后可能获得更高码率清晰度</p>
         )}
       </div>
@@ -223,9 +246,16 @@ export function VideoCard({
           type="button"
           className="btn btn-primary"
           onClick={() => void handleDownload()}
-          disabled={refreshing || downloading || !selectedFormatId || noneSelected}
+          disabled={
+            refreshing ||
+            downloading ||
+            formatsLoading ||
+            !!formatsError ||
+            !selectedFormatId ||
+            noneSelected
+          }
         >
-          {downloading ? "加入队列…" : "下载"}
+          {downloading ? "加入队列…" : formatsLoading ? "等待清晰度…" : "下载"}
         </button>
       </div>
     </div>

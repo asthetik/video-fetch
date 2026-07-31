@@ -1,4 +1,5 @@
 mod auth;
+mod bilibili_view;
 mod commands;
 mod cookies;
 mod db;
