@@ -34,9 +34,23 @@ export interface DownloadConflict {
   file_exists: boolean;
 }
 
+export interface ResolveMetaEvent {
+  request_id: number;
+  meta: VideoMeta;
+}
+
+export interface ResolveFormatsFailedEvent {
+  request_id: number;
+  error: string;
+}
+
 export const api = {
-  resolveUrl: (url: string, force = false) =>
-    invoke<VideoMeta>("resolve_url", { url, force }),
+  resolveUrl: (url: string, force = false, requestId?: number) =>
+    invoke<VideoMeta>("resolve_url", {
+      url,
+      force,
+      requestId: requestId ?? null,
+    }),
   checkDownloadConflict: (args: CheckConflictArgs) =>
     invoke<DownloadConflict>("check_download_conflict", { args }),
   enqueue: (args: EnqueueArgs) => invoke<DownloadJob>("enqueue_download", { args }),
