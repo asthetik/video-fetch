@@ -187,6 +187,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
         title="清空下载历史"
         message={`将清除 ${historyCount} 条历史记录。本地已下载的文件不会被删除。`}
         confirmLabel="清空"
+        cancelLabel="关闭"
         danger
         busy={bulkBusy}
         onCancel={() => {
