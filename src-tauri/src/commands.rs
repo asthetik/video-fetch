@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
 
 use crate::auth::AuthManager;
+use crate::bilibili_view;
 use crate::cookies::{self, Cookie};
 use crate::download::{
     DownloadManager, DownloadProgressEvent, PROGRESS_EVENT, ProgressEmitter,
@@ -28,12 +30,45 @@ use crate::ytdlp::{self, YtDlpConfig};
 const BILIBILI_LOGIN_LABEL: &str = "bilibili-login";
 const BILIBILI_LOGIN_URL: &str = "https://passport.bilibili.com/login";
 
+pub const RESOLVE_PARTIAL_EVENT: &str = "resolve://partial";
+pub const RESOLVE_COMPLETE_EVENT: &str = "resolve://complete";
+pub const RESOLVE_FORMATS_FAILED_EVENT: &str = "resolve://formats_failed";
+
 pub struct AppState {
     pub app_dir: PathBuf,
     pub auth: AuthManager,
     pub downloads: DownloadManager,
     pub settings: std::sync::Mutex<AppSettings>,
     pub ytdlp: YtDlpConfig,
+    /// Latest resolve request id; stale in-flight results must not emit or write cache.
+    pub active_resolve_id: AtomicU64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolveMetaEvent {
+    pub request_id: u64,
+    pub meta: VideoMeta,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolveFormatsFailedEvent {
+    pub request_id: u64,
+    pub error: String,
+}
+
+pub fn is_resolve_current(active_id: u64, request_id: u64) -> bool {
+    active_id == request_id
+}
+
+/// Register a resolve generation. Only increases `active` (never lets an older id win).
+pub fn claim_resolve_id(active: &AtomicU64, request_id: Option<u64>) -> u64 {
+    match request_id {
+        Some(id) => {
+            active.fetch_max(id, Ordering::SeqCst);
+            id
+        }
+        None => active.fetch_add(1, Ordering::SeqCst).saturating_add(1),
+    }
 }
 
 pub struct TauriProgressEmitter {
@@ -209,9 +244,11 @@ fn tauri_cookie_to_app(c: &tauri::webview::Cookie<'_>) -> Cookie {
 
 #[tauri::command]
 pub async fn resolve_url(
+    app: AppHandle,
     state: State<'_, AppState>,
     url: String,
     force: Option<bool>,
+    request_id: Option<u64>,
 ) -> AppResult<VideoMeta> {
     let force = force.unwrap_or(false);
     let url = platform::canonicalize_video_url(&url);
@@ -248,11 +285,113 @@ pub async fn resolve_url(
         }
     }
 
-    let meta = ytdlp::resolve_meta(&state.ytdlp, &url, cookies.as_deref()).await?;
-    for key in resolve_cache::store_cache_keys(&url, &meta.id, scope) {
-        state.downloads.upsert_resolve_cache(&key, &meta, now)?;
+    let request_id = claim_resolve_id(&state.active_resolve_id, request_id);
+
+    let is_current =
+        || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
+
+    let view_url = url.clone();
+    let mut view_task = tokio::spawn(async move { bilibili_view::resolve_view(&view_url).await });
+
+    let ytdlp_cfg = state.ytdlp.clone();
+    let ytdlp_url = url.clone();
+    let cookies_path = cookies.clone();
+    let mut ytdlp_task = tokio::spawn(async move {
+        ytdlp::resolve_meta(&ytdlp_cfg, &ytdlp_url, cookies_path.as_deref()).await
+    });
+
+    let mut view_meta: Option<VideoMeta> = None;
+    let mut emitted_partial = false;
+
+    // Prefer whichever finishes first: emit partial early if view wins; never block
+    // complete on a slow/hung view once yt-dlp is done (view client also has a timeout).
+    let ytdlp_result = tokio::select! {
+        view_res = &mut view_task => {
+            if let Ok(Ok(partial)) = view_res {
+                if is_current() {
+                    let _ = app.emit(
+                        RESOLVE_PARTIAL_EVENT,
+                        &ResolveMetaEvent {
+                            request_id,
+                            meta: partial.clone(),
+                        },
+                    );
+                    emitted_partial = true;
+                    view_meta = Some(partial);
+                }
+            }
+            match ytdlp_task.await {
+                Ok(inner) => inner,
+                Err(e) => Err(AppError::Message(format!("yt-dlp 任务失败: {e}"))),
+            }
+        }
+        ytdlp_res = &mut ytdlp_task => {
+            let ytdlp_result = match ytdlp_res {
+                Ok(inner) => inner,
+                Err(e) => Err(AppError::Message(format!("yt-dlp 任务失败: {e}"))),
+            };
+            // Short grace so a nearly-done view can still merge; then abort.
+            match tokio::time::timeout(Duration::from_millis(300), &mut view_task).await {
+                Ok(Ok(Ok(partial))) => {
+                    if is_current() {
+                        let _ = app.emit(
+                            RESOLVE_PARTIAL_EVENT,
+                            &ResolveMetaEvent {
+                                request_id,
+                                meta: partial.clone(),
+                            },
+                        );
+                        emitted_partial = true;
+                        view_meta = Some(partial);
+                    }
+                }
+                _ => {
+                    view_task.abort();
+                }
+            }
+            ytdlp_result
+        }
+    };
+
+    if !is_current() {
+        return Err(AppError::Message("解析已取消（有更新的请求）".into()));
     }
-    Ok(meta)
+
+    match ytdlp_result {
+        Ok(ytdlp_meta) => {
+            let meta = match view_meta {
+                Some(view) => bilibili_view::merge_view_with_formats(view, ytdlp_meta),
+                None => ytdlp_meta,
+            };
+            for key in resolve_cache::store_cache_keys(&url, &meta.id, scope) {
+                state.downloads.upsert_resolve_cache(&key, &meta, now)?;
+            }
+            let _ = app.emit(
+                RESOLVE_COMPLETE_EVENT,
+                &ResolveMetaEvent {
+                    request_id,
+                    meta: meta.clone(),
+                },
+            );
+            Ok(meta)
+        }
+        Err(err) => {
+            if emitted_partial {
+                let partial = view_meta.expect("partial was emitted");
+                let _ = app.emit(
+                    RESOLVE_FORMATS_FAILED_EVENT,
+                    &ResolveFormatsFailedEvent {
+                        request_id,
+                        error: err.to_string(),
+                    },
+                );
+                // Keep the card; UI uses formats_failed for the formats area.
+                Ok(partial)
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -638,12 +777,40 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         downloads,
         settings: std::sync::Mutex::new(settings),
         ytdlp,
+        active_resolve_id: AtomicU64::new(0),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_request_id_is_not_current() {
+        assert!(is_resolve_current(2, 2));
+        assert!(!is_resolve_current(2, 1));
+    }
+
+    #[test]
+    fn claim_resolve_id_is_monotonic() {
+        let active = AtomicU64::new(0);
+        assert_eq!(claim_resolve_id(&active, Some(2)), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+        assert_eq!(claim_resolve_id(&active, Some(1)), 1);
+        // Older id must not lower the active generation.
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+        assert!(!is_resolve_current(active.load(Ordering::SeqCst), 1));
+        assert!(is_resolve_current(active.load(Ordering::SeqCst), 2));
+    }
+
+    #[test]
+    fn superseded_request_should_not_commit() {
+        let active = AtomicU64::new(0);
+        let first = claim_resolve_id(&active, Some(1));
+        let second = claim_resolve_id(&active, Some(2));
+        assert!(is_resolve_current(active.load(Ordering::SeqCst), second));
+        assert!(!is_resolve_current(active.load(Ordering::SeqCst), first));
+    }
 
     #[test]
     fn page_url_uses_one_based_bilibili_p() {
