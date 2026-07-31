@@ -6,9 +6,9 @@
 
 <p style="text-align: center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
-  <a href="https://github.com/asthetik/videofetch/actions/workflows/ci.yml"><img src="https://github.com/asthetik/videofetch/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="https://github.com/asthetik/videofetch/releases"><img src="https://img.shields.io/github/v/release/asthetik/videofetch" alt="Release" /></a>
-  <a href="https://github.com/asthetik/videofetch/releases"><img src="https://img.shields.io/github/downloads/asthetik/videofetch/total" alt="Downloads" /></a>
+  <a href="https://github.com/asthetik/video-fetch/actions/workflows/ci.yml"><img src="https://github.com/asthetik/video-fetch/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/asthetik/video-fetch/releases"><img src="https://img.shields.io/github/v/release/asthetik/video-fetch" alt="Release" /></a>
+  <a href="https://github.com/asthetik/video-fetch/releases"><img src="https://img.shields.io/github/downloads/asthetik/video-fetch/total" alt="Downloads" /></a>
 </p>
 
 轻量桌面视频下载器（影取）。当前支持哔哩哔哩（B 站）。
@@ -19,7 +19,7 @@
 
 ## 快速安装
 
-1. 打开本仓库 [Releases](https://github.com/asthetik/videofetch/releases)
+1. 打开本仓库 [Releases](https://github.com/asthetik/video-fetch/releases)
 2. 按系统下载对应安装包（文件名示例）：
    - macOS Apple Silicon：`Video-Fetch-v*-macOS.dmg`（**不提供 Intel**）
    - Windows x64：`Video-Fetch-v*-Windows.msi` / `.exe`

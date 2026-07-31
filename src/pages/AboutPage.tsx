@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import packageJson from "../../package.json";
 
-const REPO_URL = "https://github.com/asthetik/videofetch";
+const REPO_URL = "https://github.com/asthetik/video-fetch";
 const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
 const THIRD_PARTY_URL = `${REPO_URL}/blob/main/THIRD_PARTY.md`;
 /** Same source as release bumps (`package.json`); Tauri runtime may refine via getVersion(). */
