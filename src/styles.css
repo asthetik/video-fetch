@@ -456,7 +456,7 @@ body {
 }
 
 .queue-status.failed {
-  color: var(--danger);
+  color: var(--muted);
 }
 
 .progress-bar {
@@ -483,7 +483,13 @@ body {
 .queue-error {
   margin: 0 0 0.45rem;
   font-size: 0.78rem;
-  color: var(--danger);
+  color: var(--muted);
+}
+
+.queue-section-label {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.75rem;
+  color: var(--muted);
 }
 
 .queue-actions {
