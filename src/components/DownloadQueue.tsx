@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -128,6 +128,7 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const bulkBusyRef = useRef(false);
 
   const loadJobs = useCallback(async () => {
     const list = await api.listJobs();
@@ -216,6 +217,10 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
   }
 
   async function handleCancelAll() {
+    if (bulkBusyRef.current) {
+      return;
+    }
+    bulkBusyRef.current = true;
     setBulkBusy(true);
     setActionError(null);
     try {
@@ -231,14 +236,14 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
       setActionError(err instanceof Error ? err.message : String(err));
       setConfirmCancelAll(false);
     } finally {
+      bulkBusyRef.current = false;
       setBulkBusy(false);
     }
   }
 
-  const activeCancellable = jobs.filter(
+  const cancellableCount = jobs.filter(
     (j) => j.status === "pending" || j.status === "running",
-  );
-  const cancellableCount = activeCancellable.length;
+  ).length;
 
   const activeJobs = jobs.filter(
     (j) => j.status === "pending" || j.status === "running" || j.status === "failed",

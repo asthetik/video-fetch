@@ -363,7 +363,10 @@ impl DownloadManager {
         let mut errors = Vec::new();
         for id in ids {
             match self.cancel(&id) {
-                Ok(_) => cancelled += 1,
+                // Only count when cancel actually marked the job failed.
+                // A race to Done returns Ok without changing status.
+                Ok(job) if job.status == JobStatus::Failed => cancelled += 1,
+                Ok(_) => {}
                 Err(e) => errors.push(format!("{id}: {e}")),
             }
         }

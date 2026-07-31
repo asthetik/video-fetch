@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   DeleteConfirmDialog,
@@ -35,6 +35,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const bulkBusyRef = useRef(false);
   const historyCount = jobs.length;
 
   const loadJobs = useCallback(async () => {
@@ -62,6 +63,10 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
   }
 
   async function handleClearFinished() {
+    if (bulkBusyRef.current) {
+      return;
+    }
+    bulkBusyRef.current = true;
     setBulkBusy(true);
     setActionError(null);
     try {
@@ -73,6 +78,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
       setConfirmClear(false);
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
+      bulkBusyRef.current = false;
       setBulkBusy(false);
     }
   }

@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
@@ -20,6 +22,8 @@ export function ConfirmDialog({
   onCancel,
   onConfirm,
 }: ConfirmDialogProps) {
+  const titleId = useId();
+
   if (!open) {
     return null;
   }
@@ -36,10 +40,10 @@ export function ConfirmDialog({
         className="modal"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="confirm-dialog-title">{title}</h3>
+        <h3 id={titleId}>{title}</h3>
         <p className="modal-desc">{message}</p>
         <div className="modal-actions">
           <button
