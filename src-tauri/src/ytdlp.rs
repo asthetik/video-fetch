@@ -531,6 +531,16 @@ fn missing_yt_dlp_message() -> String {
     }
 }
 
+/// On Windows, spawn without a console window (CREATE_NO_WINDOW).
+/// Otherwise GUI launches of yt-dlp briefly show a black terminal window.
+fn hide_windows_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 pub async fn resolve_meta(
     cfg: &YtDlpConfig,
     url: &str,
@@ -543,6 +553,7 @@ pub async fn resolve_meta(
     let url = canonicalize_video_url(url);
 
     let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
+    hide_windows_console(&mut cmd);
     // Keep playlist entries so Bilibili multi-P `pages` can be mapped.
     cmd.arg("-J");
 
@@ -657,6 +668,7 @@ async fn fetch_formats_for_url(
     cookies_path: Option<&Path>,
 ) -> Option<Vec<FormatOption>> {
     let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
+    hide_windows_console(&mut cmd);
     cmd.arg("-J").arg("--no-playlist");
     if let Some(path) = cfg.ffmpeg_path.as_ref() {
         cmd.arg("--ffmpeg-location").arg(path);
@@ -731,6 +743,7 @@ pub async fn download(
     let output_spec = output_dir.join(output_template);
     let selector = dash_format_selector(format_id);
     let mut cmd = Command::new(&cfg.yt_dlp_path);
+    hide_windows_console(&mut cmd);
     cmd.arg("-f")
         .arg(&selector)
         .arg("-o")
@@ -912,6 +925,7 @@ fn kill_child_process_tree(child: &mut tokio::process::Child) {
         if let Some(pid) = child.id() {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            // std::process::Command — same CREATE_NO_WINDOW flag as hide_windows_console.
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .stdout(std::process::Stdio::null())
