@@ -41,12 +41,21 @@ export function upsertJob(jobs: DownloadJob[], job: DownloadJob): DownloadJob[] 
     const done = without.filter((j) => j.status === "done");
     return sortJobs(active).concat([job], failed, done);
   }
-  return sortJobs(without.concat([job]));
+  // Replace in place so same-status peers keep relative order (progress ticks
+  // must not shuffle concurrent running jobs to the end).
+  const index = jobs.findIndex((j) => j.id === job.id);
+  if (index === -1) {
+    return sortJobs(without.concat([job]));
+  }
+  const next = [...jobs];
+  next[index] = job;
+  return sortJobs(next);
 }
 
 export function partitionQueueJobs(jobs: DownloadJob[]): {
   active: DownloadJob[];
   recentFailed: DownloadJob[];
+  failedTotal: number;
   doneFallback: DownloadJob[] | null;
 } {
   const ordered = sortJobs(jobs);
@@ -57,15 +66,19 @@ export function partitionQueueJobs(jobs: DownloadJob[]): {
   // except upsertJob already put newest failed first within that group.
   const failed = ordered.filter((j) => j.status === "failed");
   const recentFailed = failed.slice(0, RECENT_FAILED_LIMIT);
+  const done = ordered.filter((j) => j.status === "done");
 
-  if (active.length === 0 && failed.length === 0) {
-    const done = ordered.filter((j) => j.status === "done");
-    return {
-      active,
-      recentFailed,
-      doneFallback: done.slice(0, DONE_FALLBACK_LIMIT),
-    };
-  }
+  // When nothing is downloading, keep recent completions visible even if
+  // failures exist (e.g. after cancel-all), so successes are not hidden.
+  const doneFallback =
+    active.length === 0 && done.length > 0
+      ? done.slice(0, DONE_FALLBACK_LIMIT)
+      : null;
 
-  return { active, recentFailed, doneFallback: null };
+  return {
+    active,
+    recentFailed,
+    failedTotal: failed.length,
+    doneFallback,
+  };
 }

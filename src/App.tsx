@@ -52,6 +52,7 @@ function App() {
           <HomePage
             queueRefresh={queueRefresh}
             onQueueRefresh={bumpQueueRefresh}
+            onOpenHistory={() => setPage("history")}
           />
         </div>
         {page === "history" && (

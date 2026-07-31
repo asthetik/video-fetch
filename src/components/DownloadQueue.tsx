@@ -120,9 +120,13 @@ function jobLabel(job: DownloadJob): string {
 
 interface DownloadQueueProps {
   refreshToken: number;
+  onOpenHistory: () => void;
 }
 
-export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
+export function DownloadQueue({
+  refreshToken,
+  onOpenHistory,
+}: DownloadQueueProps) {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -232,10 +236,9 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
     }
   }
 
-  const { active, recentFailed, doneFallback } = partitionQueueJobs(jobs);
-  const cancellableCount = active.filter(
-    (j) => j.status === "pending" || j.status === "running",
-  ).length;
+  const { active, recentFailed, failedTotal, doneFallback } =
+    partitionQueueJobs(jobs);
+  const cancellableCount = active.length;
 
   function renderJobItem(job: DownloadJob) {
     const meta = progressMeta(job);
@@ -341,12 +344,26 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
       )}
       {recentFailed.length > 0 && (
         <>
-          <p className="queue-section-label">最近失败</p>
+          <div className="queue-section-heading">
+            <p className="queue-section-label">最近失败</p>
+            <button
+              type="button"
+              className="btn-text queue-section-link"
+              onClick={onOpenHistory}
+            >
+              共 {failedTotal} 条失败 · 在历史查看
+            </button>
+          </div>
           <ul className="queue-list">{recentFailed.map(renderJobItem)}</ul>
         </>
       )}
       {doneFallback && doneFallback.length > 0 && (
-        <ul className="queue-list">{doneFallback.map(renderJobItem)}</ul>
+        <>
+          {recentFailed.length > 0 && (
+            <p className="queue-section-label">最近完成</p>
+          )}
+          <ul className="queue-list">{doneFallback.map(renderJobItem)}</ul>
+        </>
       )}
 
       <ConfirmDialog

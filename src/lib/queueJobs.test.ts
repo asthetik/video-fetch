@@ -62,6 +62,34 @@ describe("upsertJob", () => {
     );
     assert.equal(part.recentFailed.length, 0);
   });
+
+  it("progress on one running job does not reorder concurrent peers", () => {
+    const base = [job("r1", "running"), job("r2", "running"), job("p", "pending")];
+    const next = upsertJob(base, {
+      ...job("r1", "running"),
+      progress: 0.4,
+    });
+    assert.deepEqual(
+      next.map((j) => j.id),
+      ["r1", "r2", "p"],
+    );
+    assert.equal(next[0].progress, 0.4);
+  });
+
+  it("fail then promote pending puts new running on top and failed first", () => {
+    let jobs = [job("r", "running"), job("p", "pending"), job("f-old", "failed")];
+    jobs = upsertJob(jobs, { ...job("r", "failed"), error: "网络错误" });
+    jobs = upsertJob(jobs, job("p", "running"));
+    const part = partitionQueueJobs(jobs);
+    assert.deepEqual(
+      part.active.map((j) => j.id),
+      ["p"],
+    );
+    assert.deepEqual(
+      part.recentFailed.map((j) => j.id),
+      ["r", "f-old"],
+    );
+  });
 });
 
 describe("partitionQueueJobs", () => {
@@ -78,10 +106,26 @@ describe("partitionQueueJobs", () => {
       part.recentFailed.map((j) => j.id),
       ["f1", "f2", "f3"],
     );
+    assert.equal(part.failedTotal, 4);
     assert.equal(part.doneFallback, null);
   });
 
-  it("uses doneFallback only when no active and no failed", () => {
+  it("uses doneFallback when no active even if failures exist", () => {
+    const jobs = [
+      job("f1", "failed"),
+      job("d1", "done"),
+      job("d2", "done"),
+    ];
+    const part = partitionQueueJobs(jobs);
+    assert.equal(part.active.length, 0);
+    assert.equal(part.failedTotal, 1);
+    assert.deepEqual(
+      part.doneFallback?.map((j) => j.id),
+      ["d1", "d2"],
+    );
+  });
+
+  it("uses doneFallback when only done", () => {
     const jobs = [job("d1", "done"), job("d2", "done")];
     const part = partitionQueueJobs(jobs);
     assert.equal(part.active.length, 0);
