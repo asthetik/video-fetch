@@ -23,7 +23,11 @@ function jobLabel(job: DownloadJob): string {
   return job.page_index > 1 ? `${job.title} · P${job.page_index}` : job.title;
 }
 
-export function HistoryPage() {
+interface HistoryPageProps {
+  onJobsChanged?: () => void;
+}
+
+export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -63,6 +67,7 @@ export function HistoryPage() {
     try {
       await api.deleteJob(job.id, choice === "record_and_file");
       setJobs((prev) => prev.filter((j) => j.id !== job.id));
+      onJobsChanged?.();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
       await loadJobs();

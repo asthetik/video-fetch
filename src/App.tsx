@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { AuthStatus } from "./components/AuthStatus";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
@@ -17,6 +17,10 @@ const NAV_ITEMS: { id: Page; label: string }[] = [
 
 function App() {
   const [page, setPage] = useState<Page>("home");
+  const [queueRefresh, setQueueRefresh] = useState(0);
+  const bumpQueueRefresh = useCallback(() => {
+    setQueueRefresh((n) => n + 1);
+  }, []);
 
   return (
     <div className="app">
@@ -45,9 +49,14 @@ function App() {
           className={page === "home" ? undefined : "page-hidden"}
           aria-hidden={page !== "home"}
         >
-          <HomePage />
+          <HomePage
+            queueRefresh={queueRefresh}
+            onQueueRefresh={bumpQueueRefresh}
+          />
         </div>
-        {page === "history" && <HistoryPage />}
+        {page === "history" && (
+          <HistoryPage onJobsChanged={bumpQueueRefresh} />
+        )}
         {page === "settings" && <SettingsPage />}
         {page === "about" && <AboutPage />}
       </main>

@@ -10,13 +10,17 @@ function hasUsableCookies(status: AuthStatusType): boolean {
   return status === "logged_in";
 }
 
-export function HomePage() {
+interface HomePageProps {
+  queueRefresh: number;
+  onQueueRefresh: () => void;
+}
+
+export function HomePage({ queueRefresh, onQueueRefresh }: HomePageProps) {
   const [url, setUrl] = useState("");
   const [meta, setMeta] = useState<VideoMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatusType>("logged_out");
-  const [queueRefresh, setQueueRefresh] = useState(0);
 
   const urlRef = useRef(url);
   const metaRef = useRef(meta);
@@ -76,7 +80,7 @@ export function HomePage() {
   }, [handleResolve]);
 
   function handleEnqueued() {
-    setQueueRefresh((n) => n + 1);
+    onQueueRefresh();
   }
 
   return (
