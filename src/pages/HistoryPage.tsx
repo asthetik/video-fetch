@@ -110,7 +110,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
         {historyCount > 0 && (
           <button
             type="button"
-            className="btn-text btn-danger"
+            className="btn btn-sm"
             disabled={bulkBusy}
             onClick={() => {
               setActionError(null);
@@ -168,7 +168,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
                 )}
                 <button
                   type="button"
-                  className="btn btn-sm btn-danger"
+                  className="btn btn-sm"
                   onClick={() => {
                     setActionError(null);
                     setPendingDelete(job);

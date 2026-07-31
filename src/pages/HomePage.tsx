@@ -17,9 +17,14 @@ function hasUsableCookies(status: AuthStatusType): boolean {
 interface HomePageProps {
   queueRefresh: number;
   onQueueRefresh: () => void;
+  onOpenHistory: () => void;
 }
 
-export function HomePage({ queueRefresh, onQueueRefresh }: HomePageProps) {
+export function HomePage({
+  queueRefresh,
+  onQueueRefresh,
+  onOpenHistory,
+}: HomePageProps) {
   const [url, setUrl] = useState("");
   const [meta, setMeta] = useState<VideoMeta | null>(null);
   const [loading, setLoading] = useState(false);
@@ -172,7 +177,10 @@ export function HomePage({ queueRefresh, onQueueRefresh }: HomePageProps) {
         />
       )}
 
-      <DownloadQueue refreshToken={queueRefresh} />
+      <DownloadQueue
+        refreshToken={queueRefresh}
+        onOpenHistory={onOpenHistory}
+      />
     </div>
   );
 }

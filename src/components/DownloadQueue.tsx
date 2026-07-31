@@ -6,6 +6,7 @@ import {
   type DeleteChoice,
 } from "./DeleteConfirmDialog";
 import { api } from "../lib/tauri";
+import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
 import type { DownloadJob, JobStatus } from "../types";
 
 interface DownloadProgressPayload {
@@ -119,9 +120,13 @@ function jobLabel(job: DownloadJob): string {
 
 interface DownloadQueueProps {
   refreshToken: number;
+  onOpenHistory: () => void;
 }
 
-export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
+export function DownloadQueue({
+  refreshToken,
+  onOpenHistory,
+}: DownloadQueueProps) {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -132,14 +137,7 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
 
   const loadJobs = useCallback(async () => {
     const list = await api.listJobs();
-    // Show active and recent jobs on the home page (newest first).
-    const sorted = [...list].sort((a, b) => {
-      const rank = (s: JobStatus) =>
-        s === "running" ? 0 : s === "pending" ? 1 : s === "failed" ? 2 : 3;
-      const diff = rank(a.status) - rank(b.status);
-      return diff !== 0 ? diff : b.page_index - a.page_index;
-    });
-    setJobs(sorted);
+    setJobs(sortJobs(list));
     setLoading(false);
   }, []);
 
@@ -154,14 +152,11 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
       const patch = event.payload;
       setJobs((prev) => {
         const idx = prev.findIndex((j) => j.id === patch.id);
-        if (idx >= 0) {
-          const next = [...prev];
-          next[idx] = mergeJob(next[idx], patch);
-          return next;
+        if (idx < 0) {
+          void loadJobs();
+          return prev;
         }
-        // Job may not be in local state yet; reload the full list.
-        void loadJobs();
-        return prev;
+        return upsertJob(prev, mergeJob(prev[idx], patch));
       });
     }).then((fn) => {
       unlisten = fn;
@@ -176,7 +171,7 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
     setActionError(null);
     try {
       const updated = await api.cancelJob(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
@@ -186,7 +181,7 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
     setActionError(null);
     try {
       const updated = await api.retryJob(id);
-      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+      setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
@@ -241,14 +236,82 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
     }
   }
 
-  const cancellableCount = jobs.filter(
-    (j) => j.status === "pending" || j.status === "running",
-  ).length;
+  const { active, recentFailed, failedTotal, doneFallback } =
+    partitionQueueJobs(jobs);
+  const cancellableCount = active.length;
 
-  const activeJobs = jobs.filter(
-    (j) => j.status === "pending" || j.status === "running" || j.status === "failed",
-  );
-  const displayJobs = activeJobs.length > 0 ? activeJobs : jobs.slice(0, 8);
+  function renderJobItem(job: DownloadJob) {
+    const meta = progressMeta(job);
+    return (
+      <li key={job.id} className="queue-item">
+        <div className="queue-item-header">
+          <p className="queue-title">
+            {job.title}
+            {job.page_index > 1 ? ` · P${job.page_index}` : ""}
+          </p>
+          <span className={`queue-status ${job.status}`}>
+            {STATUS_LABEL[job.status]}
+            {(job.status === "running" || job.status === "pending") &&
+              job.status === "running" &&
+              ` ${Math.round(job.progress * 100)}%`}
+          </span>
+        </div>
+
+        {(job.status === "running" || job.status === "pending") && (
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{ width: `${Math.round(job.progress * 100)}%` }}
+            />
+          </div>
+        )}
+
+        {meta && <p className="queue-progress-meta">{meta}</p>}
+
+        {job.error && <p className="queue-error">{job.error}</p>}
+
+        <div className="queue-actions">
+          {(job.status === "pending" || job.status === "running") && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void handleCancel(job.id)}
+            >
+              取消
+            </button>
+          )}
+          {job.status === "failed" && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void handleRetry(job.id)}
+            >
+              重试
+            </button>
+          )}
+          {job.status === "done" && job.output_path && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void handleOpenFolder(job)}
+            >
+              打开文件夹
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => {
+              setActionError(null);
+              setPendingDelete(job);
+            }}
+          >
+            删除
+          </button>
+        </div>
+      </li>
+    );
+  }
 
   return (
     <section className="download-queue">
@@ -257,7 +320,7 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
         {cancellableCount > 0 && (
           <button
             type="button"
-            className="btn-text"
+            className="btn btn-sm"
             disabled={bulkBusy}
             onClick={() => {
               setActionError(null);
@@ -270,84 +333,37 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
       {actionError && <p className="url-hint error">{actionError}</p>}
-      {!loading && displayJobs.length === 0 && (
-        <p className="queue-empty">暂无下载任务</p>
+      {!loading &&
+        active.length === 0 &&
+        recentFailed.length === 0 &&
+        !doneFallback?.length && (
+          <p className="queue-empty">暂无下载任务</p>
+        )}
+      {active.length > 0 && (
+        <ul className="queue-list">{active.map(renderJobItem)}</ul>
       )}
-      {!loading && displayJobs.length > 0 && (
-        <ul className="queue-list">
-          {displayJobs.map((job) => {
-            const meta = progressMeta(job);
-            return (
-              <li key={job.id} className="queue-item">
-                <div className="queue-item-header">
-                  <p className="queue-title">
-                    {job.title}
-                    {job.page_index > 1 ? ` · P${job.page_index}` : ""}
-                  </p>
-                  <span className={`queue-status ${job.status}`}>
-                    {STATUS_LABEL[job.status]}
-                    {(job.status === "running" || job.status === "pending") &&
-                      job.status === "running" &&
-                      ` ${Math.round(job.progress * 100)}%`}
-                  </span>
-                </div>
-
-                {(job.status === "running" || job.status === "pending") && (
-                  <div className="progress-bar">
-                    <div
-                      className="progress-fill"
-                      style={{ width: `${Math.round(job.progress * 100)}%` }}
-                    />
-                  </div>
-                )}
-
-                {meta && <p className="queue-progress-meta">{meta}</p>}
-
-                {job.error && <p className="queue-error">{job.error}</p>}
-
-                <div className="queue-actions">
-                  {(job.status === "pending" || job.status === "running") && (
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => void handleCancel(job.id)}
-                    >
-                      取消
-                    </button>
-                  )}
-                  {job.status === "failed" && (
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => void handleRetry(job.id)}
-                    >
-                      重试
-                    </button>
-                  )}
-                  {job.status === "done" && job.output_path && (
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => void handleOpenFolder(job)}
-                    >
-                      打开文件夹
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-danger"
-                    onClick={() => {
-                      setActionError(null);
-                      setPendingDelete(job);
-                    }}
-                  >
-                    删除
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+      {recentFailed.length > 0 && (
+        <>
+          <div className="queue-section-heading">
+            <p className="queue-section-label">最近失败</p>
+            <button
+              type="button"
+              className="btn-text queue-section-link"
+              onClick={onOpenHistory}
+            >
+              共 {failedTotal} 条失败 · 在历史查看
+            </button>
+          </div>
+          <ul className="queue-list">{recentFailed.map(renderJobItem)}</ul>
+        </>
+      )}
+      {doneFallback && doneFallback.length > 0 && (
+        <>
+          {recentFailed.length > 0 && (
+            <p className="queue-section-label">最近完成</p>
+          )}
+          <ul className="queue-list">{doneFallback.map(renderJobItem)}</ul>
+        </>
       )}
 
       <ConfirmDialog
