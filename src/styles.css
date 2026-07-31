@@ -11,6 +11,9 @@
   --accent-hover: #0077ed;
   --danger: #d70015;
   --success: #248a3d;
+  --page-enter-ms: 200ms;
+  --page-exit-ms: 150ms;
+  --nav-transition-ms: 150ms;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -72,6 +75,10 @@ body {
   color: var(--muted);
   font-size: 0.9rem;
   cursor: pointer;
+  transition:
+    color var(--nav-transition-ms) ease,
+    background-color var(--nav-transition-ms) ease,
+    border-color var(--nav-transition-ms) ease;
 }
 
 .nav-btn:hover {
@@ -96,6 +103,46 @@ body {
 
 .page-hidden {
   display: none;
+}
+
+.page-shell {
+  /* idle / default visible */
+}
+
+.page-shell--enter {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.page-shell--enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--page-enter-ms) ease-out,
+    transform var(--page-enter-ms) ease-out;
+}
+
+.page-shell--exit {
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--page-exit-ms) ease-in,
+    transform var(--page-exit-ms) ease-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-btn {
+    transition: none;
+  }
+
+  .page-shell,
+  .page-shell--enter,
+  .page-shell--enter-active,
+  .page-shell--exit {
+    transition: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
 }
 
 .page-placeholder {
