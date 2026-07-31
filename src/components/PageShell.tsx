@@ -1,4 +1,10 @@
-import { useEffect, useState, type ReactNode, type TransitionEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type TransitionEvent,
+} from "react";
 import type { TransitionPhase } from "../lib/pageTransition";
 
 interface PageShellProps {
@@ -17,24 +23,47 @@ export function PageShell({
   children,
 }: PageShellProps) {
   const [enterActive, setEnterActive] = useState(false);
+  const phaseTokenRef = useRef(0);
+  const acceptedTokenRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (reducedMotion) return;
+    if (reducedMotion) {
+      acceptedTokenRef.current = null;
+      setEnterActive(false);
+      return;
+    }
+
     if (phase === "entering") {
+      const token = ++phaseTokenRef.current;
+      // Disarm until enter-active so a late exit transitionend cannot complete enter.
+      acceptedTokenRef.current = null;
       setEnterActive(false);
       const id = requestAnimationFrame(() => {
+        if (phaseTokenRef.current !== token) return;
         setEnterActive(true);
+        acceptedTokenRef.current = token;
       });
       return () => cancelAnimationFrame(id);
     }
+
+    if (phase === "exiting") {
+      const token = ++phaseTokenRef.current;
+      acceptedTokenRef.current = token;
+      setEnterActive(false);
+      return;
+    }
+
+    acceptedTokenRef.current = null;
     setEnterActive(false);
   }, [phase, reducedMotion]);
 
   function handleTransitionEnd(event: TransitionEvent<HTMLDivElement>) {
     if (event.target !== event.currentTarget) return;
     if (event.propertyName !== "opacity") return;
+    if (acceptedTokenRef.current !== phaseTokenRef.current) return;
+
     if (phase === "exiting") onExitComplete();
-    if (phase === "entering") onEnterComplete();
+    if (phase === "entering" && enterActive) onEnterComplete();
   }
 
   const className = [
