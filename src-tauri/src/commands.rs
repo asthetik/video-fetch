@@ -581,7 +581,12 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         settings.save_dir = default_save_dir(app, &app_dir).to_string_lossy().into();
         let _ = settings_store::save_settings(&app_dir, &settings);
     }
-    std::fs::create_dir_all(&settings.save_dir)?;
+    if std::fs::create_dir_all(&settings.save_dir).is_err() {
+        let fb = fallback_save_dir(&app_dir);
+        std::fs::create_dir_all(&fb)?;
+        settings.save_dir = fb.to_string_lossy().into();
+        let _ = settings_store::save_settings(&app_dir, &settings);
+    }
 
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
@@ -648,10 +653,7 @@ mod tests {
     #[test]
     fn fallback_save_dir_joins_downloads_under_app_dir() {
         let app_dir = PathBuf::from("/tmp/videofetch-app-data");
-        assert_eq!(
-            fallback_save_dir(&app_dir),
-            app_dir.join("downloads")
-        );
+        assert_eq!(fallback_save_dir(&app_dir), app_dir.join("downloads"));
     }
 
     #[test]
