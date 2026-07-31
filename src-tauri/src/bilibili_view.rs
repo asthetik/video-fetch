@@ -7,8 +7,7 @@ use crate::resolve_cache;
 use crate::ytdlp;
 
 const VIEW_URL: &str = "https://api.bilibili.com/x/web-interface/view";
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const REFERER: &str = "https://www.bilibili.com/";
 const VIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
@@ -17,9 +16,8 @@ const VIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 /// Caller should pass an already-canonicalized URL when possible.
 pub async fn resolve_view(url: &str) -> AppResult<VideoMeta> {
     let url = canonicalize_video_url(url);
-    let bvid = resolve_cache::extract_bilibili_id(&url).ok_or_else(|| {
-        AppError::Message("无法从链接解析 BV 号，跳过 view 快路径".into())
-    })?;
+    let bvid = resolve_cache::extract_bilibili_id(&url)
+        .ok_or_else(|| AppError::Message("无法从链接解析 BV 号，跳过 view 快路径".into()))?;
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(VIEW_TIMEOUT)
@@ -82,10 +80,7 @@ pub fn map_view_json(data: &Value, webpage_url: &str) -> AppResult<VideoMeta> {
         .pointer("/owner/name")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let thumbnail = data
-        .get("pic")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let thumbnail = data.get("pic").and_then(|v| v.as_str()).map(str::to_string);
     let pages_val = data
         .get("pages")
         .and_then(|v| v.as_array())
@@ -167,7 +162,8 @@ pub fn merge_view_with_formats(view: VideoMeta, ytdlp_meta: VideoMeta) -> VideoM
         },
     };
     let page_count = merged.pages.len();
-    merged.formats = ytdlp::finalize_formats_for_pages(std::mem::take(&mut merged.formats), page_count);
+    merged.formats =
+        ytdlp::finalize_formats_for_pages(std::mem::take(&mut merged.formats), page_count);
     merged
 }
 
