@@ -245,6 +245,14 @@ impl Db {
         Ok(())
     }
 
+    /// Delete all done/failed rows. Does not touch pending/running or any files on disk.
+    pub fn delete_finished_jobs(&self) -> AppResult<u64> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM jobs WHERE status IN ('done', 'failed')", [])?;
+        Ok(deleted as u64)
+    }
+
     pub fn get_resolve_cache(&self, key: &str) -> AppResult<Option<(VideoMeta, i64)>> {
         let mut stmt = self
             .conn
@@ -419,6 +427,22 @@ mod tests {
         }
     }
 
+    fn sample_job_for_db(id: &str) -> DownloadJob {
+        DownloadJob {
+            id: id.into(),
+            url: "https://www.bilibili.com/video/BV1xx".into(),
+            video_id: "BV1xx".into(),
+            page_index: 1,
+            format_id: "80".into(),
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: JobStatus::Pending,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+        }
+    }
+
     #[test]
     fn find_job_conflict_detects_done_job() {
         let dir = tempfile::tempdir().unwrap();
@@ -480,5 +504,38 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].status, JobStatus::Running);
         assert!((jobs[0].progress - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn delete_finished_jobs_removes_done_and_failed_keeps_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+
+        let mut pending = sample_job_for_db("p1");
+        pending.status = JobStatus::Pending;
+        db.insert_job(&pending).unwrap();
+
+        let mut running = sample_job_for_db("r1");
+        running.status = JobStatus::Running;
+        db.insert_job(&running).unwrap();
+
+        let mut done = sample_job_for_db("d1");
+        done.status = JobStatus::Done;
+        done.output_path = Some("/tmp/keep-me.mp4".into());
+        db.insert_job(&done).unwrap();
+
+        let mut failed = sample_job_for_db("f1");
+        failed.status = JobStatus::Failed;
+        failed.error = Some("用户取消下载".into());
+        db.insert_job(&failed).unwrap();
+
+        let cleared = db.delete_finished_jobs().unwrap();
+        assert_eq!(cleared, 2);
+
+        let jobs = db.list_jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().any(|j| j.id == "p1"));
+        assert!(jobs.iter().any(|j| j.id == "r1"));
+        assert!(!jobs.iter().any(|j| j.id == "d1" || j.id == "f1"));
     }
 }

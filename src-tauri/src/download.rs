@@ -15,7 +15,8 @@ use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::fsutil;
 use crate::models::{
-    AppSettings, DownloadConflict, DownloadJob, JobConflict, JobStatus, VideoMeta,
+    AppSettings, CancelAllResult, ClearFinishedResult, DownloadConflict, DownloadJob, JobConflict,
+    JobStatus, VideoMeta,
 };
 use crate::naming;
 use crate::ytdlp::{self, ProgressUpdate, YtDlpConfig, kill_download};
@@ -348,6 +349,33 @@ impl DownloadManager {
 
         self.emit(&job);
         Ok(job)
+    }
+
+    pub fn cancel_all(&self) -> AppResult<CancelAllResult> {
+        let ids: Vec<String> = self
+            .list()?
+            .into_iter()
+            .filter(|j| j.status == JobStatus::Pending || j.status == JobStatus::Running)
+            .map(|j| j.id)
+            .collect();
+
+        let mut cancelled = 0u32;
+        let mut errors = Vec::new();
+        for id in ids {
+            match self.cancel(&id) {
+                // Only count when cancel actually marked the job failed.
+                // A race to Done returns Ok without changing status.
+                Ok(job) if job.status == JobStatus::Failed => cancelled += 1,
+                Ok(_) => {}
+                Err(e) => errors.push(format!("{id}: {e}")),
+            }
+        }
+        Ok(CancelAllResult { cancelled, errors })
+    }
+
+    pub fn clear_finished(&self) -> AppResult<ClearFinishedResult> {
+        let cleared = self.db.lock().map_err(lock_err)?.delete_finished_jobs()?;
+        Ok(ClearFinishedResult { cleared })
     }
 
     pub fn retry(&self, id: &str) -> AppResult<DownloadJob> {
@@ -1174,6 +1202,107 @@ mod tests {
         let cancelled = manager.cancel(&job.id).unwrap();
         assert_eq!(cancelled.status, JobStatus::Failed);
         assert_eq!(cancelled.error.as_deref(), Some("用户取消下载"));
+    }
+
+    #[tokio::test]
+    async fn cancel_all_marks_active_jobs_failed_and_skips_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("jobs.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let mut done = sample_job("done-keep");
+            done.video_id = "BV-done".into();
+            done.status = JobStatus::Done;
+            done.progress = 1.0;
+            done.output_path = Some(dir.path().join("kept.mp4").to_string_lossy().into());
+            std::fs::write(dir.path().join("kept.mp4"), b"keep").unwrap();
+            db.insert_job(&done).unwrap();
+        }
+
+        let mock = Arc::new(MockDownloader::slow_success(800));
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::clone(&mock) as Arc<dyn Downloader>,
+        );
+        let a = manager.enqueue(sample_job("job-a"), false).unwrap();
+        let mut job_b = sample_job("job-b");
+        job_b.video_id = "BV2xx".into();
+        let b = manager.enqueue(job_b, false).unwrap();
+        sleep(Duration::from_millis(40)).await;
+        mock.mark_cancelled(&a.id);
+        mock.mark_cancelled(&b.id);
+
+        let result = manager.cancel_all().unwrap();
+        assert_eq!(result.cancelled, 2);
+        assert!(result.errors.is_empty());
+
+        let jobs = manager.list().unwrap();
+        let done = jobs.iter().find(|j| j.id == "done-keep").unwrap();
+        assert_eq!(done.status, JobStatus::Done);
+        assert_eq!(
+            done.output_path.as_deref(),
+            Some(dir.path().join("kept.mp4").to_string_lossy().as_ref())
+        );
+        assert!(dir.path().join("kept.mp4").is_file());
+
+        for id in [&a.id, &b.id] {
+            let job = jobs.iter().find(|j| j.id == *id).unwrap();
+            assert_eq!(job.status, JobStatus::Failed);
+            assert_eq!(job.error.as_deref(), Some("用户取消下载"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_all_with_no_active_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::slow_success(50)) as Arc<dyn Downloader>,
+        );
+        let result = manager.cancel_all().unwrap();
+        assert_eq!(result.cancelled, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn clear_finished_deletes_records_keeps_files_and_active_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("video.mp4");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        {
+            let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+            let mut pending = sample_job("pending-1");
+            pending.status = JobStatus::Pending;
+            db.insert_job(&pending).unwrap();
+
+            let mut done = sample_job("done-1");
+            done.status = JobStatus::Done;
+            done.progress = 1.0;
+            done.output_path = Some(file_path.to_string_lossy().into());
+            db.insert_job(&done).unwrap();
+
+            let mut failed = sample_job("failed-1");
+            failed.status = JobStatus::Failed;
+            failed.error = Some("用户取消下载".into());
+            db.insert_job(&failed).unwrap();
+        }
+
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::slow_success(50)) as Arc<dyn Downloader>,
+        );
+        let result = manager.clear_finished().unwrap();
+        assert_eq!(result.cleared, 2);
+        assert!(file_path.is_file(), "local file must remain");
+
+        let jobs = manager.list().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "pending-1");
+        assert_eq!(jobs[0].status, JobStatus::Pending);
     }
 
     type ProgressCallback = Box<dyn Fn(ProgressUpdate) + Send>;

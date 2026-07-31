@@ -14,9 +14,10 @@ mod sidecar;
 mod ytdlp;
 
 use commands::{
-    build_app_state, cancel_job, check_download_conflict, clear_auth, delete_job, enqueue_download,
-    get_auth_status, get_settings, import_cookies_path, list_jobs, open_path, pick_cookies_file,
-    pick_save_dir, preview_name, resolve_url, retry_job, save_settings, start_bilibili_login,
+    build_app_state, cancel_all_jobs, cancel_job, check_download_conflict, clear_auth,
+    clear_finished_jobs, delete_job, enqueue_download, get_auth_status, get_settings,
+    import_cookies_path, list_jobs, open_path, pick_cookies_file, pick_save_dir, preview_name,
+    resolve_url, retry_job, save_settings, start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -37,6 +38,8 @@ pub fn run() {
             enqueue_download,
             list_jobs,
             cancel_job,
+            cancel_all_jobs,
+            clear_finished_jobs,
             retry_job,
             delete_job,
             get_settings,

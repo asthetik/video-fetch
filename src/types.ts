@@ -61,3 +61,12 @@ export interface AppSettings {
   prefer_bundled_tools: boolean;
   skip_existing: boolean;
 }
+
+export interface CancelAllResult {
+  cancelled: number;
+  errors?: string[];
+}
+
+export interface ClearFinishedResult {
+  cleared: number;
+}
