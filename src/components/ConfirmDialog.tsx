@@ -5,6 +5,8 @@ interface ConfirmDialogProps {
   title: string;
   message: string;
   confirmLabel: string;
+  /** Label for the dismiss button. Defaults to 取消. */
+  cancelLabel?: string;
   /** When true, confirm button uses btn-danger */
   danger?: boolean;
   busy?: boolean;
@@ -17,6 +19,7 @@ export function ConfirmDialog({
   title,
   message,
   confirmLabel,
+  cancelLabel = "取消",
   danger = false,
   busy = false,
   onCancel,
@@ -52,7 +55,7 @@ export function ConfirmDialog({
             disabled={busy}
             onClick={onCancel}
           >
-            取消
+            {cancelLabel}
           </button>
           <button
             type="button"

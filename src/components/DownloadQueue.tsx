@@ -355,6 +355,7 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
         title="取消全部下载"
         message={`将取消 ${cancellableCount} 个进行中的任务。不会删除已保存的本地文件。`}
         confirmLabel="全部取消"
+        cancelLabel="关闭"
         busy={bulkBusy}
         onCancel={() => {
           if (!bulkBusy) setConfirmCancelAll(false);
