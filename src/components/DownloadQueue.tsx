@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { ConfirmDialog } from "./ConfirmDialog";
 import {
   DeleteConfirmDialog,
   type DeleteChoice,
@@ -125,6 +126,8 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
+  const [confirmCancelAll, setConfirmCancelAll] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const loadJobs = useCallback(async () => {
     const list = await api.listJobs();
@@ -212,6 +215,31 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
     await api.openPath(parentDir(job.output_path));
   }
 
+  async function handleCancelAll() {
+    setBulkBusy(true);
+    setActionError(null);
+    try {
+      const result = await api.cancelAllJobs();
+      if (result.errors && result.errors.length > 0) {
+        setActionError(
+          `已取消 ${result.cancelled} 个任务，部分失败：${result.errors[0]}`,
+        );
+      }
+      setConfirmCancelAll(false);
+      await loadJobs();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+      setConfirmCancelAll(false);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  const activeCancellable = jobs.filter(
+    (j) => j.status === "pending" || j.status === "running",
+  );
+  const cancellableCount = activeCancellable.length;
+
   const activeJobs = jobs.filter(
     (j) => j.status === "pending" || j.status === "running" || j.status === "failed",
   );
@@ -219,7 +247,22 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
 
   return (
     <section className="download-queue">
-      <h3>下载队列</h3>
+      <div className="section-heading">
+        <h3>下载队列</h3>
+        {cancellableCount > 0 && (
+          <button
+            type="button"
+            className="btn-text"
+            disabled={bulkBusy}
+            onClick={() => {
+              setActionError(null);
+              setConfirmCancelAll(true);
+            }}
+          >
+            全部取消
+          </button>
+        )}
+      </div>
       {loading && <p className="queue-empty">加载中…</p>}
       {actionError && <p className="url-hint error">{actionError}</p>}
       {!loading && displayJobs.length === 0 && (
@@ -301,6 +344,18 @@ export function DownloadQueue({ refreshToken }: DownloadQueueProps) {
           })}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={confirmCancelAll}
+        title="取消全部下载"
+        message={`将取消 ${cancellableCount} 个进行中的任务。不会删除已保存的本地文件。`}
+        confirmLabel="全部取消"
+        busy={bulkBusy}
+        onCancel={() => {
+          if (!bulkBusy) setConfirmCancelAll(false);
+        }}
+        onConfirm={() => void handleCancelAll()}
+      />
 
       <DeleteConfirmDialog
         open={pendingDelete !== null}
