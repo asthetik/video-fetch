@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   DeleteConfirmDialog,
   type DeleteChoice,
@@ -32,6 +33,9 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
   const [loading, setLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const historyCount = jobs.length;
 
   const loadJobs = useCallback(async () => {
     const list = await api.listJobs();
@@ -57,6 +61,22 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
     await api.openPath(parentDir(job.output_path));
   }
 
+  async function handleClearFinished() {
+    setBulkBusy(true);
+    setActionError(null);
+    try {
+      await api.clearFinishedJobs();
+      setConfirmClear(false);
+      setJobs([]);
+      onJobsChanged?.();
+    } catch (err) {
+      setConfirmClear(false);
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function applyDelete(job: DownloadJob, choice: DeleteChoice) {
     setPendingDelete(null);
     if (choice === "cancel") {
@@ -76,8 +96,25 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
 
   return (
     <div className="history-page">
-      <h2 className="page-title">下载历史</h2>
-      <p className="page-desc">已完成或失败的下载任务</p>
+      <div className="history-page-header">
+        <div>
+          <h2 className="page-title">下载历史</h2>
+          <p className="page-desc">已完成或失败的下载任务</p>
+        </div>
+        {historyCount > 0 && (
+          <button
+            type="button"
+            className="btn-text btn-danger"
+            disabled={bulkBusy}
+            onClick={() => {
+              setActionError(null);
+              setConfirmClear(true);
+            }}
+          >
+            清空
+          </button>
+        )}
+      </div>
 
       {loading && <p className="queue-empty">加载中…</p>}
       {actionError && <p className="url-hint error">{actionError}</p>}
@@ -138,6 +175,19 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={confirmClear}
+        title="清空下载历史"
+        message={`将清除 ${historyCount} 条历史记录。本地已下载的文件不会被删除。`}
+        confirmLabel="清空"
+        danger
+        busy={bulkBusy}
+        onCancel={() => {
+          if (!bulkBusy) setConfirmClear(false);
+        }}
+        onConfirm={() => void handleClearFinished()}
+      />
 
       <DeleteConfirmDialog
         open={pendingDelete !== null}
