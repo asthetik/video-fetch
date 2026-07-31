@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Video Fetch",
-  "mainBinaryName": "Video Fetch",
   "version": "0.1.3",
   "identifier": "app.videofetch.desktop",
   "build": {
@@ -38,8 +37,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "12.0",
-      "bundleName": "Video Fetch"
+      "minimumSystemVersion": "12.0"
     }
   }
 }
