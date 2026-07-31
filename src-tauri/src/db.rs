@@ -246,7 +246,6 @@ impl Db {
     }
 
     /// Delete all done/failed rows. Does not touch pending/running or any files on disk.
-    #[allow(dead_code)]
     pub fn delete_finished_jobs(&self) -> AppResult<u64> {
         let deleted = self
             .conn

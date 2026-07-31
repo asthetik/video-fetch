@@ -104,3 +104,17 @@ pub enum AuthStatus {
     LoggedIn,
     PossiblyExpired,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelAllResult {
+    pub cancelled: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearFinishedResult {
+    pub cleared: u64,
+}
