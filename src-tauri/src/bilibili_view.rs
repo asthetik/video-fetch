@@ -1,3 +1,4 @@
+use reqwest::Client;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
@@ -18,7 +19,7 @@ pub async fn resolve_view(url: &str) -> AppResult<VideoMeta> {
     let url = canonicalize_video_url(url);
     let bvid = resolve_cache::extract_bilibili_id(&url)
         .ok_or_else(|| AppError::Message("无法从链接解析 BV 号，跳过 view 快路径".into()))?;
-    let client = reqwest::Client::builder()
+    let client = Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(VIEW_TIMEOUT)
         .timeout(VIEW_TIMEOUT)
