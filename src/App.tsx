@@ -1,12 +1,15 @@
 import { useCallback, useState } from "react";
 import { AuthStatus } from "./components/AuthStatus";
+import { PageShell } from "./components/PageShell";
+import { usePageTransition } from "./hooks/usePageTransition";
+import type { AppPage } from "./lib/pageTransition";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
 import { AboutPage } from "./pages/AboutPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import "./styles.css";
 
-type Page = "home" | "history" | "settings" | "about";
+type Page = AppPage;
 
 const NAV_ITEMS: { id: Page; label: string }[] = [
   { id: "home", label: "主页" },
@@ -17,6 +20,13 @@ const NAV_ITEMS: { id: Page; label: string }[] = [
 
 function App() {
   const [page, setPage] = useState<Page>("home");
+  const {
+    displayedPage,
+    phase,
+    reducedMotion,
+    onExitComplete,
+    onEnterComplete,
+  } = usePageTransition(page);
   const [queueRefresh, setQueueRefresh] = useState(0);
   const bumpQueueRefresh = useCallback(() => {
     setQueueRefresh((n) => n + 1);
@@ -44,22 +54,31 @@ function App() {
       </header>
 
       <main className="app-main">
-        {/* Keep home mounted so pasted URL and resolved video survive tab switches. */}
-        <div
-          className={page === "home" ? undefined : "page-hidden"}
-          aria-hidden={page !== "home"}
+        <PageShell
+          phase={phase}
+          reducedMotion={reducedMotion}
+          onExitComplete={onExitComplete}
+          onEnterComplete={onEnterComplete}
         >
-          <HomePage
-            queueRefresh={queueRefresh}
-            onQueueRefresh={bumpQueueRefresh}
-            onOpenHistory={() => setPage("history")}
-          />
-        </div>
-        {page === "history" && (
-          <HistoryPage onJobsChanged={bumpQueueRefresh} />
-        )}
-        {page === "settings" && <SettingsPage />}
-        {page === "about" && <AboutPage />}
+          {/* Keep home mounted so pasted URL and resolved video survive tab switches. */}
+          <div
+            className={displayedPage === "home" ? undefined : "page-hidden"}
+            aria-hidden={displayedPage !== "home" ? true : undefined}
+            {...(displayedPage !== "home" ? { inert: true } : {})}
+          >
+            <HomePage
+              queueRefresh={queueRefresh}
+              onQueueRefresh={bumpQueueRefresh}
+              onOpenHistory={() => setPage("history")}
+            />
+          </div>
+
+          {displayedPage === "history" && (
+            <HistoryPage onJobsChanged={bumpQueueRefresh} />
+          )}
+          {displayedPage === "settings" && <SettingsPage />}
+          {displayedPage === "about" && <AboutPage />}
+        </PageShell>
       </main>
     </div>
   );
