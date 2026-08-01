@@ -35,7 +35,7 @@ tauri-plugin-dialog = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 which = "8"
 tauri-plugin-shell = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 
 [dev-dependencies]
 tempfile = "3"
