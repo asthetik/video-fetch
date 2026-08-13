@@ -21,19 +21,8 @@ struct DashVariant {
     qn: i64,
 }
 
-pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
-    if v.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
-        let msg = v
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        return Err(AppError::Message(format!("playurl code != 0: {msg}")));
-    }
-    let data = v
-        .get("data")
-        .ok_or_else(|| AppError::Message("playurl response missing data".into()))?;
-
-    // support_formats carries qn -> display text only; heights live in dash.video.
+/// support_formats carries qn -> display text only; heights live in dash.video.
+fn labels_by_qn(data: &Value) -> HashMap<i64, String> {
     let mut label_by_qn: HashMap<i64, String> = HashMap::new();
     if let Some(formats) = data.get("support_formats").and_then(Value::as_array) {
         for f in formats {
@@ -49,7 +38,10 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
             }
         }
     }
+    label_by_qn
+}
 
+fn collect_variants(data: &Value) -> AppResult<Vec<DashVariant>> {
     // Build one option per DASH video variant, straight from the response data.
     let mut variants: Vec<DashVariant> = Vec::new();
     let mut seen: HashSet<(u32, String, u32)> = HashSet::new();
@@ -109,6 +101,25 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
             "playurl response has no DASH video streams".into(),
         ));
     }
+    Ok(variants)
+}
+
+fn data_of(v: &Value) -> AppResult<&Value> {
+    if v.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+        let msg = v
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(AppError::Message(format!("playurl code != 0: {msg}")));
+    }
+    v.get("data")
+        .ok_or_else(|| AppError::Message("playurl response missing data".into()))
+}
+
+pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
+    let data = data_of(v)?;
+    let label_by_qn = labels_by_qn(data);
+    let mut variants = collect_variants(data)?;
 
     // Within one (height, codec) group, split adjacent bitrates at their midpoint
     // so each option's selector matches exactly one variant.
@@ -159,12 +170,83 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
     Ok(kept)
 }
 
+/// Multi-P: one option per (height, codec) instead of per bitrate variant, since
+/// per-page bitrates differ and every page may not carry the same variants. The
+/// selector falls back to the same height in any codec, then to `best`.
+pub fn parse_multi_page_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
+    let data = data_of(v)?;
+    let variants = collect_variants(data)?;
+
+    let mut best: HashMap<(u32, String), (u32, u32, String)> = HashMap::new();
+    for var in variants {
+        let entry = best
+            .entry((var.height, var.codec_prefix.clone()))
+            .or_insert_with(|| (var.fps, var.tbr_kbps, var.codec.clone()));
+        if var.tbr_kbps > entry.1 {
+            *entry = (var.fps.max(entry.0), var.tbr_kbps, var.codec.clone());
+        } else {
+            entry.0 = entry.0.max(var.fps);
+        }
+    }
+
+    let mut out: Vec<FormatOption> = best
+        .into_iter()
+        .map(|((height, prefix), (fps, tbr, codec))| FormatOption {
+            format_id: format!(
+                "bestvideo[height={height}][vcodec^={prefix}]+bestaudio/bestvideo[height={height}]+bestaudio/best"
+            ),
+            label: format!(
+                "{} · {codec}",
+                crate::ytdlp::resolution_label(Some(height), (fps > 0).then_some(fps))
+            ),
+            height: Some(height),
+            fps: (fps > 0).then_some(fps),
+            tbr: Some(tbr as f64),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.height.cmp(&a.height).then(
+            b.tbr
+                .partial_cmp(&a.tbr)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+    Ok(out)
+}
+
+/// Merge per-page (height, codec) options from multi-P sampling. Deduplicates by
+/// selector and keeps the highest observed bitrate/fps for sorting.
+pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<FormatOption>) {
+    for option in incoming {
+        if let Some(existing) = target.iter_mut().find(|o| o.format_id == option.format_id) {
+            existing.tbr = match (existing.tbr, option.tbr) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+            existing.fps = match (existing.fps, option.fps) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+        } else {
+            target.push(option);
+        }
+    }
+    target.sort_by(|a, b| {
+        b.height.cmp(&a.height).then(
+            b.tbr
+                .partial_cmp(&a.tbr)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+}
+
 pub async fn fetch_formats(
     client: &reqwest::Client,
     keys: &WbiKeys,
     bvid: &str,
     cid: &str,
     cookie_header: Option<&str>,
+    multi_page: bool,
 ) -> AppResult<Vec<FormatOption>> {
     let params: Vec<(String, String)> = vec![
         ("bvid".into(), bvid.to_string()),
@@ -199,7 +281,11 @@ pub async fn fetch_formats(
         .json()
         .await
         .map_err(|e| AppError::Message(format!("playurl JSON 失败: {e}")))?;
-    parse_playurl_formats(&body)
+    if multi_page {
+        parse_multi_page_playurl_formats(&body)
+    } else {
+        parse_playurl_formats(&body)
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +369,48 @@ mod tests {
         let formats = parse_playurl_formats(&v).unwrap();
         assert_eq!(formats.len(), 1);
         assert_eq!(formats[0].height, Some(1080));
+    }
+
+    #[test]
+    fn multi_page_parser_groups_by_height_and_codec_with_fallback() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "support_formats": [],
+                "dash": {
+                    "video": [
+                        {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 3000000},
+                        {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "av01.0.08M.08", "bandwidth": 1200000},
+                        {"id": 64, "height": 720, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 1500000}
+                    ]
+                }
+            }
+        });
+        let formats = parse_multi_page_playurl_formats(&v).unwrap();
+        assert_eq!(formats.len(), 3);
+        assert_eq!(
+            formats[0].format_id,
+            "bestvideo[height=1080][vcodec^=avc1]+bestaudio/bestvideo[height=1080]+bestaudio/best"
+        );
+        assert!(formats[0].label.contains("avc1.640033"));
+        assert!(formats[1].format_id.contains("vcodec^=av01"));
+        assert_eq!(formats[2].height, Some(720));
+    }
+
+    #[test]
+    fn merge_multi_page_options_dedupes_and_keeps_max_bitrate() {
+        let page = |bandwidth: u32| {
+            vec![FormatOption {
+                format_id: "bestvideo[height=1080][vcodec^=avc1]+bestaudio/bestvideo[height=1080]+bestaudio/best".into(),
+                label: "1080p · avc1.640033".into(),
+                height: Some(1080),
+                fps: Some(24),
+                tbr: Some(bandwidth as f64),
+            }]
+        };
+        let mut observed = page(3000);
+        merge_multi_page_options(&mut observed, page(4200));
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].tbr, Some(4200.0));
     }
 }

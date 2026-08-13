@@ -85,7 +85,7 @@ async fn multi_page_playurl_formats(
         let client = client.clone();
         let keys = keys.clone();
         tasks.push(tokio::spawn(async move {
-            playurl::fetch_formats(&client, &keys, &bvid, &cid, cookie_header.as_deref())
+            playurl::fetch_formats(&client, &keys, &bvid, &cid, cookie_header.as_deref(), true)
                 .await
                 .ok()
         }));
@@ -95,13 +95,10 @@ async fn multi_page_playurl_formats(
         let Ok(Some(formats)) = task.await else {
             continue;
         };
-        observed.extend(formats);
-        on_progress(ytdlp::finalize_formats_for_pages(
-            observed.clone(),
-            pages.len(),
-        ));
+        playurl::merge_multi_page_options(&mut observed, formats);
+        on_progress(observed.clone());
     }
-    (!observed.is_empty()).then(|| ytdlp::finalize_formats_for_pages(observed, pages.len()))
+    (!observed.is_empty()).then_some(observed)
 }
 
 pub fn is_resolve_current(active_id: u64, request_id: u64) -> bool {
@@ -376,8 +373,15 @@ pub async fn resolve_url(
         match (bvid, keys) {
             (Some(bvid), Some(keys)) if view.pages.len() == 1 => {
                 let cid = view.pages[0].page_id.clone();
-                match playurl::fetch_formats(&client, &keys, &bvid, &cid, cookie_header.as_deref())
-                    .await
+                match playurl::fetch_formats(
+                    &client,
+                    &keys,
+                    &bvid,
+                    &cid,
+                    cookie_header.as_deref(),
+                    false,
+                )
+                .await
                 {
                     Ok(formats) => Some(formats),
                     Err(e) => {
