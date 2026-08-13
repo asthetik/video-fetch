@@ -729,10 +729,14 @@ pub async fn download(
     let selector = dash_format_selector(format_id);
     let mut cmd = Command::new(&cfg.yt_dlp_path);
     hide_windows_console(&mut cmd);
-    cmd.arg("-f")
-        .arg(&selector)
-        .arg("--format-sort")
-        .arg("res,tbr")
+    cmd.arg("-f").arg(&selector);
+    // Height-preference selectors (`vh{N}` -> bestvideo[height<=N]) pick among
+    // multiple codecs, so sort by resolution then bitrate to keep the default
+    // download on the highest-bitrate stream. Exact selectors need no sorting.
+    if parse_height_format_id(format_id).is_some() {
+        cmd.arg("--format-sort").arg("res,tbr");
+    }
+    cmd
         .arg("-o")
         .arg(&output_spec)
         .arg("--no-playlist")

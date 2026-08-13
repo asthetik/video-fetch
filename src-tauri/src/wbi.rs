@@ -50,6 +50,7 @@ pub fn mixin_key(keys: &WbiKeys) -> String {
         .iter()
         .filter_map(|&i| raw.as_bytes().get(i))
         .map(|&b| b as char)
+        .take(32)
         .collect()
 }
 
@@ -181,10 +182,7 @@ mod tests {
 
     #[test]
     fn mixin_key_matches_known_vector() {
-        assert_eq!(
-            mixin_key(&keys()),
-            "ea1db124af3c7062474693fa704f4ff8ab4a500c8e7ca0784bf98095b48cd341"
-        );
+        assert_eq!(mixin_key(&keys()), "ea1db124af3c7062474693fa704f4ff8");
     }
 
     #[test]
@@ -195,7 +193,7 @@ mod tests {
         ];
         assert_eq!(
             sign_with_wts(&keys(), &params, "1700000000"),
-            "fdfca650860c38d608d40d516906a86a"
+            "7efd24a7599a55b8a36489705227eae5"
         );
     }
 

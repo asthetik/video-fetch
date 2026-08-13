@@ -2,7 +2,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::FormatOption;
 use crate::wbi::{self, WbiKeys};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const PLAYURL_URL: &str = "https://api.bilibili.com/x/player/wbi/playurl";
 
@@ -52,6 +52,7 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
 
     // Build one option per DASH video variant, straight from the response data.
     let mut variants: Vec<DashVariant> = Vec::new();
+    let mut seen: HashSet<(u32, String, u32)> = HashSet::new();
     if let Some(dash) = data
         .get("dash")
         .and_then(|d| d.get("video"))
@@ -84,6 +85,12 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
                 .and_then(Value::as_u64)
                 .map(|b| (b / 1000) as u32)
                 .unwrap_or(0);
+            if tbr_kbps == 0 {
+                continue;
+            }
+            if !seen.insert((height, codec_prefix.clone(), tbr_kbps)) {
+                continue;
+            }
             variants.push(DashVariant {
                 height,
                 codec,
@@ -256,5 +263,25 @@ mod tests {
             }
         });
         assert!(parse_playurl_formats(&v).is_err());
+    }
+
+    #[test]
+    fn dedupes_identical_variants_and_skips_zero_bandwidth() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "support_formats": [],
+                "dash": {
+                    "video": [
+                        {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 3000000},
+                        {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 3000000},
+                        {"id": 64, "height": 720, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 0}
+                    ]
+                }
+            }
+        });
+        let formats = parse_playurl_formats(&v).unwrap();
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].height, Some(1080));
     }
 }

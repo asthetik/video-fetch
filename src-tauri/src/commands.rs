@@ -401,7 +401,7 @@ pub async fn resolve_url(
                         },
                     );
                 };
-                multi_page_playurl_formats(
+                let result = multi_page_playurl_formats(
                     &client,
                     &keys,
                     &bvid,
@@ -409,7 +409,11 @@ pub async fn resolve_url(
                     cookie_header.as_deref(),
                     progress_emit,
                 )
-                .await
+                .await;
+                if result.is_none() {
+                    state.wbi_keys.invalidate();
+                }
+                result
             }
             _ => None,
         }
