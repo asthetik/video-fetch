@@ -43,7 +43,6 @@ pub struct FormatOption {
     /// Approximate total bitrate (kbps) from yt-dlp `tbr`; used for sort/default.
     #[serde(default)]
     pub tbr: Option<f64>,
-    pub requires_login: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,11 +75,8 @@ pub struct DownloadJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub save_dir: String,
-    /// Kept for settings.json compatibility; UI always picks highest listed format.
-    pub default_format_preference: String,
     pub concurrency: u32,
     pub filename_template: String,
-    pub prefer_bundled_tools: bool,
     pub skip_existing: bool,
 }
 
@@ -88,10 +84,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             save_dir: String::new(),
-            default_format_preference: "best".into(),
             concurrency: 1,
             filename_template: "%(title)s [%(id)s].%(ext)s".into(),
-            prefer_bundled_tools: true,
             skip_existing: true,
         }
     }

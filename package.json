@@ -1,7 +1,7 @@
 {
   "name": "video-fetch",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "asthetik",
   "license": "Apache-2.0",
   "type": "module",
@@ -9,11 +9,11 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test": "node --test \"src/lib/*.test.ts\"",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-opener": "^2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

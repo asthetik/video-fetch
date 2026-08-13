@@ -2,7 +2,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Local};
 
-const OUTPUT_EXTS: &[&str] = &["mp4", "mkv", "webm", "flv", "mov"];
+/// Video container extensions this app may produce (also used to spot the work-dir product).
+pub const OUTPUT_EXTS: &[&str] = &["mp4", "mkv", "webm", "flv", "mov"];
 
 pub fn sanitize_filename_component(s: &str) -> String {
     let out: String = s

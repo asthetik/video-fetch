@@ -1,20 +1,37 @@
 use std::path::{Path, PathBuf};
 
+use crate::naming::OUTPUT_EXTS;
+
 pub fn work_dir_for(work_root: &Path, job_id: &str) -> PathBuf {
     work_root.join(job_id)
 }
 
+fn has_output_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    OUTPUT_EXTS.iter().any(|ext| lower.ends_with(ext))
+}
+
 pub fn find_work_product(work: &Path) -> Option<PathBuf> {
+    // First pass prefers real media containers (a thumbnail/subtitle written into the
+    // work dir must not be relocated as the download product); fall back to any
+    // non-empty non-part file to keep recovery working for unusual outputs.
+    find_work_product_pass(work, true).or_else(|| find_work_product_pass(work, false))
+}
+
+fn find_work_product_pass(work: &Path, media_only: bool) -> Option<PathBuf> {
     let entries = std::fs::read_dir(work).ok()?;
     for ent in entries.flatten() {
         let path = ent.path();
         if path.is_file() {
             let name = path.file_name()?.to_string_lossy();
-            if !name.ends_with(".part") && path.metadata().ok()?.len() > 0 {
+            if !name.ends_with(".part")
+                && path.metadata().ok()?.len() > 0
+                && (!media_only || has_output_ext(&name))
+            {
                 return Some(path);
             }
         } else if path.is_dir()
-            && let Some(found) = find_work_product(&path)
+            && let Some(found) = find_work_product_pass(&path, media_only)
         {
             return Some(found);
         }
@@ -101,6 +118,16 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("out.mkv"), b"video").unwrap();
         assert_eq!(find_work_product(&work), Some(nested.join("out.mkv")));
+    }
+
+    #[test]
+    fn find_work_product_prefers_media_over_sidecar_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("job-1");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("cover.jpg"), b"thumb").unwrap();
+        fs::write(work.join("clip.mp4"), b"video").unwrap();
+        assert_eq!(find_work_product(&work), Some(work.join("clip.mp4")));
     }
 
     #[test]

@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    # Run on every branch push. Dependabot branches are skipped here to avoid
+    # duplicate runs, since their pull_request events still trigger CI below.
+    branches-ignore:
+      - 'dependabot/**'
   pull_request:
     branches: [main, dev]
 
@@ -17,6 +20,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm run test
 
   rust:
     runs-on: ubuntu-latest

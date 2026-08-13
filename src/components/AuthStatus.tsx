@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { api } from "../lib/tauri";
 import type { AuthStatus as AuthStatusType } from "../types";
 
@@ -22,6 +23,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
   const [status, setStatus] = useState<AuthStatusType>("logged_out");
   const [loggingIn, setLoggingIn] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [confirmLogout, setConfirmLogout] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
 
   const applyStatus = useCallback(
@@ -72,7 +74,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
   }
 
   async function handleLogout() {
-    if (!confirm(LOGOUT_CONFIRM)) return;
+    setConfirmLogout(false);
     setLoggingOut(true);
     setHint(null);
     try {
@@ -109,7 +111,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
           <button
             type="button"
             className="btn btn-sm"
-            onClick={() => void handleLogout()}
+            onClick={() => setConfirmLogout(true)}
             disabled={loggingOut}
           >
             {loggingOut ? "登出中…" : "登出"}
@@ -117,6 +119,20 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
         )}
       </div>
       {hint && <p className="auth-hint">{hint}</p>}
+
+      <ConfirmDialog
+        open={confirmLogout}
+        title="退出登录"
+        message={LOGOUT_CONFIRM}
+        confirmLabel="退出登录"
+        cancelLabel="关闭"
+        danger
+        busy={loggingOut}
+        onCancel={() => {
+          if (!loggingOut) setConfirmLogout(false);
+        }}
+        onConfirm={() => void handleLogout()}
+      />
     </div>
   );
 }

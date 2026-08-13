@@ -109,19 +109,11 @@ fn is_ytdlp_status_line(line: &str) -> bool {
     trimmed.starts_with('[') || trimmed.starts_with('{')
 }
 
-#[cfg(test)]
 pub fn video_meta_from_yt_dlp_json(v: &serde_json::Value) -> AppResult<VideoMeta> {
-    map_video_meta(v, false)
+    map_video_meta(v)
 }
 
-pub fn video_meta_from_yt_dlp_json_with_cookies(
-    v: &serde_json::Value,
-    has_cookies: bool,
-) -> AppResult<VideoMeta> {
-    map_video_meta(v, has_cookies)
-}
-
-fn map_video_meta(v: &serde_json::Value, has_cookies: bool) -> AppResult<VideoMeta> {
+fn map_video_meta(v: &serde_json::Value) -> AppResult<VideoMeta> {
     let id = v
         .get("id")
         .and_then(|x| x.as_str())
@@ -163,8 +155,7 @@ fn map_video_meta(v: &serde_json::Value, has_cookies: bool) -> AppResult<VideoMe
             .and_then(|x| x.as_str())
             .map(str::to_string);
     }
-    let formats =
-        finalize_formats_for_pages(collect_formats_from_playlist(v, has_cookies), pages.len());
+    let formats = finalize_formats_for_pages(collect_formats_from_playlist(v), pages.len());
 
     Ok(VideoMeta {
         id,
@@ -180,15 +171,15 @@ fn map_video_meta(v: &serde_json::Value, has_cookies: bool) -> AppResult<VideoMe
 
 /// Gather video formats from the playlist JSON: top-level plus every entry that
 /// already carries a `formats` list (not only the first page).
-fn collect_formats_from_playlist(v: &serde_json::Value, has_cookies: bool) -> Vec<FormatOption> {
-    let mut out = parse_formats(v, has_cookies);
+fn collect_formats_from_playlist(v: &serde_json::Value) -> Vec<FormatOption> {
+    let mut out = parse_formats(v);
     if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
         for entry in entries {
-            out.extend(parse_formats(entry, has_cookies));
+            out.extend(parse_formats(entry));
         }
     }
     if out.is_empty() {
-        out = parse_formats(media_source_value(v), has_cookies);
+        out = parse_formats(media_source_value(v));
     }
     out
 }
@@ -272,7 +263,7 @@ fn page_query_param(url: &str) -> Option<u32> {
     None
 }
 
-fn parse_formats(v: &serde_json::Value, _has_cookies: bool) -> Vec<FormatOption> {
+fn parse_formats(v: &serde_json::Value) -> Vec<FormatOption> {
     let Some(formats) = v.get("formats").and_then(|f| f.as_array()) else {
         return Vec::new();
     };
@@ -298,9 +289,6 @@ fn parse_formats(v: &serde_json::Value, _has_cookies: bool) -> Vec<FormatOption>
                 .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("sdr"));
 
             let label = build_format_label(height, fps, vcodec, tbr, dynamic_range);
-            // Formats returned by yt-dlp for the current cookie state are downloadable
-            // as-is; do not mark them "login required" by resolution heuristics.
-            let requires_login = false;
 
             Some(FormatOption {
                 format_id,
@@ -308,7 +296,6 @@ fn parse_formats(v: &serde_json::Value, _has_cookies: bool) -> Vec<FormatOption>
                 height,
                 fps,
                 tbr,
-                requires_login,
             })
         })
         .collect();
@@ -406,7 +393,6 @@ fn multi_page_quality_from_observed(observed: &[FormatOption]) -> Vec<FormatOpti
             height: Some(h),
             fps,
             tbr: None,
-            requires_login: false,
         })
         .collect()
 }
@@ -562,7 +548,6 @@ pub async fn resolve_meta(
         cmd.arg("--ffmpeg-location").arg(path);
     }
 
-    let has_cookies = cookies_path.is_some_and(|p| p.exists());
     if let Some(cookies) = cookies_path.filter(|p| p.exists()) {
         cmd.arg("--cookies").arg(cookies);
     }
@@ -582,7 +567,7 @@ pub async fn resolve_meta(
     let v: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| AppError::Message(format!("yt-dlp 输出不是有效 JSON: {e}")))?;
 
-    let mut meta = video_meta_from_yt_dlp_json_with_cookies(&v, has_cookies)?;
+    let mut meta = video_meta_from_yt_dlp_json(&v)?;
     if meta.pages.len() > 1 {
         enrich_multi_page_formats_by_sampling(cfg, cookies_path, &mut meta).await;
     }
@@ -674,7 +659,6 @@ async fn fetch_formats_for_url(
     if let Some(path) = cfg.ffmpeg_path.as_ref() {
         cmd.arg("--ffmpeg-location").arg(path);
     }
-    let has_cookies = cookies_path.is_some_and(|p| p.exists());
     if let Some(cookies) = cookies_path.filter(|p| p.exists()) {
         cmd.arg("--cookies").arg(cookies);
     }
@@ -685,7 +669,7 @@ async fn fetch_formats_for_url(
         return None;
     }
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    Some(parse_formats(&v, has_cookies))
+    Some(parse_formats(&v))
 }
 
 /// Inputs for a single yt-dlp download spawn.
@@ -1086,36 +1070,6 @@ mod tests {
         assert_eq!(meta.formats[0].format_id, "c");
         assert_eq!(meta.formats[1].format_id, "a");
         assert_eq!(meta.formats[2].format_id, "b");
-    }
-
-    #[test]
-    fn formats_never_marked_requires_login_when_listed() {
-        let v = serde_json::json!({
-            "id": "BV1xx",
-            "title": "demo",
-            "webpage_url": "https://www.bilibili.com/video/BV1xx",
-            "formats": [
-                {"format_id": "80", "format_note": "1080P", "height": 1080, "fps": 30},
-                {"format_id": "64", "format_note": "720P", "height": 720, "fps": 30},
-                {"format_id": "74", "format_note": "60fps", "height": 720, "fps": 60}
-            ]
-        });
-        let meta = video_meta_from_yt_dlp_json_with_cookies(&v, false).unwrap();
-        assert!(meta.formats.iter().all(|f| !f.requires_login));
-    }
-
-    #[test]
-    fn no_requires_login_when_cookies_present() {
-        let v = serde_json::json!({
-            "id": "BV1xx",
-            "title": "demo",
-            "webpage_url": "https://www.bilibili.com/video/BV1xx",
-            "formats": [
-                {"format_id": "80", "format_note": "1080P", "height": 1080, "fps": 30}
-            ]
-        });
-        let meta = video_meta_from_yt_dlp_json_with_cookies(&v, true).unwrap();
-        assert!(!meta.formats[0].requires_login);
     }
 
     #[test]

@@ -348,6 +348,8 @@ mod tests {
             .unwrap();
         db.upsert_resolve_cache("bilibili:bv1xx:guest_g2", &meta, 100)
             .unwrap();
+        db.upsert_resolve_cache("bilibili:bv1xx:guest_g3", &meta, 100)
+            .unwrap();
         drop(db);
 
         let db2 = Db::open(&path).unwrap();
@@ -360,6 +362,11 @@ mod tests {
         assert!(
             db2.get_resolve_cache("bilibili:bv1xx:guest_g2")
                 .unwrap()
+                .is_none()
+        );
+        assert!(
+            db2.get_resolve_cache("bilibili:bv1xx:guest_g3")
+                .unwrap()
                 .is_some()
         );
     }
@@ -369,20 +376,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         let meta = sample_video_meta();
-        db.upsert_resolve_cache("bilibili:bv1xx:guest_g2", &meta, 100)
+        db.upsert_resolve_cache("bilibili:bv1xx:guest_g3", &meta, 100)
             .unwrap();
         let (got, at) = db
-            .get_resolve_cache("bilibili:bv1xx:guest_g2")
+            .get_resolve_cache("bilibili:bv1xx:guest_g3")
             .unwrap()
             .unwrap();
         assert_eq!(got.id, "BV1xx");
         assert_eq!(at, 100);
         let mut meta2 = meta.clone();
         meta2.title = "t2".into();
-        db.upsert_resolve_cache("bilibili:bv1xx:guest_g2", &meta2, 200)
+        db.upsert_resolve_cache("bilibili:bv1xx:guest_g3", &meta2, 200)
             .unwrap();
         let (got2, at2) = db
-            .get_resolve_cache("bilibili:bv1xx:guest_g2")
+            .get_resolve_cache("bilibili:bv1xx:guest_g3")
             .unwrap()
             .unwrap();
         assert_eq!(got2.title, "t2");
@@ -396,11 +403,11 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO resolve_cache (cache_key, meta_json, fetched_at) VALUES (?1, ?2, ?3)",
-                params!["bilibili:bv1xx:guest_g2", "{not json", 100_i64],
+                params!["bilibili:bv1xx:guest_g3", "{not json", 100_i64],
             )
             .unwrap();
         assert!(
-            db.get_resolve_cache("bilibili:bv1xx:guest_g2")
+            db.get_resolve_cache("bilibili:bv1xx:guest_g3")
                 .unwrap()
                 .is_none()
         );
