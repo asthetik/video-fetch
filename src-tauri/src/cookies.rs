@@ -55,13 +55,25 @@ pub fn has_bilibili_sessdata(cookies: &[Cookie]) -> bool {
         .any(|cookie| cookie.name == "SESSDATA" && !cookie.value.is_empty())
 }
 
-/// Ensure SESSDATA cookies have a Bilibili domain so Netscape export / yt-dlp work.
+/// True for Bilibili-owned domains (`bilibili.com` or any subdomain), guarding
+/// against suffix lookalikes like `bilibili.com.evil.com`.
+pub fn is_bilibili_domain(domain: &str) -> bool {
+    let d = domain.trim_start_matches('.').to_ascii_lowercase();
+    d == "bilibili.com" || d.ends_with(".bilibili.com")
+}
+
+/// Ensure SESSDATA cookies have a Bilibili domain so Netscape export / yt-dlp work,
+/// and drop cookies from other domains (captcha/tracking cookies the login WebView
+/// accumulates are not needed for downloads and must not be persisted). Only a
+/// domain-less SESSDATA is rewritten onto `.bilibili.com`; a SESSDATA carrying an
+/// explicit foreign domain (including suffix lookalikes) is dropped rather than
+/// trusted and re-hosted under the Bilibili domain.
 pub fn normalize_bilibili_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
     cookies
         .iter()
         .map(|cookie| {
             let mut c = cookie.clone();
-            if c.name == "SESSDATA" && (c.domain.is_empty() || !c.domain.contains("bilibili.com")) {
+            if c.name == "SESSDATA" && c.domain.is_empty() {
                 c.domain = ".bilibili.com".into();
                 c.include_subdomains = true;
             }
@@ -70,6 +82,7 @@ pub fn normalize_bilibili_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
             }
             c
         })
+        .filter(|c| is_bilibili_domain(&c.domain))
         .collect()
 }
 
@@ -129,5 +142,67 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn cookie(domain: &str, name: &str, value: &str) -> Cookie {
+        Cookie {
+            domain: domain.into(),
+            include_subdomains: domain.starts_with('.'),
+            path: "/".into(),
+            secure: true,
+            expiration: 0,
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn normalize_keeps_only_bilibili_domains() {
+        let cookies = vec![
+            cookie(".bilibili.com", "SESSDATA", "abc"),
+            cookie(".bilibili.com", "bili_jct", "tok"),
+            cookie(".geetest.com", "gt", "x"),
+            cookie(".doubleclick.net", "id", "y"),
+        ];
+        let normalized = normalize_bilibili_cookies(&cookies);
+        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["SESSDATA", "bili_jct"]);
+    }
+
+    #[test]
+    fn normalize_rewrites_domainless_sessdata() {
+        let cookies = vec![cookie("", "SESSDATA", "abc")];
+        let normalized = normalize_bilibili_cookies(&cookies);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].domain, ".bilibili.com");
+        assert!(normalized[0].include_subdomains);
+    }
+
+    #[test]
+    fn normalize_drops_sessdata_from_foreign_domain() {
+        let cookies = vec![cookie(".example.com", "SESSDATA", "abc")];
+        let normalized = normalize_bilibili_cookies(&cookies);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn normalize_drops_lookalike_domains() {
+        let cookies = vec![
+            cookie("bilibili.com.evil.com", "SESSDATA", "abc"),
+            cookie("bilibili.com.evil.com", "buvid3", "xyz"),
+        ];
+        let normalized = normalize_bilibili_cookies(&cookies);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn bilibili_domain_matching() {
+        assert!(is_bilibili_domain("bilibili.com"));
+        assert!(is_bilibili_domain(".bilibili.com"));
+        assert!(is_bilibili_domain("www.bilibili.com"));
+        assert!(is_bilibili_domain("passport.bilibili.com"));
+        assert!(!is_bilibili_domain("bilibili.com.evil.com"));
+        assert!(!is_bilibili_domain("notbilibili.com"));
+        assert!(!is_bilibili_domain(""));
     }
 }

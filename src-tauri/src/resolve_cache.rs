@@ -1,8 +1,8 @@
 pub const RESOLVE_CACHE_TTL_SECS: u64 = 7 * 24 * 3600;
 
-/// Cache key generation (`*_g2`). Bump when cached `VideoMeta.formats` shape changes.
-pub const SCOPE_AUTHED: &str = "authed_g2";
-pub const SCOPE_GUEST: &str = "guest_g2";
+/// Cache key generation (`*_g3`). Bump when cached `VideoMeta.formats` shape changes.
+pub const SCOPE_AUTHED: &str = "authed_g3";
+pub const SCOPE_GUEST: &str = "guest_g3";
 
 const STRIP_QUERY_PARAMS: &[&str] = &["spm_id_from", "vd_source", "from_spmid", "p"];
 
@@ -89,7 +89,7 @@ pub fn store_cache_keys(url: &str, video_id: &str, scope: &str) -> Vec<String> {
 }
 
 pub fn is_legacy_cache_key(key: &str) -> bool {
-    !(key.ends_with(":authed_g2") || key.ends_with(":guest_g2"))
+    !(key.ends_with(":authed_g3") || key.ends_with(":guest_g3"))
 }
 
 pub fn is_fresh(fetched_at: i64, now: i64, ttl_secs: u64) -> bool {
@@ -124,8 +124,8 @@ mod tests {
             "https://www.bilibili.com/video/BV1xx411c7mD?p=3&vd_source=abc",
             SCOPE_GUEST,
         );
-        assert_eq!(keys[0], "bilibili:bv1xx411c7md:guest_g2");
-        assert!(keys[1].starts_with("url:") && keys[1].ends_with(":guest_g2"));
+        assert_eq!(keys[0], "bilibili:bv1xx411c7md:guest_g3");
+        assert!(keys[1].starts_with("url:") && keys[1].ends_with(":guest_g3"));
         assert!(!keys[1].contains("vd_source"));
         assert!(!keys[1].contains("p=3"));
     }
@@ -135,8 +135,8 @@ mod tests {
         let url = "https://www.bilibili.com/video/BV1xx411c7mD";
         let guest = store_cache_keys(url, "BV1xx411c7mD", SCOPE_GUEST);
         let authed = store_cache_keys(url, "BV1xx411c7mD", SCOPE_AUTHED);
-        assert_eq!(guest[0], "bilibili:bv1xx411c7md:guest_g2");
-        assert_eq!(authed[0], "bilibili:bv1xx411c7md:authed_g2");
+        assert_eq!(guest[0], "bilibili:bv1xx411c7md:guest_g3");
+        assert_eq!(authed[0], "bilibili:bv1xx411c7md:authed_g3");
         assert_ne!(guest[0], authed[0]);
     }
 
@@ -152,8 +152,9 @@ mod tests {
         assert!(is_legacy_cache_key("url:https://example.com/x"));
         assert!(is_legacy_cache_key("bilibili:bv1xx411c7md:guest"));
         assert!(is_legacy_cache_key("bilibili:bv1xx411c7md:authed"));
-        assert!(!is_legacy_cache_key("bilibili:bv1xx411c7md:guest_g2"));
-        assert!(!is_legacy_cache_key("bilibili:bv1xx411c7md:authed_g2"));
+        assert!(is_legacy_cache_key("bilibili:bv1xx411c7md:guest_g2"));
+        assert!(!is_legacy_cache_key("bilibili:bv1xx411c7md:guest_g3"));
+        assert!(!is_legacy_cache_key("bilibili:bv1xx411c7md:authed_g3"));
     }
 
     #[test]

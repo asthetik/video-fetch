@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -726,20 +726,18 @@ pub fn check_save_dir_writable(path: &Path) -> AppResult<()> {
 }
 
 fn new_job_id() -> String {
-    format!(
-        "job-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("job-{nanos}-{seq}")
 }
 
 fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
     AppError::Message("lock poisoned".into())
 }
-
-const OUTPUT_EXTS: &[&str] = &["mp4", "mkv", "webm", "flv", "mov"];
 
 /// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
 /// Needed because `--print after_move:filepath` can be garbled on Windows locales.
@@ -765,7 +763,7 @@ fn local_output_exists(
             return true;
         }
     }
-    for ext in OUTPUT_EXTS {
+    for ext in naming::OUTPUT_EXTS {
         let relative =
             naming::preview_filename(template, title, video_id, uploader, ext, page_index);
         if save_dir.join(&relative).is_file() {

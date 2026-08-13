@@ -1,32 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and Bilibili login WebView",
-  "windows": ["main", "bilibili-login"],
+  "description": "Capability for the main window only. The bilibili-login window loads an external page and needs no IPC permissions; downloads spawn yt-dlp/ffmpeg from Rust (tokio::process::Command), so no shell:allow-execute is required.",
+  "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:webview:allow-create-webview-window",
-    "core:webview:allow-webview-close",
-    "core:window:allow-close",
-    "core:window:allow-set-focus",
-    "core:event:allow-emit",
-    "core:event:allow-listen",
-    "opener:default",
-    "dialog:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "binaries/yt-dlp",
-          "sidecar": true,
-          "args": true
-        },
-        {
-          "name": "binaries/ffmpeg",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    }
+    "opener:default"
   ]
 }

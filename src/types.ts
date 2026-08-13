@@ -14,7 +14,6 @@ export interface FormatOption {
   fps?: number | null;
   /** Approximate total bitrate (kbps); used for sort/default. */
   tbr?: number | null;
-  requires_login: boolean;
 }
 
 export interface VideoMeta {
@@ -55,10 +54,8 @@ export interface DownloadJob {
 
 export interface AppSettings {
   save_dir: string;
-  default_format_preference: string;
   concurrency: number;
   filename_template: string;
-  prefer_bundled_tools: boolean;
   skip_existing: boolean;
 }
 

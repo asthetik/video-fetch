@@ -271,11 +271,6 @@ pub async fn resolve_url(
             if let Some((mut meta, fetched_at)) = state.downloads.get_resolve_cache(&key)?
                 && resolve_cache::is_fresh(fetched_at, now, resolve_cache::RESOLVE_CACHE_TTL_SECS)
             {
-                // Old cache entries may still have resolution-based requires_login;
-                // listed formats are downloadable under the resolve's cookie state.
-                for format in &mut meta.formats {
-                    format.requires_login = false;
-                }
                 meta.formats = ytdlp::finalize_formats_for_pages(
                     std::mem::take(&mut meta.formats),
                     meta.pages.len(),
@@ -539,6 +534,12 @@ pub fn import_cookies_path(
 #[tauri::command]
 pub fn clear_auth(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     state.auth.clear_auth()?;
+    // Also drop the login WebView session: an open window would otherwise let the
+    // cookie poll re-capture its lingering SESSDATA and flip back to logged in.
+    if let Some(win) = app.get_webview_window(BILIBILI_LOGIN_LABEL) {
+        let _ = win.clear_all_browsing_data();
+        let _ = win.close();
+    }
     let status = state.auth.auth_status();
     let _ = app.emit("auth://status", status);
     Ok(())
@@ -590,6 +591,29 @@ fn try_persist_webview_cookies(app: &AppHandle, win: &tauri::WebviewWindow) -> O
     }
 }
 
+/// Clear the shared WebView browsing data and wait until no Bilibili SESSDATA
+/// remains, so a previous session cannot auto-login. `clear_all_browsing_data`
+/// is async on every platform with no completion signal, so poll the cookie
+/// store and retry the clear until it actually takes effect. Best-effort: if it
+/// never completes, navigate anyway after a bounded number of attempts.
+async fn clear_webview_session(win: &tauri::WebviewWindow) {
+    const MAX_ATTEMPTS: usize = 6;
+    for attempt in 0..MAX_ATTEMPTS {
+        if let Err(e) = win.clear_all_browsing_data() {
+            eprintln!("videofetch: clear browsing data failed: {e}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if !cookies::has_bilibili_sessdata(&collect_bilibili_cookies(win)) {
+            return;
+        }
+        eprintln!(
+            "videofetch: SESSDATA still present after clear (attempt {})",
+            attempt + 1
+        );
+    }
+    eprintln!("videofetch: gave up waiting for browsing data clear; navigating anyway");
+}
+
 /// Open an embedded Bilibili login WebView, poll for SESSDATA, and return auth status.
 ///
 /// Waits until cookies are captured, the login window is closed, or a timeout elapses.
@@ -603,22 +627,36 @@ pub async fn start_bilibili_login(
     if let Some(existing) = app.get_webview_window(BILIBILI_LOGIN_LABEL) {
         let _ = existing.set_focus();
         if let Some(status) = try_persist_webview_cookies(&app, &existing) {
+            let _ = existing.close();
             let _ = app.emit("auth://status", status.clone());
             return Ok(status);
         }
     } else {
         let login_url = Url::parse(BILIBILI_LOGIN_URL)
             .map_err(|e| AppError::Message(format!("invalid login url: {e}")))?;
+        let blank = Url::parse("about:blank")
+            .map_err(|e| AppError::Message(format!("invalid blank url: {e}")))?;
 
-        WebviewWindowBuilder::new(
+        let win = WebviewWindowBuilder::new(
             &app,
             BILIBILI_LOGIN_LABEL,
-            WebviewUrl::External(login_url.clone()),
+            WebviewUrl::External(blank),
         )
         .title("登录 B 站 — 影取")
         .inner_size(980.0, 720.0)
+        // The default WebView UA (bare AppleWebKit/WebKitGTK string) is classified by
+        // Bilibili's login risk control as an outdated browser.
+        .user_agent(bilibili_view::USER_AGENT)
         .build()
         .map_err(|e| AppError::Message(format!("无法打开登录窗口: {e}")))?;
+
+        // The WebView cookie store survives across windows, so a previous session
+        // would auto-complete login the moment the page opens. Clear browsing data
+        // and verify it took effect before navigating, so every login starts from
+        // the QR / password step.
+        clear_webview_session(&win).await;
+        win.navigate(login_url)
+            .map_err(|e| AppError::Message(format!("无法打开登录页: {e}")))?;
     }
 
     let app_handle = app.clone();

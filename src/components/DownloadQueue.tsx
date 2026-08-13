@@ -251,9 +251,7 @@ export function DownloadQueue({
           </p>
           <span className={`queue-status ${job.status}`}>
             {STATUS_LABEL[job.status]}
-            {(job.status === "running" || job.status === "pending") &&
-              job.status === "running" &&
-              ` ${Math.round(job.progress * 100)}%`}
+            {job.status === "running" && ` ${Math.round(job.progress * 100)}%`}
           </span>
         </div>
 

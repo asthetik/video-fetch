@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import {
   createPageTransitionState,
   reducePageTransition,
-} from "./pageTransition";
+} from "./pageTransition.ts";
 
 describe("reducePageTransition", () => {
   it("starts exiting when target differs while idle", () => {

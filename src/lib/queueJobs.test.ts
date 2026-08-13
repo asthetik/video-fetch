@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { DownloadJob, JobStatus } from "../types";
-import { partitionQueueJobs, sortJobs, upsertJob } from "./queueJobs";
+import { partitionQueueJobs, sortJobs, upsertJob } from "./queueJobs.ts";
 
 function job(
   id: string,

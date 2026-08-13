@@ -8,7 +8,9 @@ use crate::resolve_cache;
 use crate::ytdlp;
 
 const VIEW_URL: &str = "https://api.bilibili.com/x/web-interface/view";
-const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+/// Chrome UA shared by the view API client and the login WebView. The login page
+/// flags the default WKWebView/WebKitGTK UA as an outdated browser.
+pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const REFERER: &str = "https://www.bilibili.com/";
 const VIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
@@ -236,7 +238,6 @@ mod tests {
                     height: Some(1080),
                     fps: Some(30),
                     tbr: Some(1000.0),
-                    requires_login: false,
                 },
                 crate::models::FormatOption {
                     format_id: "64".into(),
@@ -244,7 +245,6 @@ mod tests {
                     height: Some(720),
                     fps: None,
                     tbr: Some(800.0),
-                    requires_login: false,
                 },
             ],
             platform: "bilibili".into(),
