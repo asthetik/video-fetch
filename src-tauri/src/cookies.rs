@@ -86,6 +86,16 @@ pub fn normalize_bilibili_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
         .collect()
 }
 
+/// Join stored cookies into a `name=value; name=value` request header, keeping only Bilibili domains.
+pub fn cookie_header_for_bilibili(cookies: &[Cookie]) -> String {
+    cookies
+        .iter()
+        .filter(|c| is_bilibili_domain(&c.domain) && !c.name.is_empty())
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
     let mut file = fs::File::create(path)?;
     writeln!(file, "# Netscape HTTP Cookie File")?;
@@ -193,6 +203,19 @@ mod tests {
         ];
         let normalized = normalize_bilibili_cookies(&cookies);
         assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn cookie_header_keeps_only_bilibili_domains() {
+        let cookies = vec![
+            cookie(".bilibili.com", "SESSDATA", "abc"),
+            cookie(".bilibili.com", "bili_jct", "tok"),
+            cookie(".doubleclick.net", "id", "x"),
+        ];
+        assert_eq!(
+            cookie_header_for_bilibili(&cookies),
+            "SESSDATA=abc; bili_jct=tok"
+        );
     }
 
     #[test]

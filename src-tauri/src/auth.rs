@@ -203,6 +203,11 @@ impl<S: KeyringStore> AuthManager<S> {
         Ok(Some(path))
     }
 
+    /// Read the stored login cookies (used for the playurl request header).
+    pub fn cookies(&self) -> AppResult<Option<Vec<Cookie>>> {
+        self.load_cookies()
+    }
+
     pub fn save_cookies_from_webview(&self, cookies: Vec<Cookie>) -> AppResult<AuthStatus> {
         self.save_cookies(&cookies)
     }

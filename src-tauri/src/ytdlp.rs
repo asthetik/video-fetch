@@ -460,7 +460,7 @@ pub fn dash_format_selector(format_id: &str) -> String {
     format!("{format_id}+bestaudio/bestvideo+bestaudio/best")
 }
 
-fn resolution_label(height: Option<u32>, fps: Option<u32>) -> String {
+pub(crate) fn resolution_label(height: Option<u32>, fps: Option<u32>) -> String {
     match (height, fps) {
         (Some(h), Some(f)) if f > 30 => format!("{h}p{f}"),
         (Some(h), _) => format!("{h}p"),
@@ -731,6 +731,8 @@ pub async fn download(
     hide_windows_console(&mut cmd);
     cmd.arg("-f")
         .arg(&selector)
+        .arg("--format-sort")
+        .arg("res,tbr")
         .arg("-o")
         .arg(&output_spec)
         .arg("--no-playlist")
