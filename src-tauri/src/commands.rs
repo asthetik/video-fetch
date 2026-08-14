@@ -61,9 +61,14 @@ pub struct ResolveFormatsFailedEvent {
     pub error: String,
 }
 
-/// Multi-page sampling: query all pages concurrently when <=16 parts, otherwise
-/// 8 sampled pages. Each completed page invokes `on_progress` with the cumulative
-/// result (the frontend replaces the whole list, so it stays idempotent).
+/// Cap on concurrent playurl requests during multi-P sampling so bursts of API
+/// calls don't trip Bilibili risk control.
+const PLAYURL_SAMPLE_CONCURRENCY: usize = 4;
+
+/// Multi-page sampling: query all pages when <=16 parts, otherwise 8 sampled
+/// pages, at most `PLAYURL_SAMPLE_CONCURRENCY` at a time. Each completed page
+/// invokes `on_progress` with the cumulative result in completion order (the
+/// frontend replaces the whole list, so it stays idempotent).
 async fn multi_page_playurl_formats(
     client: &reqwest::Client,
     keys: &wbi::WbiKeys,
@@ -74,7 +79,8 @@ async fn multi_page_playurl_formats(
 ) -> Option<Vec<models::FormatOption>> {
     let max_samples = if pages.len() <= 16 { pages.len() } else { 8 };
     let indices = ytdlp::sample_page_indices(pages.len() as u32, max_samples);
-    let mut tasks = Vec::new();
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(PLAYURL_SAMPLE_CONCURRENCY));
+    let mut tasks = tokio::task::JoinSet::new();
     for index in indices {
         let Some(page) = pages.get(index.saturating_sub(1) as usize) else {
             continue;
@@ -84,15 +90,20 @@ async fn multi_page_playurl_formats(
         let cookie_header = cookie_header.map(str::to_string);
         let client = client.clone();
         let keys = keys.clone();
-        tasks.push(tokio::spawn(async move {
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .expect("playurl sample semaphore closed");
             playurl::fetch_formats(&client, &keys, &bvid, &cid, cookie_header.as_deref(), true)
                 .await
                 .ok()
-        }));
+        });
     }
     let mut observed = Vec::new();
-    for task in tasks {
-        let Ok(Some(formats)) = task.await else {
+    while let Some(task) = tasks.join_next().await {
+        let Ok(Some(formats)) = task else {
             continue;
         };
         playurl::merge_multi_page_options(&mut observed, formats);
@@ -308,7 +319,12 @@ pub async fn resolve_url(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let cookies = rematerialize_cookies(&state)?;
+    // Load cookies once: the same snapshot feeds the yt-dlp fallback file and the
+    // playurl/nav Cookie header (avoids two keyring reads per resolve).
+    let stored_cookies = state.auth.cookies()?;
+    let cookies = state
+        .auth
+        .materialize_cookies_file_from(stored_cookies.as_deref())?;
     let scope = resolve_cache::cache_scope(cookies.is_some());
 
     if !force {
@@ -336,10 +352,9 @@ pub async fn resolve_url(
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
-    let cookie_header = state
-        .auth
-        .cookies()?
-        .map(|c| cookies::cookie_header_for_bilibili(&c))
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
         .filter(|s| !s.is_empty());
 
     // Fast path: single-part videos resolve via view -> playurl; failures fall back to yt-dlp.

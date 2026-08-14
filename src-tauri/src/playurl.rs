@@ -65,6 +65,11 @@ fn collect_variants(data: &Value) -> AppResult<Vec<DashVariant>> {
                 .unwrap_or("")
                 .to_string();
             let codec_prefix = codec.split('.').next().unwrap_or("").to_string();
+            // An empty prefix would make `vcodec^=` match every codec; skip such
+            // entries instead of letting them collide with real variants.
+            if codec_prefix.is_empty() {
+                continue;
+            }
             let fps = entry
                 .get("frameRate")
                 .and_then(Value::as_str)
@@ -122,7 +127,10 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
     let mut variants = collect_variants(data)?;
 
     // Within one (height, codec) group, split adjacent bitrates at their midpoint
-    // so each option's selector matches exactly one variant.
+    // so each option's selector matches exactly one variant. The bands assume
+    // yt-dlp reports the same tbr (bandwidth/1000) as playurl; if Bilibili
+    // re-encodes after these selectors are cached (TTL 7 days), a band may match
+    // a different variant or nothing, in which case the `/best` fallback kicks in.
     variants.sort_by_key(|b| std::cmp::Reverse(b.tbr_kbps));
     let mut groups: HashMap<(u32, String), Vec<u32>> = HashMap::new();
     for var in &variants {
@@ -362,6 +370,25 @@ mod tests {
                         {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 3000000},
                         {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 3000000},
                         {"id": 64, "height": 720, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 0}
+                    ]
+                }
+            }
+        });
+        let formats = parse_playurl_formats(&v).unwrap();
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].height, Some(1080));
+    }
+
+    #[test]
+    fn skips_variants_without_codecs() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "support_formats": [],
+                "dash": {
+                    "video": [
+                        {"id": 80, "height": 1080, "frameRate": "24.000", "codecs": "avc1.640033", "bandwidth": 3000000},
+                        {"id": 64, "height": 720, "frameRate": "24.000", "bandwidth": 1500000}
                     ]
                 }
             }
