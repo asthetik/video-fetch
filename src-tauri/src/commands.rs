@@ -16,15 +16,18 @@ use crate::download::{
     cleanup_orphan_work_dirs,
 };
 use crate::error::{AppError, AppResult};
+use crate::models;
 use crate::models::{
     AppSettings, AuthStatus, CancelAllResult, ClearFinishedResult, DownloadConflict, DownloadJob,
     JobStatus, VideoMeta,
 };
 use crate::naming;
 use crate::platform;
+use crate::playurl;
 use crate::resolve_cache;
 use crate::settings as settings_store;
 use crate::sidecar;
+use crate::wbi;
 use crate::ytdlp::{self, YtDlpConfig};
 
 const BILIBILI_LOGIN_LABEL: &str = "bilibili-login";
@@ -33,6 +36,7 @@ const BILIBILI_LOGIN_URL: &str = "https://passport.bilibili.com/login";
 pub const RESOLVE_PARTIAL_EVENT: &str = "resolve://partial";
 pub const RESOLVE_COMPLETE_EVENT: &str = "resolve://complete";
 pub const RESOLVE_FORMATS_FAILED_EVENT: &str = "resolve://formats_failed";
+pub const RESOLVE_FORMATS_PROGRESS_EVENT: &str = "resolve://formats_progress";
 
 pub struct AppState {
     pub app_dir: PathBuf,
@@ -40,6 +44,7 @@ pub struct AppState {
     pub downloads: DownloadManager,
     pub settings: std::sync::Mutex<AppSettings>,
     pub ytdlp: YtDlpConfig,
+    pub wbi_keys: wbi::WbiKeyCache,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
     pub active_resolve_id: AtomicU64,
 }
@@ -54,6 +59,57 @@ pub struct ResolveMetaEvent {
 pub struct ResolveFormatsFailedEvent {
     pub request_id: u64,
     pub error: String,
+}
+
+/// Cap on concurrent playurl requests during multi-P sampling so bursts of API
+/// calls don't trip Bilibili risk control.
+const PLAYURL_SAMPLE_CONCURRENCY: usize = 4;
+
+/// Multi-page sampling: query all pages when <=16 parts, otherwise 8 sampled
+/// pages, at most `PLAYURL_SAMPLE_CONCURRENCY` at a time. Each completed page
+/// invokes `on_progress` with the cumulative result in completion order (the
+/// frontend replaces the whole list, so it stays idempotent).
+async fn multi_page_playurl_formats(
+    client: &reqwest::Client,
+    keys: &wbi::WbiKeys,
+    bvid: &str,
+    pages: &[models::PageItem],
+    cookie_header: Option<&str>,
+    on_progress: impl Fn(Vec<models::FormatOption>),
+) -> Option<Vec<models::FormatOption>> {
+    let max_samples = if pages.len() <= 16 { pages.len() } else { 8 };
+    let indices = ytdlp::sample_page_indices(pages.len() as u32, max_samples);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(PLAYURL_SAMPLE_CONCURRENCY));
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in indices {
+        let Some(page) = pages.get(index.saturating_sub(1) as usize) else {
+            continue;
+        };
+        let cid = page.page_id.clone();
+        let bvid = bvid.to_string();
+        let cookie_header = cookie_header.map(str::to_string);
+        let client = client.clone();
+        let keys = keys.clone();
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .expect("playurl sample semaphore closed");
+            playurl::fetch_formats(&client, &keys, &bvid, &cid, cookie_header.as_deref(), true)
+                .await
+                .ok()
+        });
+    }
+    let mut observed = Vec::new();
+    while let Some(task) = tasks.join_next().await {
+        let Ok(Some(formats)) = task else {
+            continue;
+        };
+        playurl::merge_multi_page_options(&mut observed, formats);
+        on_progress(observed.clone());
+    }
+    (!observed.is_empty()).then_some(observed)
 }
 
 pub fn is_resolve_current(active_id: u64, request_id: u64) -> bool {
@@ -263,7 +319,12 @@ pub async fn resolve_url(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let cookies = rematerialize_cookies(&state)?;
+    // Load cookies once: the same snapshot feeds the yt-dlp fallback file and the
+    // playurl/nav Cookie header (avoids two keyring reads per resolve).
+    let stored_cookies = state.auth.cookies()?;
+    let cookies = state
+        .auth
+        .materialize_cookies_file_from(stored_cookies.as_deref())?;
     let scope = resolve_cache::cache_scope(cookies.is_some());
 
     if !force {
@@ -285,107 +346,149 @@ pub async fn resolve_url(
     let is_current =
         || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
 
-    let view_url = url.clone();
-    let mut view_task = tokio::spawn(async move { bilibili_view::resolve_view(&view_url).await });
+    let client = reqwest::Client::builder()
+        .user_agent(bilibili_view::USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
+        .filter(|s| !s.is_empty());
 
-    let ytdlp_cfg = state.ytdlp.clone();
-    let ytdlp_url = url.clone();
-    let cookies_path = cookies.clone();
-    let mut ytdlp_task = tokio::spawn(async move {
-        ytdlp::resolve_meta(&ytdlp_cfg, &ytdlp_url, cookies_path.as_deref()).await
-    });
-
-    let mut view_meta: Option<VideoMeta> = None;
-    let mut emitted_partial = false;
-
-    // Prefer whichever finishes first: emit partial early if view wins; never block
-    // complete on a slow/hung view once yt-dlp is done (view client also has a timeout).
-    let ytdlp_result = tokio::select! {
-        view_res = &mut view_task => {
-            if let Ok(Ok(partial)) = view_res
-                && is_current()
-            {
-                let _ = app.emit(
-                    RESOLVE_PARTIAL_EVENT,
-                    &ResolveMetaEvent {
-                        request_id,
-                        meta: partial.clone(),
-                    },
-                );
-                emitted_partial = true;
-                view_meta = Some(partial);
-            }
-            match ytdlp_task.await {
-                Ok(inner) => inner,
-                Err(e) => Err(AppError::Message(format!("yt-dlp 任务失败: {e}"))),
-            }
+    // Fast path: single-part videos resolve via view -> playurl; failures fall back to yt-dlp.
+    let view_meta = match bilibili_view::resolve_view(&url).await {
+        Ok(partial) if is_current() => {
+            let _ = app.emit(
+                RESOLVE_PARTIAL_EVENT,
+                &ResolveMetaEvent {
+                    request_id,
+                    meta: partial.clone(),
+                },
+            );
+            Some(partial)
         }
-        ytdlp_res = &mut ytdlp_task => {
-            let ytdlp_result = match ytdlp_res {
-                Ok(inner) => inner,
-                Err(e) => Err(AppError::Message(format!("yt-dlp 任务失败: {e}"))),
-            };
-            // Short grace so a nearly-done view can still merge; then abort.
-            match tokio::time::timeout(Duration::from_millis(300), &mut view_task).await {
-                Ok(Ok(Ok(partial))) if is_current() => {
-                    let _ = app.emit(
-                        RESOLVE_PARTIAL_EVENT,
+        _ => None,
+    };
+
+    let playurl_formats: Option<Vec<models::FormatOption>> = if let Some(view) = &view_meta {
+        let bvid = resolve_cache::extract_bilibili_id(&url);
+        let keys = match state
+            .wbi_keys
+            .get_or_fetch(&client, cookie_header.as_deref())
+            .await
+        {
+            Ok(keys) => Some(keys),
+            Err(e) => {
+                eprintln!("videofetch: wbi keys 失败，回退 yt-dlp: {e}");
+                None
+            }
+        };
+        match (bvid, keys) {
+            (Some(bvid), Some(keys)) if view.pages.len() == 1 => {
+                let cid = view.pages[0].page_id.clone();
+                match playurl::fetch_formats(
+                    &client,
+                    &keys,
+                    &bvid,
+                    &cid,
+                    cookie_header.as_deref(),
+                    false,
+                )
+                .await
+                {
+                    Ok(formats) => Some(formats),
+                    Err(e) => {
+                        eprintln!("videofetch: playurl 失败，回退 yt-dlp: {e}");
+                        state.wbi_keys.invalidate();
+                        None
+                    }
+                }
+            }
+            (Some(bvid), Some(keys)) => {
+                let app_handle = app.clone();
+                let progress_emit = move |formats: Vec<models::FormatOption>| {
+                    let _ = app_handle.emit(
+                        RESOLVE_FORMATS_PROGRESS_EVENT,
                         &ResolveMetaEvent {
                             request_id,
-                            meta: partial.clone(),
+                            meta: models::VideoMeta {
+                                formats,
+                                ..view.clone()
+                            },
                         },
                     );
-                    emitted_partial = true;
-                    view_meta = Some(partial);
+                };
+                let result = multi_page_playurl_formats(
+                    &client,
+                    &keys,
+                    &bvid,
+                    &view.pages,
+                    cookie_header.as_deref(),
+                    progress_emit,
+                )
+                .await;
+                if result.is_none() {
+                    state.wbi_keys.invalidate();
                 }
-                Ok(Ok(Ok(_))) => {}
-                _ => {
-                    view_task.abort();
+                result
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let final_meta = match (view_meta, playurl_formats) {
+        (Some(mut view), Some(formats)) => {
+            view.formats = formats;
+            view
+        }
+        (view_meta, _) => {
+            // Fallback: the existing full yt-dlp path.
+            let ytdlp_cfg = state.ytdlp.clone();
+            let ytdlp_url = url.clone();
+            let cookies_path = cookies.clone();
+            match ytdlp::resolve_meta(&ytdlp_cfg, &ytdlp_url, cookies_path.as_deref()).await {
+                Ok(ytdlp_meta) => match view_meta {
+                    Some(view) => bilibili_view::merge_view_with_formats(view, ytdlp_meta),
+                    None => ytdlp_meta,
+                },
+                Err(e) => {
+                    if let Some(partial) = view_meta {
+                        // Keep the rendered card and tell the UI formats finished loading.
+                        let _ = app.emit(
+                            RESOLVE_FORMATS_FAILED_EVENT,
+                            &ResolveFormatsFailedEvent {
+                                request_id,
+                                error: e.to_string(),
+                            },
+                        );
+                        return Ok(partial);
+                    }
+                    return Err(e);
                 }
             }
-            ytdlp_result
         }
     };
 
     if !is_current() {
         return Err(AppError::Message("解析已取消（有更新的请求）".into()));
     }
-
-    match ytdlp_result {
-        Ok(ytdlp_meta) => {
-            let meta = match view_meta {
-                Some(view) => bilibili_view::merge_view_with_formats(view, ytdlp_meta),
-                None => ytdlp_meta,
-            };
-            for key in resolve_cache::store_cache_keys(&url, &meta.id, scope) {
-                state.downloads.upsert_resolve_cache(&key, &meta, now)?;
-            }
-            let _ = app.emit(
-                RESOLVE_COMPLETE_EVENT,
-                &ResolveMetaEvent {
-                    request_id,
-                    meta: meta.clone(),
-                },
-            );
-            Ok(meta)
-        }
-        Err(err) => {
-            if emitted_partial {
-                let partial = view_meta.expect("partial was emitted");
-                let _ = app.emit(
-                    RESOLVE_FORMATS_FAILED_EVENT,
-                    &ResolveFormatsFailedEvent {
-                        request_id,
-                        error: err.to_string(),
-                    },
-                );
-                // Keep the card; UI uses formats_failed for the formats area.
-                Ok(partial)
-            } else {
-                Err(err)
-            }
-        }
+    for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
+        state
+            .downloads
+            .upsert_resolve_cache(&key, &final_meta, now)?;
     }
+    let _ = app.emit(
+        RESOLVE_COMPLETE_EVENT,
+        &ResolveMetaEvent {
+            request_id,
+            meta: final_meta.clone(),
+        },
+    );
+    Ok(final_meta)
 }
 
 #[tauri::command]
@@ -814,6 +917,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         downloads,
         settings: std::sync::Mutex::new(settings),
         ytdlp,
+        wbi_keys: wbi::WbiKeyCache::new(),
         active_resolve_id: AtomicU64::new(0),
     })
 }

@@ -181,9 +181,24 @@ impl<S: KeyringStore> AuthManager<S> {
     }
 
     pub fn materialize_cookies_file(&self) -> AppResult<Option<PathBuf>> {
-        let cookies = match self.load_cookies()? {
-            Some(cookies) if evaluate_auth_status(Some(&cookies)) == AuthStatus::LoggedIn => {
-                cookies
+        let cookies = self.load_cookies()?;
+        self.materialize_cookies_file_from(cookies.as_deref())
+    }
+
+    /// Write `cookies` to the Netscape file (or remove a stale file) without a
+    /// second keyring read; callers that already loaded cookies via [`Self::cookies`]
+    /// should use this to avoid hitting the OS credential store twice.
+    pub fn materialize_cookies_file_from(
+        &self,
+        cookies: Option<&[Cookie]>,
+    ) -> AppResult<Option<PathBuf>> {
+        match cookies {
+            Some(cookies) if evaluate_auth_status(Some(cookies)) == AuthStatus::LoggedIn => {
+                fs::create_dir_all(&self.cache_dir)?;
+                let path = self.cookies_file_path();
+                cookies::write_netscape_file(&path, cookies)?;
+                restrict_private_file_perms(&path);
+                Ok(Some(path))
             }
             _ => {
                 // Keep resolve/download cookie usage aligned: non-LoggedIn must not
@@ -192,15 +207,14 @@ impl<S: KeyringStore> AuthManager<S> {
                 if path.exists() {
                     fs::remove_file(&path)?;
                 }
-                return Ok(None);
+                Ok(None)
             }
-        };
+        }
+    }
 
-        fs::create_dir_all(&self.cache_dir)?;
-        let path = self.cookies_file_path();
-        cookies::write_netscape_file(&path, &cookies)?;
-        restrict_private_file_perms(&path);
-        Ok(Some(path))
+    /// Read the stored login cookies (used for the playurl request header).
+    pub fn cookies(&self) -> AppResult<Option<Vec<Cookie>>> {
+        self.load_cookies()
     }
 
     pub fn save_cookies_from_webview(&self, cookies: Vec<Cookie>) -> AppResult<AuthStatus> {

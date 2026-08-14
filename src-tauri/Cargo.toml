@@ -1,6 +1,6 @@
 [package]
 name = "video-fetch"
-version = "0.2.1"
+version = "0.2.2"
 description = "影取 — lightweight video downloader"
 authors = ["asthetik"]
 license = "Apache-2.0"
@@ -36,6 +36,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 which = "8.0"
 tauri-plugin-shell = "2.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+md-5 = "0.11"
+percent-encoding = "2.3"
 
 [dev-dependencies]
 tempfile = "3.27"

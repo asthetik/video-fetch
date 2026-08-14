@@ -9,9 +9,11 @@ mod fsutil;
 mod models;
 mod naming;
 mod platform;
+mod playurl;
 mod resolve_cache;
 mod settings;
 mod sidecar;
+mod wbi;
 mod ytdlp;
 
 use commands::{

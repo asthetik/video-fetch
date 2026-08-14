@@ -102,6 +102,15 @@ export function HomePage({
       setLoading(false);
     }).then((fn) => unlisteners.push(fn));
 
+    void listen<ResolveMetaEvent>("resolve://formats_progress", (event) => {
+      const { request_id, meta: progress } = event.payload;
+      if (request_id !== requestIdRef.current) {
+        return;
+      }
+      setMeta(progress);
+      setFormatsLoading(true);
+    }).then((fn) => unlisteners.push(fn));
+
     void listen<ResolveMetaEvent>("resolve://complete", (event) => {
       const { request_id, meta: complete } = event.payload;
       if (request_id !== requestIdRef.current) {

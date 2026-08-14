@@ -346,13 +346,25 @@ pub fn parse_height_format_id(format_id: &str) -> Option<u32> {
         .filter(|h| *h > 0)
 }
 
-/// Multi-P: collapse to unique heights seen in `formats` (one `vh{N}` option each).
-/// Single-P: return `formats` unchanged (keep codec/bitrate detail).
+/// Multi-P: collapse raw yt-dlp formats to unique heights (one `vh{N}` option
+/// each). Already-height-keyed results (vh ids or playurl DASH selectors) are
+/// returned unchanged, and single-P keeps codec/bitrate detail.
 pub fn finalize_formats_for_pages(
     formats: Vec<FormatOption>,
     page_count: usize,
 ) -> Vec<FormatOption> {
     if page_count <= 1 {
+        return formats;
+    }
+    // Raw yt-dlp formats carry bare numeric ids and must be collapsed to vh{N}.
+    // playurl/vh results are already keyed by height or full DASH selectors, so
+    // leave them intact (keeps cached fast-path results rich across cache hits).
+    let needs_collapse = formats.iter().any(|f| {
+        !f.format_id.starts_with(HEIGHT_FORMAT_PREFIX)
+            && !f.format_id.contains("bestvideo[")
+            && f.format_id.parse::<u64>().is_ok()
+    });
+    if !needs_collapse {
         return formats;
     }
     multi_page_quality_from_observed(&formats)
@@ -460,7 +472,7 @@ pub fn dash_format_selector(format_id: &str) -> String {
     format!("{format_id}+bestaudio/bestvideo+bestaudio/best")
 }
 
-fn resolution_label(height: Option<u32>, fps: Option<u32>) -> String {
+pub(crate) fn resolution_label(height: Option<u32>, fps: Option<u32>) -> String {
     match (height, fps) {
         (Some(h), Some(f)) if f > 30 => format!("{h}p{f}"),
         (Some(h), _) => format!("{h}p"),
@@ -729,8 +741,15 @@ pub async fn download(
     let selector = dash_format_selector(format_id);
     let mut cmd = Command::new(&cfg.yt_dlp_path);
     hide_windows_console(&mut cmd);
-    cmd.arg("-f")
-        .arg(&selector)
+    cmd.arg("-f").arg(&selector);
+    // Bilibili DASH selectors (vh height caps, exact single-P bands, multi-P
+    // codec options) all resolve through bestvideo[...]; sort by resolution then
+    // bitrate so the default download stays on the highest-bitrate stream.
+    // Numeric yt-dlp ids and other platforms keep yt-dlp's default ordering.
+    if selector.starts_with("bestvideo[") {
+        cmd.arg("--format-sort").arg("res,tbr");
+    }
+    cmd
         .arg("-o")
         .arg(&output_spec)
         .arg("--no-playlist")
@@ -1161,6 +1180,36 @@ mod tests {
         let ids: Vec<_> = meta.formats.iter().map(|f| f.format_id.as_str()).collect();
         assert_eq!(ids, vec!["vh2160", "vh1080", "vh480"]);
         assert_eq!(meta.formats[0].label, "2160p60");
+    }
+
+    #[test]
+    fn finalize_keeps_rich_playurl_selectors_on_multi_page() {
+        let rich = vec![
+            FormatOption {
+                format_id: "bestvideo[height=1080][vcodec^=avc1]+bestaudio/bestvideo[height=1080]+bestaudio/best".into(),
+                label: "1080p · avc1.640033".into(),
+                height: Some(1080),
+                fps: Some(24),
+                tbr: Some(800.0),
+            },
+            FormatOption {
+                format_id: "bestvideo[height=720][vcodec^=avc1]+bestaudio/bestvideo[height=720]+bestaudio/best".into(),
+                label: "720p · avc1.640033".into(),
+                height: Some(720),
+                fps: Some(24),
+                tbr: Some(400.0),
+            },
+        ];
+        assert_eq!(finalize_formats_for_pages(rich, 2).len(), 2);
+
+        let raw = vec![FormatOption {
+            format_id: "30112".into(),
+            label: "1080p".into(),
+            height: Some(1080),
+            fps: Some(30),
+            tbr: Some(2000.0),
+        }];
+        assert_eq!(finalize_formats_for_pages(raw, 2)[0].format_id, "vh1080");
     }
 
     #[test]

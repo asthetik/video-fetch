@@ -86,6 +86,22 @@ pub fn normalize_bilibili_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
         .collect()
 }
 
+/// Join stored cookies into a `name=value; name=value` request header, keeping
+/// only Bilibili domains and skipping cookies that have already expired.
+pub fn cookie_header_for_bilibili(cookies: &[Cookie]) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    cookies
+        .iter()
+        .filter(|c| is_bilibili_domain(&c.domain) && !c.name.is_empty())
+        .filter(|c| c.expiration == 0 || c.expiration >= now)
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
     let mut file = fs::File::create(path)?;
     writeln!(file, "# Netscape HTTP Cookie File")?;
@@ -193,6 +209,31 @@ mod tests {
         ];
         let normalized = normalize_bilibili_cookies(&cookies);
         assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn cookie_header_keeps_only_bilibili_domains() {
+        let cookies = vec![
+            cookie(".bilibili.com", "SESSDATA", "abc"),
+            cookie(".bilibili.com", "bili_jct", "tok"),
+            cookie(".doubleclick.net", "id", "x"),
+        ];
+        assert_eq!(
+            cookie_header_for_bilibili(&cookies),
+            "SESSDATA=abc; bili_jct=tok"
+        );
+    }
+
+    #[test]
+    fn cookie_header_skips_expired_cookies() {
+        let past = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() - 60)
+            .unwrap_or(0);
+        let mut expired = cookie(".bilibili.com", "SESSDATA", "old");
+        expired.expiration = past;
+        let cookies = vec![expired, cookie(".bilibili.com", "buvid3", "x")];
+        assert_eq!(cookie_header_for_bilibili(&cookies), "buvid3=x");
     }
 
     #[test]
