@@ -67,3 +67,9 @@ export interface CancelAllResult {
 export interface ClearFinishedResult {
   cleared: number;
 }
+
+export interface LogFileInfo {
+  name: string;
+  size: number;
+  modified_secs: number;
+}
