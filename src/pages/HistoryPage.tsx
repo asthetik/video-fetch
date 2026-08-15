@@ -5,6 +5,7 @@ import {
   type DeleteChoice,
 } from "../components/DeleteConfirmDialog";
 import { api } from "../lib/tauri";
+import { logUi } from "../lib/activityLog";
 import type { DownloadJob, JobStatus } from "../types";
 
 const STATUS_LABEL: Record<JobStatus, string> = {
@@ -52,6 +53,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
     if (!job.output_path) {
       return;
     }
+    logUi("history", "打开下载文件", "info");
     await api.openPath(job.output_path);
   }
 
@@ -59,6 +61,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
     if (!job.output_path) {
       return;
     }
+    logUi("history", "打开所在文件夹", "info");
     await api.openPath(parentDir(job.output_path));
   }
 
@@ -70,6 +73,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
     setBulkBusy(true);
     setActionError(null);
     try {
+      logUi("history", "清空已完成", "info");
       await api.clearFinishedJobs();
       setConfirmClear(false);
       setJobs([]);
@@ -91,6 +95,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
 
     setActionError(null);
     try {
+      logUi("history", `删除任务 ${job.id}`, "info");
       await api.deleteJob(job.id, choice === "record_and_file");
       setJobs((prev) => prev.filter((j) => j.id !== job.id));
       onJobsChanged?.();
@@ -111,6 +116,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
           <button
             type="button"
             className="btn btn-sm"
+            data-action="clear-finished"
             disabled={bulkBusy}
             onClick={() => {
               setActionError(null);
@@ -153,6 +159,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
                     <button
                       type="button"
                       className="btn btn-sm"
+                      data-action="open-file"
                       onClick={() => void handleOpenFile(job)}
                     >
                       打开文件
@@ -160,6 +167,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
                     <button
                       type="button"
                       className="btn btn-sm"
+                      data-action="open-folder"
                       onClick={() => void handleOpenFolder(job)}
                     >
                       打开文件夹
@@ -169,6 +177,7 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
                 <button
                   type="button"
                   className="btn btn-sm"
+                  data-action="delete-job"
                   onClick={() => {
                     setActionError(null);
                     setPendingDelete(job);

@@ -6,7 +6,9 @@ import type { AppPage } from "./lib/pageTransition";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
 import { AboutPage } from "./pages/AboutPage";
+import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { logUi } from "./lib/activityLog";
 import "./styles.css";
 
 type Page = AppPage;
@@ -15,6 +17,7 @@ const NAV_ITEMS: { id: Page; label: string }[] = [
   { id: "home", label: "主页" },
   { id: "history", label: "历史" },
   { id: "settings", label: "设置" },
+  { id: "logs", label: "日志" },
   { id: "about", label: "关于" },
 ];
 
@@ -41,7 +44,11 @@ function App() {
               key={item.id}
               type="button"
               className={`nav-btn${page === item.id ? " active" : ""}`}
-              onClick={() => setPage(item.id)}
+              data-action={`nav-${item.id}`}
+              onClick={() => {
+                logUi("nav", `进入${item.label}`, "info");
+                setPage(item.id);
+              }}
               aria-current={page === item.id ? "page" : undefined}
             >
               {item.label}
@@ -77,6 +84,7 @@ function App() {
             <HistoryPage onJobsChanged={bumpQueueRefresh} />
           )}
           {displayedPage === "settings" && <SettingsPage />}
+          {displayedPage === "logs" && <LogsPage />}
           {displayedPage === "about" && <AboutPage />}
         </PageShell>
       </main>

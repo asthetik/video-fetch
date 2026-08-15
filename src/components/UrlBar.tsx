@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import { logUi } from "../lib/activityLog";
 
 interface UrlBarProps {
   url: string;
@@ -54,6 +55,7 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
           placeholder="粘贴 B 站视频链接…"
           value={url}
           onChange={(e) => handleChange(e.target.value)}
+          onPaste={() => logUi("input", "粘贴链接", "info")}
           onFocus={(e) => {
             if (url.trim()) {
               e.currentTarget.select();

@@ -6,6 +6,7 @@ import {
   type DeleteChoice,
 } from "./DeleteConfirmDialog";
 import { api } from "../lib/tauri";
+import { logUi } from "../lib/activityLog";
 import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
 import type { DownloadJob, JobStatus } from "../types";
 
@@ -168,6 +169,7 @@ export function DownloadQueue({
   }, [loadJobs]);
 
   async function handleCancel(id: string) {
+    logUi("download", `取消 ${id}`, "info");
     setActionError(null);
     try {
       const updated = await api.cancelJob(id);
@@ -178,6 +180,7 @@ export function DownloadQueue({
   }
 
   async function handleRetry(id: string) {
+    logUi("download", `重试 ${id}`, "info");
     setActionError(null);
     try {
       const updated = await api.retryJob(id);
@@ -219,6 +222,7 @@ export function DownloadQueue({
     setBulkBusy(true);
     setActionError(null);
     try {
+      logUi("download", "取消全部", "info");
       const result = await api.cancelAllJobs();
       if (result.errors && result.errors.length > 0) {
         setActionError(
@@ -273,6 +277,7 @@ export function DownloadQueue({
             <button
               type="button"
               className="btn btn-sm"
+              data-action="cancel-job"
               onClick={() => void handleCancel(job.id)}
             >
               取消
@@ -282,6 +287,7 @@ export function DownloadQueue({
             <button
               type="button"
               className="btn btn-sm"
+              data-action="retry-job"
               onClick={() => void handleRetry(job.id)}
             >
               重试
@@ -319,6 +325,7 @@ export function DownloadQueue({
           <button
             type="button"
             className="btn btn-sm"
+            data-action="cancel-all"
             disabled={bulkBusy}
             onClick={() => {
               setActionError(null);

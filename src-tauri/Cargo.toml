@@ -38,6 +38,9 @@ tauri-plugin-shell = "2.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 md-5 = "0.11"
 percent-encoding = "2.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time", "local-time"] }
+tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27"

@@ -8,6 +8,7 @@ use keyring::Entry;
 
 use crate::cookies::{self, Cookie};
 use crate::error::{AppError, AppResult};
+use crate::fsutil::restrict_private_file_perms;
 use crate::models::AuthStatus;
 
 pub const KEYRING_SERVICE: &str = "app.videofetch.desktop";
@@ -270,19 +271,6 @@ pub fn evaluate_auth_status(cookies: Option<&[Cookie]>) -> AuthStatus {
             AuthStatus::PossiblyExpired
         }
         Some(_) => AuthStatus::LoggedIn,
-    }
-}
-
-/// Best-effort owner-only perms for secret files (no-op on non-Unix).
-fn restrict_private_file_perms(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
     }
 }
 

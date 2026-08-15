@@ -1,4 +1,4 @@
-export type AppPage = "home" | "history" | "settings" | "about";
+export type AppPage = "home" | "history" | "settings" | "about" | "logs";
 
 export type TransitionPhase = "idle" | "exiting" | "entering";
 

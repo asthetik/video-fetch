@@ -6,6 +6,7 @@ import type {
   AuthStatus,
   CancelAllResult,
   ClearFinishedResult,
+  LogFileInfo,
 } from "../types";
 
 export interface EnqueueArgs {
@@ -58,6 +59,9 @@ export const api = {
   cancelJob: (id: string) => invoke<DownloadJob>("cancel_job", { id }),
   cancelAllJobs: () => invoke<CancelAllResult>("cancel_all_jobs"),
   clearFinishedJobs: () => invoke<ClearFinishedResult>("clear_finished_jobs"),
+  listLogFiles: () => invoke<[string, LogFileInfo[]]>("list_log_files"),
+  readLogTail: (name: string) => invoke<string[]>("read_log_tail", { name }),
+  clearLogs: () => invoke<number>("clear_logs"),
   retryJob: (id: string) => invoke<DownloadJob>("retry_job", { id }),
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),

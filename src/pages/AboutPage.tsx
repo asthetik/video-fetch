@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import packageJson from "../../package.json";
+import { logUi } from "../lib/activityLog";
 
 const REPO_URL = "https://github.com/asthetik/video-fetch";
 const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
@@ -10,6 +11,7 @@ const THIRD_PARTY_URL = `${REPO_URL}/blob/main/THIRD_PARTY.md`;
 const PKG_VERSION = packageJson.version;
 
 async function openExternal(url: string) {
+  logUi("about", `打开外部链接 ${url}`, "info");
   try {
     await openUrl(url);
   } catch (err) {
@@ -50,6 +52,7 @@ export function AboutPage() {
               <button
                 type="button"
                 className="about-link"
+                data-action="open-external"
                 onClick={() => void openExternal(LICENSE_URL)}
               >
                 Apache-2.0
@@ -62,6 +65,7 @@ export function AboutPage() {
               <button
                 type="button"
                 className="about-link"
+                data-action="open-external"
                 onClick={() => void openExternal(REPO_URL)}
               >
                 {REPO_URL}
