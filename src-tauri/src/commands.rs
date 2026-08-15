@@ -348,6 +348,9 @@ pub async fn resolve_url(
     let is_current =
         || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
 
+    let log_bvid = resolve_cache::extract_bilibili_id(&url);
+    tracing::info!(target: "core", "resolve: 开始 {}", log_bvid.as_deref().unwrap_or("未知"));
+
     let client = reqwest::Client::builder()
         .user_agent(bilibili_view::USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(8))
@@ -383,7 +386,7 @@ pub async fn resolve_url(
         {
             Ok(keys) => Some(keys),
             Err(e) => {
-                eprintln!("videofetch: wbi keys 失败，回退 yt-dlp: {e}");
+                tracing::warn!(target: "core", "resolve: wbi keys 失败，回退 yt-dlp: {e}");
                 None
             }
         };
@@ -402,7 +405,7 @@ pub async fn resolve_url(
                 {
                     Ok(formats) => Some(formats),
                     Err(e) => {
-                        eprintln!("videofetch: playurl 失败，回退 yt-dlp: {e}");
+                        tracing::warn!(target: "core", "resolve: playurl 失败，回退 yt-dlp: {e}");
                         state.wbi_keys.invalidate();
                         None
                     }
@@ -442,6 +445,7 @@ pub async fn resolve_url(
         None
     };
 
+    let used_playurl = playurl_formats.is_some();
     let final_meta = match (view_meta, playurl_formats) {
         (Some(mut view), Some(formats)) => {
             view.formats = formats;
@@ -469,6 +473,7 @@ pub async fn resolve_url(
                         );
                         return Ok(partial);
                     }
+                    tracing::error!(target: "core", "resolve: 失败 {e}");
                     return Err(e);
                 }
             }
@@ -478,6 +483,14 @@ pub async fn resolve_url(
     if !is_current() {
         return Err(AppError::Message("解析已取消（有更新的请求）".into()));
     }
+    let source = if used_playurl { "playurl" } else { "yt-dlp" };
+    tracing::info!(
+        target: "core",
+        "resolve: 成功 {}（{} P，{} 个清晰度，{source}）",
+        final_meta.id,
+        final_meta.pages.len(),
+        final_meta.formats.len()
+    );
     for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
         state
             .downloads
@@ -705,18 +718,22 @@ async fn clear_webview_session(win: &tauri::WebviewWindow) {
     const MAX_ATTEMPTS: usize = 6;
     for attempt in 0..MAX_ATTEMPTS {
         if let Err(e) = win.clear_all_browsing_data() {
-            eprintln!("videofetch: clear browsing data failed: {e}");
+            tracing::warn!(target: "core", "auth: clear browsing data failed: {e}");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         if !cookies::has_bilibili_sessdata(&collect_bilibili_cookies(win)) {
             return;
         }
-        eprintln!(
-            "videofetch: SESSDATA still present after clear (attempt {})",
+        tracing::warn!(
+            target: "core",
+            "auth: SESSDATA still present after clear (attempt {})",
             attempt + 1
         );
     }
-    eprintln!("videofetch: gave up waiting for browsing data clear; navigating anyway");
+    tracing::warn!(
+        target: "core",
+        "auth: gave up waiting for browsing data clear; navigating anyway"
+    );
 }
 
 /// Open an embedded Bilibili login WebView, poll for SESSDATA, and return auth status.
