@@ -1,3 +1,4 @@
+mod activity_log;
 mod auth;
 mod bilibili_view;
 mod commands;
