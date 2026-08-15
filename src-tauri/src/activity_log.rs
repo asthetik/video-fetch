@@ -385,9 +385,7 @@ mod tests {
         std::fs::write(t.path().join("app.2026-08-15.log"), b"today content").unwrap();
         std::fs::write(t.path().join("app.2026-08-15.1.log"), b"today archive").unwrap();
         std::fs::write(t.path().join("app.2026-08-14.log"), b"old").unwrap();
-        for name in ["app.2026-08-10.log"] {
-            std::fs::write(t.path().join(name), b"old").unwrap();
-        }
+        std::fs::write(t.path().join("app.2026-08-10.log"), b"old").unwrap();
         let cleared = clear_all_logs(t.path(), today).unwrap();
         assert_eq!(cleared, 4);
         assert!(t.path().join("app.2026-08-15.log").exists());
