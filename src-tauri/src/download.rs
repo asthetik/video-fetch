@@ -640,7 +640,7 @@ impl DownloadManager {
         tracing::warn!(
             target: "core",
             "download: 失败 {job_id}: {}",
-            crate::activity_log::redact_urls(job.error.as_deref().unwrap_or("未知错误"))
+            crate::activity_log::clean_log_message(job.error.as_deref().unwrap_or("未知错误"))
         );
         self.db.lock().map_err(lock_err)?.update_job(&job)?;
         self.emit(&job);

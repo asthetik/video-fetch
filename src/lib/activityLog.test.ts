@@ -26,6 +26,33 @@ test("flushes when batch size is reached", async () => {
   assert.equal(seen.length, 20);
 });
 
+test("drops events beyond the queue cap while a flush is pending", async () => {
+  const seen: UiLogEvent[] = [];
+  const resolvers: Array<() => void> = [];
+  const logger = createActivityLogger({
+    flushFn: (events) =>
+      new Promise<void>((resolve) => {
+        seen.push(...events);
+        resolvers.push(resolve);
+      }),
+  });
+  for (let i = 0; i < 500; i++) {
+    logger.logUi("click", `m${i}`, "debug");
+  }
+  while (resolvers.length) {
+    resolvers.shift()!();
+  }
+  // Let the in-flight flush finish (it clears `flushing` in its finally).
+  await Promise.resolve();
+  const pending = logger.flushNow();
+  while (resolvers.length) {
+    resolvers.shift()!();
+  }
+  await pending;
+  assert.equal(seen.length, 220);
+  assert.equal(seen[seen.length - 1].message, "m219");
+});
+
 test("error throttling logs once then a summary after the window", async () => {
   let t = 0;
   const seen: UiLogEvent[] = [];

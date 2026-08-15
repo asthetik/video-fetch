@@ -338,6 +338,7 @@ pub async fn resolve_url(
                     std::mem::take(&mut meta.formats),
                     meta.pages.len(),
                 );
+                tracing::debug!(target: "core", "resolve: 缓存命中 {}", meta.id);
                 return Ok(meta);
             }
         }
@@ -476,7 +477,7 @@ pub async fn resolve_url(
                     tracing::error!(
                         target: "core",
                         "resolve: 失败 {}",
-                        crate::activity_log::redact_urls(&e.to_string())
+                        crate::activity_log::clean_log_message(&e.to_string())
                     );
                     return Err(e);
                 }
@@ -575,7 +576,8 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     }
     tracing::info!(
         target: "core",
-        "download: 入队 {title}（{}，格式 {}，{} P）",
+        "download: 入队 {}（{}，格式 {}，{} P）",
+        crate::activity_log::clean_log_message(&title),
         args.video_id,
         args.format_id,
         page_count
@@ -1048,19 +1050,25 @@ pub fn clear_logs(state: State<'_, AppState>) -> AppResult<usize> {
 
 #[tauri::command]
 pub fn log_ui_events(events: Vec<crate::activity_log::UiLogEvent>) {
-    for event in events {
+    for event in events.into_iter().take(500) {
+        let message: String = event
+            .message
+            .chars()
+            .take(crate::activity_log::MAX_LOG_MESSAGE_CHARS)
+            .collect();
+        let message = crate::activity_log::clean_log_message(&message);
         let level = crate::activity_log::level_from_str(&event.level);
         match level {
             tracing::Level::ERROR => {
-                tracing::error!(target: "ui", "{}: {}", event.category, event.message)
+                tracing::error!(target: "ui", "ui:{}: {}", event.category, message)
             }
             tracing::Level::WARN => {
-                tracing::warn!(target: "ui", "{}: {}", event.category, event.message)
+                tracing::warn!(target: "ui", "ui:{}: {}", event.category, message)
             }
             tracing::Level::INFO => {
-                tracing::info!(target: "ui", "{}: {}", event.category, event.message)
+                tracing::info!(target: "ui", "ui:{}: {}", event.category, message)
             }
-            _ => tracing::debug!(target: "ui", "{}: {}", event.category, event.message),
+            _ => tracing::debug!(target: "ui", "ui:{}: {}", event.category, message),
         }
     }
 }

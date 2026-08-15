@@ -646,7 +646,7 @@ async fn enrich_multi_page_formats_by_sampling(
                 tracing::warn!(
                     target: "core",
                     "resolve: format probe failed for page {index} ({})",
-                    crate::activity_log::redact_urls(&page_url)
+                    crate::activity_log::clean_log_message(&page_url)
                 );
             }
             Ok(None) | Err(_) => {

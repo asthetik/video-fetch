@@ -13,6 +13,7 @@ pub const DEFAULT_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const TAIL_MAX_LINES: usize = 1000;
 pub const TAIL_MAX_BYTES: u64 = 256 * 1024;
+pub const MAX_LOG_MESSAGE_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogFileInfo {
@@ -133,6 +134,17 @@ pub fn redact_urls(input: &str) -> String {
     result
 }
 
+/// Redact URLs and escape line breaks so external text (yt-dlp stderr, titles,
+/// UI events) cannot forge additional log lines.
+pub fn clean_log_message(input: &str) -> String {
+    let redacted = redact_urls(input);
+    if redacted.contains('\r') || redacted.contains('\n') {
+        redacted.replace('\r', "\\r").replace('\n', "\\n")
+    } else {
+        redacted
+    }
+}
+
 fn file_name(date: NaiveDate, seq: u32) -> String {
     if seq == 0 {
         format!("{LOG_PREFIX}{date}.log")
@@ -183,7 +195,6 @@ pub(crate) struct Rotator {
     date: NaiveDate,
     seq: u32,
     max_size: u64,
-    bytes: u64,
     file: File,
     now: Box<dyn Fn() -> NaiveDate + Send>,
 }
@@ -207,13 +218,11 @@ impl Rotator {
         let seq = scan_max_seq(&dir, date)?;
         let path = dir.join(file_name(date, seq));
         let file = open_append(&path)?;
-        let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             dir,
             date,
             seq,
             max_size,
-            bytes,
             file,
             now,
         })
@@ -224,7 +233,6 @@ impl Rotator {
         let path = self.dir.join(file_name(self.date, seq));
         self.file = open_append(&path)?;
         self.seq = seq;
-        self.bytes = 0;
         Ok(())
     }
 
@@ -238,13 +246,15 @@ impl Rotator {
             self.seq = 0;
             self.file =
                 open_append(&self.dir.join(file_name(today, 0))).map_err(std::io::Error::other)?;
-            self.bytes = 0;
         }
-        if self.max_size > 0 && self.bytes + buf.len() as u64 > self.max_size {
+        // Trust the on-disk length rather than a manual counter: external
+        // truncation (clear_all_logs) cannot desynchronize it, and one stat per
+        // event batch is negligible.
+        let size = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+        if self.max_size > 0 && size + buf.len() as u64 > self.max_size {
             self.rotate().map_err(std::io::Error::other)?;
         }
         self.file.write_all(buf)?;
-        self.bytes += buf.len() as u64;
         Ok(buf.len())
     }
 }
@@ -292,9 +302,6 @@ pub fn clear_all_logs(dir: &Path, today: NaiveDate) -> AppResult<usize> {
             continue;
         };
         if date == today {
-            // NOTE: the Rotator's byte counter is not reset here. A truncated
-            // active file may therefore trigger one spurious numbered file on
-            // the next large write — cosmetic, and accepted for simplicity.
             let file = OpenOptions::new()
                 .write(true)
                 .open(entry.path())
@@ -335,7 +342,7 @@ pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
             modified_secs,
         });
     }
-    files.sort_by(|a, b| b.name.cmp(&a.name));
+    files.sort_by_key(|f| std::cmp::Reverse(parse_file_name(&f.name)));
     Ok(files)
 }
 
@@ -413,9 +420,13 @@ mod tests {
         let t = dir();
         let d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
         std::fs::write(t.path().join("app.2026-08-15.3.log"), b"old").unwrap();
-        let rotator = Rotator::open(t.path().to_path_buf(), d, 10_000).unwrap();
+        let mut rotator = Rotator::open(t.path().to_path_buf(), d, 10_000).unwrap();
         assert_eq!(rotator.seq, 3);
-        assert_eq!(rotator.bytes, 3);
+        rotator.write_chunk(b"x").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("app.2026-08-15.3.log")).unwrap(),
+            "oldx"
+        );
     }
 
     #[test]
@@ -490,6 +501,16 @@ mod tests {
     }
 
     #[test]
+    fn list_sorts_numbered_files_numerically() {
+        let t = dir();
+        std::fs::write(t.path().join("app.2026-08-15.10.log"), b"x").unwrap();
+        std::fs::write(t.path().join("app.2026-08-15.2.log"), b"x").unwrap();
+        let files = list_log_files(t.path()).unwrap();
+        assert_eq!(files[0].name, "app.2026-08-15.10.log");
+        assert_eq!(files[1].name, "app.2026-08-15.2.log");
+    }
+
+    #[test]
     fn read_tail_respects_byte_and_line_caps() {
         let t = dir();
         let path = t.path().join("app.2026-08-15.log");
@@ -511,13 +532,13 @@ mod tests {
     fn read_tail_survives_utf8_cut_at_block_boundary() {
         let t = dir();
         let path = t.path().join("app.2026-08-15.log");
-        // 多字节字符 "汉" 跨 64KB 块边界：填充到 64KB-1 再写 "\n汉\n"
-        let mut content = "x".repeat(64 * 1024 - 1);
-        content.push('\n');
-        content.push_str("汉\n");
+        // 总长 65537，块边界落在字节 1——正好把开头的多字节字符“汉”（3 字节）
+        // 从中间切开，迫使读取器跳过不完整前缀。
+        let content = format!("汉{}x\n", "x".repeat(64 * 1024 - 4));
         std::fs::write(&path, &content).unwrap();
         let lines = read_log_tail(&path, 10, 1024 * 1024).unwrap();
-        assert_eq!(lines[lines.len() - 1], "汉");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], content.trim_end());
     }
 
     #[test]
@@ -537,5 +558,11 @@ mod tests {
         );
         assert_eq!(redact_urls("http://x"), "<url>");
         assert_eq!(redact_urls("无 url 文本"), "无 url 文本");
+    }
+
+    #[test]
+    fn clean_log_message_escapes_newlines() {
+        assert_eq!(clean_log_message("a\nhttps://x\nb\r"), "a\\n<url>\\nb\\r");
+        assert_eq!(clean_log_message("plain text"), "plain text");
     }
 }

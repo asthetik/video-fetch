@@ -96,6 +96,11 @@ export function createActivityLogger(options: ActivityLoggerOptions = {}) {
   }
 
   function logUi(category: string, message: string, level: UiLogLevel = "info") {
+    // Best-effort logging: when the queue is saturated (e.g. the IPC call is
+    // hanging), drop new events instead of growing without bound.
+    if (queue.length >= MAX_QUEUE) {
+      return;
+    }
     queue.push({ level, category, message });
     if (queue.length >= FLUSH_BATCH_SIZE) {
       if (timer !== null) {
@@ -156,6 +161,11 @@ export function initActivityLog() {
       if (!el) return;
       if (el.closest("[data-action]")) {
         // Explicit logUi() in the handler owns these; avoid double-logging.
+        return;
+      }
+      if (el.tagName === "SELECT") {
+        // A select's textContent concatenates every option; skip it to avoid
+        // logging the whole option list as one noisy click.
         return;
       }
       logUi(
