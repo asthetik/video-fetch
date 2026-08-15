@@ -4,6 +4,9 @@ use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub const LOG_PREFIX: &str = "app.";
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -16,6 +19,80 @@ pub struct LogFileInfo {
     pub name: String,
     pub size: u64,
     pub modified_secs: i64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UiLogEvent {
+    pub level: String,
+    pub category: String,
+    pub message: String,
+}
+
+pub struct ActivityLog {
+    logs_dir: PathBuf,
+    guard: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>>,
+}
+
+impl ActivityLog {
+    pub fn logs_dir(&self) -> &Path {
+        &self.logs_dir
+    }
+
+    /// Flush and join the background writer; call once on app exit.
+    pub fn flush(&self) {
+        // Dropping the guard flushes the queue and joins the worker thread.
+        let _ = self.guard.lock().ok().and_then(|mut g| g.take());
+    }
+}
+
+pub fn install(logs_dir: PathBuf, max_file_size: u64, retention_days: u32) -> AppResult<ActivityLog> {
+    fs::create_dir_all(&logs_dir).map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
+    crate::fsutil::restrict_private_dir_perms(&logs_dir);
+    let today = chrono::Local::now().date_naive();
+    cleanup_old_logs(&logs_dir, retention_days, today)?;
+
+    let rotator = Rotator::open(logs_dir.clone(), today, max_file_size)?;
+    let (non_blocking, guard) = tracing_appender::non_blocking(rotator);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+
+    #[cfg(debug_assertions)]
+    {
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_ansi(true)
+            .with_target(false)
+            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(file_layer)
+            .with(stderr_layer)
+            .init();
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        tracing_subscriber::registry().with(filter).with(file_layer).init();
+    }
+
+    Ok(ActivityLog {
+        logs_dir,
+        guard: Mutex::new(Some(guard)),
+    })
+}
+
+pub fn level_from_str(level: &str) -> tracing::Level {
+    match level {
+        "error" => tracing::Level::ERROR,
+        "warn" => tracing::Level::WARN,
+        "info" => tracing::Level::INFO,
+        _ => tracing::Level::DEBUG,
+    }
 }
 
 fn file_name(date: NaiveDate, seq: u32) -> String {
@@ -102,6 +179,16 @@ impl Rotator {
         self.file.write_all(buf)?;
         self.bytes += buf.len() as u64;
         Ok(buf.len())
+    }
+}
+
+impl Write for Rotator {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write_chunk(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -316,5 +403,14 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
         let lines = read_log_tail(&path, 10, 1024 * 1024).unwrap();
         assert_eq!(lines[lines.len() - 1], "汉");
+    }
+
+    #[test]
+    fn level_mapping() {
+        assert_eq!(level_from_str("error"), tracing::Level::ERROR);
+        assert_eq!(level_from_str("warn"), tracing::Level::WARN);
+        assert_eq!(level_from_str("info"), tracing::Level::INFO);
+        assert_eq!(level_from_str("debug"), tracing::Level::DEBUG);
+        assert_eq!(level_from_str("别的"), tracing::Level::DEBUG);
     }
 }
