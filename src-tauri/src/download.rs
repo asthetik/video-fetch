@@ -522,6 +522,7 @@ impl DownloadManager {
         if let Ok(db) = self.db.lock() {
             let _ = db.update_job(&running);
         }
+        tracing::info!(target: "core", "download: 开始 {job_id}");
         self.emit(&running);
 
         if self.is_cancelled(&job_id) {
@@ -636,6 +637,7 @@ impl DownloadManager {
         let mut job = self.db.lock().map_err(lock_err)?.get_job(job_id)?;
         job.status = JobStatus::Failed;
         job.error = Some(error);
+        tracing::warn!(target: "core", "download: 失败 {job_id}: {}", job.error.as_deref().unwrap_or("未知错误"));
         self.db.lock().map_err(lock_err)?.update_job(&job)?;
         self.emit(&job);
         Ok(())
@@ -675,6 +677,7 @@ impl DownloadManager {
         if let Ok(db) = self.db.lock() {
             let _ = db.update_job(&done);
         }
+        tracing::info!(target: "core", "download: 完成 {job_id} -> {}", dest.display());
         self.emit(&done);
         Ok(())
     }

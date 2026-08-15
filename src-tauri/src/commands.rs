@@ -537,6 +537,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     let uploader = args.uploader;
     let save_dir = Path::new(&settings.save_dir);
     let base_url = platform::canonicalize_video_url(&args.url);
+    let page_count = args.page_indexes.len();
 
     let mut last = None;
     for page_index in args.page_indexes {
@@ -568,6 +569,13 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
         };
         last = Some(state.downloads.enqueue(job, save_as_copy)?);
     }
+    tracing::info!(
+        target: "core",
+        "download: 入队 {title}（{}，格式 {}，{} P）",
+        args.video_id,
+        args.format_id,
+        page_count
+    );
     last.ok_or_else(|| AppError::Message("未能创建下载任务".into()))
 }
 
@@ -578,21 +586,27 @@ pub fn list_jobs(state: State<'_, AppState>) -> AppResult<Vec<DownloadJob>> {
 
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+    tracing::info!(target: "core", "download: 取消 {id}");
     state.downloads.cancel(&id)
 }
 
 #[tauri::command]
 pub fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
-    state.downloads.cancel_all()
+    let result = state.downloads.cancel_all()?;
+    tracing::info!(target: "core", "download: 取消全部（{} 个）", result.cancelled);
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishedResult> {
-    state.downloads.clear_finished()
+    let result = state.downloads.clear_finished()?;
+    tracing::info!(target: "core", "history: 清空已完成（{} 条）", result.cleared);
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+    tracing::info!(target: "core", "download: 重试 {id}");
     state.downloads.retry(&id)
 }
 
@@ -607,6 +621,7 @@ pub struct DeleteJobArgs {
 
 #[tauri::command]
 pub fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
+    tracing::info!(target: "core", "download: 删除 {}（含文件={}）", args.id, args.delete_file);
     state.downloads.delete(&args.id, args.delete_file)
 }
 
