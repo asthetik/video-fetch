@@ -2,6 +2,32 @@ use std::path::{Path, PathBuf};
 
 use crate::naming::OUTPUT_EXTS;
 
+/// Restrict a private file to owner-only on Unix (0600). No-op elsewhere.
+pub(crate) fn restrict_private_file_perms(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Restrict a private directory to owner-only on Unix (0700). No-op elsewhere.
+pub(crate) fn restrict_private_dir_perms(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 pub fn work_dir_for(work_root: &Path, job_id: &str) -> PathBuf {
     work_root.join(job_id)
 }
