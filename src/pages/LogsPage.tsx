@@ -61,7 +61,7 @@ export function LogsPage() {
   async function handleClear() {
     setClearing(true);
     try {
-      await api.clearLogHistory();
+      await api.clearLogs();
       setConfirmOpen(false);
       await refresh();
     } catch (err) {
@@ -114,7 +114,7 @@ export function LogsPage() {
               disabled={files.length === 0}
               onClick={() => setConfirmOpen(true)}
             >
-              清空历史日志
+              清空日志
             </button>
           </div>
         </div>
@@ -149,8 +149,8 @@ export function LogsPage() {
       </section>
       <ConfirmDialog
         open={confirmOpen}
-        title="清空历史日志？"
-        message="将删除除今天以外的全部日志文件，此操作不可撤销。"
+        title="清空全部日志？"
+        message="将清空所有本地日志文件（包括今天），此操作不可撤销。"
         confirmLabel="清空"
         danger
         busy={clearing}

@@ -221,22 +221,33 @@ pub fn cleanup_old_logs(dir: &Path, retention_days: u32, today: NaiveDate) -> Ap
     Ok(removed)
 }
 
-pub fn clear_log_history(dir: &Path, today: NaiveDate) -> AppResult<usize> {
-    let mut removed = 0;
+/// Delete every log file except the active day, whose files are truncated in
+/// place instead — the active writer keeps an open handle (Windows cannot
+/// delete an open file), and truncating leaves that handle valid.
+pub fn clear_all_logs(dir: &Path, today: NaiveDate) -> AppResult<usize> {
+    let mut cleared = 0;
     for entry in
         fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?
     {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((date, _)) = parse_file_name(&name)
-            && date != today
-        {
+        let Some((date, _)) = parse_file_name(&name) else {
+            continue;
+        };
+        if date == today {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(entry.path())
+                .map_err(|e| AppError::Message(format!("打开日志失败: {e}")))?;
+            file.set_len(0)
+                .map_err(|e| AppError::Message(format!("清空日志失败: {e}")))?;
+        } else {
             fs::remove_file(entry.path())
                 .map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
-            removed += 1;
         }
+        cleared += 1;
     }
-    Ok(removed)
+    Ok(cleared)
 }
 
 pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
@@ -368,21 +379,25 @@ mod tests {
     }
 
     #[test]
-    fn clear_history_keeps_only_today() {
+    fn clear_all_logs_deletes_old_and_truncates_today() {
         let t = dir();
         let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
-        for name in [
-            "app.2026-08-15.log",
-            "app.2026-08-15.1.log",
-            "app.2026-08-14.log",
-            "app.2026-08-10.log",
-        ] {
-            std::fs::write(t.path().join(name), b"x").unwrap();
+        std::fs::write(t.path().join("app.2026-08-15.log"), b"today content").unwrap();
+        std::fs::write(t.path().join("app.2026-08-15.1.log"), b"today archive").unwrap();
+        std::fs::write(t.path().join("app.2026-08-14.log"), b"old").unwrap();
+        for name in ["app.2026-08-10.log"] {
+            std::fs::write(t.path().join(name), b"old").unwrap();
         }
-        let removed = clear_log_history(t.path(), today).unwrap();
-        assert_eq!(removed, 2);
+        let cleared = clear_all_logs(t.path(), today).unwrap();
+        assert_eq!(cleared, 4);
         assert!(t.path().join("app.2026-08-15.log").exists());
         assert!(t.path().join("app.2026-08-15.1.log").exists());
+        assert_eq!(
+            std::fs::read(t.path().join("app.2026-08-15.log")).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert!(!t.path().join("app.2026-08-14.log").exists());
+        assert!(!t.path().join("app.2026-08-10.log").exists());
     }
 
     #[test]

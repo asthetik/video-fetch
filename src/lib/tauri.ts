@@ -61,7 +61,7 @@ export const api = {
   clearFinishedJobs: () => invoke<ClearFinishedResult>("clear_finished_jobs"),
   listLogFiles: () => invoke<[string, LogFileInfo[]]>("list_log_files"),
   readLogTail: (name: string) => invoke<string[]>("read_log_tail", { name }),
-  clearLogHistory: () => invoke<number>("clear_log_history"),
+  clearLogs: () => invoke<number>("clear_logs"),
   retryJob: (id: string) => invoke<DownloadJob>("retry_job", { id }),
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),
