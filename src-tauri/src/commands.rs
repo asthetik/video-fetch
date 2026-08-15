@@ -322,7 +322,7 @@ pub async fn resolve_url(
         .unwrap_or(0);
 
     // Load cookies once: the same snapshot feeds the yt-dlp fallback file and the
-    // playurl/nav Cookie header (avoids two keyring reads per resolve).
+    // playurl/nav Cookie header (avoids two cookie-file reads per resolve).
     let stored_cookies = state.auth.cookies()?;
     let cookies = state
         .auth

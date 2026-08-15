@@ -1,79 +1,46 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use keyring::Entry;
 
 use crate::cookies::{self, Cookie};
 use crate::error::{AppError, AppResult};
 use crate::fsutil::restrict_private_file_perms;
 use crate::models::AuthStatus;
 
-pub const KEYRING_SERVICE: &str = "app.videofetch.desktop";
-pub const KEYRING_ACCOUNT: &str = "bilibili_cookies";
 const COOKIES_FILENAME: &str = "cookies.txt";
 const AUTH_JSON_FILENAME: &str = "auth_cookies.json";
 
-pub trait KeyringStore: Send + Sync {
+pub trait AuthStore: Send + Sync {
     fn get(&self) -> AppResult<Option<String>>;
     fn set(&self, value: &str) -> AppResult<()>;
     fn delete(&self) -> AppResult<()>;
 }
 
-pub struct SystemKeyringStore;
-
-impl KeyringStore for SystemKeyringStore {
-    fn get(&self) -> AppResult<Option<String>> {
-        match Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn set(&self, value: &str) -> AppResult<()> {
-        Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.set_password(value)?;
-        Ok(())
-    }
-
-    fn delete(&self) -> AppResult<()> {
-        match Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-}
-
-/// Dual storage for auth cookies JSON.
+/// File-only storage for the auth cookies JSON.
 ///
-/// - **release:** prefer OS keyring, always mirror to `auth_cookies.json`
-///   (unsigned Mac apps may prompt or fail on keyring).
-/// - **debug:** file only — never call keyring (avoids login-keychain prompts in `tauri dev`).
-///
-/// Treat `auth_cookies.json` as a secret; DualStore sets owner-only perms on Unix.
-pub struct DualStore {
-    keyring: SystemKeyringStore,
+/// The app deliberately does not use the OS keychain: unsigned macOS builds
+/// trigger a login-keychain password prompt on every read/write, and the same
+/// secret is already mirrored to `auth_cookies.json` plus the yt-dlp
+/// `cookies.txt`. Treat `auth_cookies.json` as a secret; it gets owner-only
+/// permissions on Unix.
+pub struct FileStore {
     file_path: PathBuf,
+    write_lock: Mutex<()>,
 }
 
-impl DualStore {
+impl FileStore {
     pub fn new(cache_dir: &Path) -> Self {
         Self {
-            keyring: SystemKeyringStore,
             file_path: cache_dir.join(AUTH_JSON_FILENAME),
+            write_lock: Mutex::new(()),
         }
     }
 }
 
-impl KeyringStore for DualStore {
+impl AuthStore for FileStore {
     fn get(&self) -> AppResult<Option<String>> {
-        if !cfg!(debug_assertions)
-            && let Ok(Some(value)) = self.keyring.get()
-        {
-            return Ok(Some(value));
-        }
         if self.file_path.exists() {
             let text = fs::read_to_string(&self.file_path)?;
             if text.trim().is_empty() {
@@ -85,21 +52,40 @@ impl KeyringStore for DualStore {
     }
 
     fn set(&self, value: &str) -> AppResult<()> {
-        if !cfg!(debug_assertions) {
-            let _ = self.keyring.set(value);
-        }
+        // Serialize writes and replace the file atomically (temp + rename) so a
+        // crash mid-write can never leave a truncated `auth_cookies.json`, which
+        // would otherwise hard-fail resolve/download on the next launch.
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| AppError::Message("auth store lock poisoned".into()))?;
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.file_path, value)?;
-        restrict_private_file_perms(&self.file_path);
+        let tmp = self.file_path.with_extension("json.tmp");
+        let write = (|| -> AppResult<()> {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(&tmp)?;
+            file.write_all(value.as_bytes())?;
+            file.sync_all()?;
+            restrict_private_file_perms(&tmp);
+            fs::rename(&tmp, &self.file_path)?;
+            Ok(())
+        })();
+        if let Err(e) = write {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         Ok(())
     }
 
     fn delete(&self) -> AppResult<()> {
-        if !cfg!(debug_assertions) {
-            let _ = self.keyring.delete();
-        }
         if self.file_path.exists() {
             fs::remove_file(&self.file_path)?;
         }
@@ -121,7 +107,7 @@ impl MemoryStore {
 }
 
 #[cfg(test)]
-impl KeyringStore for MemoryStore {
+impl AuthStore for MemoryStore {
     fn get(&self) -> AppResult<Option<String>> {
         Ok(self.inner.lock().unwrap().clone())
     }
@@ -137,19 +123,19 @@ impl KeyringStore for MemoryStore {
     }
 }
 
-pub struct AuthManager<S: KeyringStore = DualStore> {
+pub struct AuthManager<S: AuthStore = FileStore> {
     store: S,
     cache_dir: PathBuf,
 }
 
-impl AuthManager<DualStore> {
+impl AuthManager<FileStore> {
     pub fn new(cache_dir: PathBuf) -> Self {
-        let store = DualStore::new(&cache_dir);
+        let store = FileStore::new(&cache_dir);
         Self { store, cache_dir }
     }
 }
 
-impl<S: KeyringStore> AuthManager<S> {
+impl<S: AuthStore> AuthManager<S> {
     #[cfg(test)]
     pub fn with_store(store: S, cache_dir: PathBuf) -> Self {
         Self { store, cache_dir }
@@ -187,8 +173,8 @@ impl<S: KeyringStore> AuthManager<S> {
     }
 
     /// Write `cookies` to the Netscape file (or remove a stale file) without a
-    /// second keyring read; callers that already loaded cookies via [`Self::cookies`]
-    /// should use this to avoid hitting the OS credential store twice.
+    /// second cookie-file read; callers that already loaded cookies via
+    /// [`Self::cookies`] should use this to avoid reading the store twice.
     pub fn materialize_cookies_file_from(
         &self,
         cookies: Option<&[Cookie]>,
@@ -239,9 +225,16 @@ impl<S: KeyringStore> AuthManager<S> {
         let Some(json) = self.store.get()? else {
             return Ok(None);
         };
-        let cookies: Vec<Cookie> =
-            serde_json::from_str(&json).map_err(|e| AppError::Message(e.to_string()))?;
-        Ok(Some(cookies::normalize_bilibili_cookies(&cookies)))
+        match serde_json::from_str::<Vec<Cookie>>(&json) {
+            Ok(cookies) => Ok(Some(cookies::normalize_bilibili_cookies(&cookies))),
+            Err(e) => {
+                // A torn/corrupted file must not hard-fail resolve or download:
+                // degrade to "logged out" so the user can simply re-login instead
+                // of hitting an error on every resolve attempt.
+                tracing::warn!(target: "core", "auth: cookies 文件解析失败，按未登录处理: {e}");
+                Ok(None)
+            }
+        }
     }
 
     fn cookies_file_path(&self) -> PathBuf {
@@ -429,17 +422,14 @@ mod tests {
     }
 
     #[test]
-    fn dual_store_file_roundtrip_without_requiring_keyring() {
+    fn file_store_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let store = DualStore::new(dir.path());
+        let store = FileStore::new(dir.path());
         let payload = r#"[{"domain":".bilibili.com","include_subdomains":true,"path":"/","secure":true,"expiration":0,"name":"SESSDATA","value":"abc"}]"#;
         store.set(payload).unwrap();
 
         let path = dir.path().join("auth_cookies.json");
-        assert!(
-            path.is_file(),
-            "debug/release DualStore must persist auth_cookies.json"
-        );
+        assert!(path.is_file(), "FileStore must persist auth_cookies.json");
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(on_disk.contains("SESSDATA"));
 
@@ -449,5 +439,14 @@ mod tests {
         store.delete().unwrap();
         assert!(!path.exists());
         assert!(store.get().unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_file_is_treated_as_logged_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        store.set("not json").unwrap();
+        let mgr = AuthManager::with_store(store, dir.path().to_path_buf());
+        assert_eq!(mgr.load_cookies().unwrap(), None);
     }
 }
