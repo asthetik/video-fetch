@@ -63,13 +63,25 @@ impl AuthStore for FileStore {
             fs::create_dir_all(parent)?;
         }
         let tmp = self.file_path.with_extension("json.tmp");
-        {
-            let mut file = fs::File::create(&tmp)?;
+        let write = (|| -> AppResult<()> {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(&tmp)?;
             file.write_all(value.as_bytes())?;
             file.sync_all()?;
+            restrict_private_file_perms(&tmp);
+            fs::rename(&tmp, &self.file_path)?;
+            Ok(())
+        })();
+        if let Err(e) = write {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
         }
-        restrict_private_file_perms(&tmp);
-        fs::rename(&tmp, &self.file_path)?;
         Ok(())
     }
 
