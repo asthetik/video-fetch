@@ -8,8 +8,6 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Rusqlite(#[from] rusqlite::Error),
-    #[error(transparent)]
-    Keyring(#[from] keyring::Error),
 }
 
 impl Serialize for AppError {
