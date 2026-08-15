@@ -2,7 +2,7 @@ use crate::error::{AppError, AppResult};
 use chrono::NaiveDate;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const LOG_PREFIX: &str = "app.";
@@ -161,6 +161,45 @@ pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
     Ok(files)
 }
 
+/// Return up to `max_lines` lines from the end of `path`, reading at most
+/// `max_bytes` from the tail. Incomplete UTF-8 at the block boundary is skipped.
+pub fn read_log_tail(path: &Path, max_lines: usize, max_bytes: u64) -> AppResult<Vec<String>> {
+    if max_lines == 0 || max_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(path).map_err(|e| AppError::Message(format!("打开日志失败: {e}")))?;
+    let len = file
+        .metadata()
+        .map_err(|e| AppError::Message(format!("读取日志元数据失败: {e}")))?
+        .len();
+    let block = 64 * 1024u64;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut pos = len;
+    while (buf.len() as u64) < max_bytes && pos > 0 {
+        let start = pos.saturating_sub(block);
+        let mut chunk = vec![0u8; (pos - start) as usize];
+        file.seek(SeekFrom::Start(start))
+            .map_err(|e| AppError::Message(format!("读取日志失败: {e}")))?;
+        file.read_exact(&mut chunk)
+            .map_err(|e| AppError::Message(format!("读取日志失败: {e}")))?;
+        chunk.extend(buf);
+        buf = chunk;
+        pos = start;
+        if buf.len() as u64 > max_bytes {
+            buf.drain(..(buf.len() - max_bytes as usize));
+        }
+    }
+    while !buf.is_empty() && std::str::from_utf8(&buf).is_err() {
+        buf.remove(0);
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if lines.len() > max_lines {
+        lines.drain(..lines.len() - max_lines);
+    }
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +287,34 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].name, "app.2026-08-15.log");
         assert_eq!(files[0].size, 1);
+    }
+
+    #[test]
+    fn read_tail_respects_byte_and_line_caps() {
+        let t = dir();
+        let path = t.path().join("app.2026-08-15.log");
+        let content = (0..100).map(|i| format!("line{i:03}\n")).collect::<String>();
+        std::fs::write(&path, &content).unwrap();
+
+        let lines = read_log_tail(&path, 5, 1024 * 1024).unwrap();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "line095");
+        assert_eq!(lines[4], "line099");
+
+        let small = read_log_tail(&path, 100, 7).unwrap();
+        assert!(small.len() < 100);
+    }
+
+    #[test]
+    fn read_tail_survives_utf8_cut_at_block_boundary() {
+        let t = dir();
+        let path = t.path().join("app.2026-08-15.log");
+        // 多字节字符 "汉" 跨 64KB 块边界：填充到 64KB-1 再写 "\n汉\n"
+        let mut content = "x".repeat(64 * 1024 - 1);
+        content.push('\n');
+        content.push_str("汉\n");
+        std::fs::write(&path, &content).unwrap();
+        let lines = read_log_tail(&path, 10, 1024 * 1024).unwrap();
+        assert_eq!(lines[lines.len() - 1], "汉");
     }
 }
