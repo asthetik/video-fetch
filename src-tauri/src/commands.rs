@@ -638,12 +638,35 @@ pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<()> {
     naming::validate_output_template(&settings.filename_template).map_err(AppError::Message)?;
+    let old = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::Message("settings lock poisoned".into()))?
+        .clone();
+    let mut changed = Vec::new();
+    if old.save_dir != settings.save_dir {
+        changed.push("save_dir");
+    }
+    if old.concurrency != settings.concurrency {
+        changed.push("concurrency");
+    }
+    if old.filename_template != settings.filename_template {
+        changed.push("filename_template");
+    }
+    if old.skip_existing != settings.skip_existing {
+        changed.push("skip_existing");
+    }
     settings_store::save_settings(&state.app_dir, &settings)?;
     *state
         .settings
         .lock()
         .map_err(|_| AppError::Message("settings lock poisoned".into()))? = settings.clone();
     state.downloads.update_settings(settings)?;
+    tracing::info!(
+        target: "core",
+        "settings: 保存 {}",
+        if changed.is_empty() { "（无变化）".to_string() } else { changed.join("、") }
+    );
     Ok(())
 }
 
@@ -661,11 +684,13 @@ pub fn import_cookies_path(
     let status = state.auth.import_cookies_file(Path::new(&path))?;
     let _ = rematerialize_cookies(&state)?;
     let _ = app.emit("auth://status", status.clone());
+    tracing::info!(target: "core", "auth: 导入 Cookie（文件）");
     Ok(status)
 }
 
 #[tauri::command]
 pub fn clear_auth(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    tracing::info!(target: "core", "auth: 退出登录");
     state.auth.clear_auth()?;
     // Also drop the login WebView session: an open window would otherwise let the
     // cookie poll re-capture its lingering SESSDATA and flip back to logged in.
@@ -761,11 +786,13 @@ pub async fn start_bilibili_login(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<AuthStatus> {
+    tracing::info!(target: "core", "auth: 登录开始");
     if let Some(existing) = app.get_webview_window(BILIBILI_LOGIN_LABEL) {
         let _ = existing.set_focus();
         if let Some(status) = try_persist_webview_cookies(&app, &existing) {
             let _ = existing.close();
             let _ = app.emit("auth://status", status.clone());
+            tracing::info!(target: "core", "auth: 登录成功");
             return Ok(status);
         }
     } else {
@@ -836,10 +863,15 @@ pub async fn start_bilibili_login(
         }
     });
 
-    match rx.await {
-        Ok(status) => Ok(status),
-        Err(_) => Ok(state.auth.auth_status()),
+    let status = match rx.await {
+        Ok(status) => status,
+        Err(_) => state.auth.auth_status(),
+    };
+    match &status {
+        AuthStatus::LoggedIn => tracing::info!(target: "core", "auth: 登录成功"),
+        _ => tracing::info!(target: "core", "auth: 登录未完成（窗口关闭或超时）"),
     }
+    Ok(status)
 }
 
 #[tauri::command]
