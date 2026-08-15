@@ -34,6 +34,15 @@ pub struct ActivityLog {
 }
 
 impl ActivityLog {
+    /// Logging disabled fallback: keeps the directory path so the viewer
+    /// commands can still answer (they will simply report missing files).
+    pub fn disabled(logs_dir: PathBuf) -> Self {
+        Self {
+            logs_dir,
+            guard: Mutex::new(None),
+        }
+    }
+
     pub fn logs_dir(&self) -> &Path {
         &self.logs_dir
     }

@@ -954,11 +954,21 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let auth = AuthManager::new(cache_dir);
     let _ = auth.materialize_cookies_file();
 
-    let activity_log = crate::activity_log::install(
-        app_dir.join("logs"),
+    let logs_dir = app_dir.join("logs");
+    let activity_log = match crate::activity_log::install(
+        logs_dir.clone(),
         crate::activity_log::DEFAULT_MAX_FILE_SIZE,
         crate::activity_log::DEFAULT_RETENTION_DAYS,
-    )?;
+    ) {
+        Ok(activity_log) => activity_log,
+        Err(e) => {
+            // Logging is best-effort infrastructure: never block app launch on
+            // a log-directory failure. The viewer commands still work and will
+            // surface the missing files in the UI.
+            eprintln!("videofetch: activity log unavailable: {e}");
+            crate::activity_log::ActivityLog::disabled(logs_dir)
+        }
+    };
     tracing::info!(target: "core", "app: 启动 v{}", env!("CARGO_PKG_VERSION"));
 
     let work_root = app_dir.join("download-work");
