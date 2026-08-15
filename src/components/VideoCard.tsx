@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/tauri";
+import { logUi } from "../lib/activityLog";
 import type { AuthStatus, FormatOption, VideoMeta } from "../types";
 
 /** Highest resolution first, then highest bitrate within the same resolution. */
@@ -92,6 +93,10 @@ export function VideoCard({
     setInfo(null);
     try {
       const pageIndexes = [...selectedPages].sort((a, b) => a - b);
+      const chosen =
+        sortedFormats.find((f) => f.format_id === selectedFormatId)?.label ??
+        selectedFormatId;
+      logUi("download", `点击下载（${chosen}，${pageIndexes.length} P）`, "info");
       const settings = await api.getSettings();
       const conflict = await api.checkDownloadConflict({
         video_id: meta.id,
@@ -244,6 +249,7 @@ export function VideoCard({
         </button>
         <button
           type="button"
+          data-action="download"
           className="btn btn-primary"
           onClick={() => void handleDownload()}
           disabled={
