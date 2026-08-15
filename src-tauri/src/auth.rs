@@ -1,6 +1,6 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,12 +27,14 @@ pub trait AuthStore: Send + Sync {
 /// permissions on Unix.
 pub struct FileStore {
     file_path: PathBuf,
+    write_lock: Mutex<()>,
 }
 
 impl FileStore {
     pub fn new(cache_dir: &Path) -> Self {
         Self {
             file_path: cache_dir.join(AUTH_JSON_FILENAME),
+            write_lock: Mutex::new(()),
         }
     }
 }
@@ -50,11 +52,24 @@ impl AuthStore for FileStore {
     }
 
     fn set(&self, value: &str) -> AppResult<()> {
+        // Serialize writes and replace the file atomically (temp + rename) so a
+        // crash mid-write can never leave a truncated `auth_cookies.json`, which
+        // would otherwise hard-fail resolve/download on the next launch.
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| AppError::Message("auth store lock poisoned".into()))?;
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.file_path, value)?;
-        restrict_private_file_perms(&self.file_path);
+        let tmp = self.file_path.with_extension("json.tmp");
+        {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(value.as_bytes())?;
+            file.sync_all()?;
+        }
+        restrict_private_file_perms(&tmp);
+        fs::rename(&tmp, &self.file_path)?;
         Ok(())
     }
 
@@ -198,9 +213,16 @@ impl<S: AuthStore> AuthManager<S> {
         let Some(json) = self.store.get()? else {
             return Ok(None);
         };
-        let cookies: Vec<Cookie> =
-            serde_json::from_str(&json).map_err(|e| AppError::Message(e.to_string()))?;
-        Ok(Some(cookies::normalize_bilibili_cookies(&cookies)))
+        match serde_json::from_str::<Vec<Cookie>>(&json) {
+            Ok(cookies) => Ok(Some(cookies::normalize_bilibili_cookies(&cookies))),
+            Err(e) => {
+                // A torn/corrupted file must not hard-fail resolve or download:
+                // degrade to "logged out" so the user can simply re-login instead
+                // of hitting an error on every resolve attempt.
+                tracing::warn!(target: "core", "auth: cookies 文件解析失败，按未登录处理: {e}");
+                Ok(None)
+            }
+        }
     }
 
     fn cookies_file_path(&self) -> PathBuf {
@@ -405,5 +427,14 @@ mod tests {
         store.delete().unwrap();
         assert!(!path.exists());
         assert!(store.get().unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_file_is_treated_as_logged_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        store.set("not json").unwrap();
+        let mgr = AuthManager::with_store(store, dir.path().to_path_buf());
+        assert_eq!(mgr.load_cookies().unwrap(), None);
     }
 }
