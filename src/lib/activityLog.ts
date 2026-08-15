@@ -28,11 +28,23 @@ export function describeClickTarget(d: ClickDescriptor): string {
   return `${d.tagName.toLowerCase()}${d.id ? `#${d.id}` : ""}`;
 }
 
-export function levelClass(line: string): string {
-  if (/\sERROR\s/.test(line)) return "log-line-error";
-  if (/\sWARN\s/.test(line)) return "log-line-warn";
-  if (/\sINFO\s/.test(line)) return "log-line-info";
-  return "log-line-debug";
+export interface LogLineParts {
+  timestamp: string;
+  level: "DEBUG" | "INFO" | "WARN" | "ERROR";
+  message: string;
+}
+
+/** Parse an RFC3339 `LEVEL message` log line into display parts. */
+export function parseLogLine(line: string): LogLineParts | null {
+  const match = /^(\S+)\s+(DEBUG|INFO|WARN|ERROR)\s+(.*)$/.exec(line);
+  if (!match) {
+    return null;
+  }
+  return {
+    timestamp: match[1],
+    level: match[2] as LogLineParts["level"],
+    message: match[3],
+  };
 }
 
 const FLUSH_INTERVAL_MS = 500;
