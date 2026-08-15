@@ -65,10 +65,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                if let Some(state) = app_handle.try_state::<commands::AppState>() {
-                    state.activity_log.flush();
-                }
+            if matches!(event, tauri::RunEvent::Exit)
+                && let Some(state) = app_handle.try_state::<commands::AppState>()
+            {
+                state.activity_log.flush();
             }
         });
 }

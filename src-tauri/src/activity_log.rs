@@ -45,8 +45,13 @@ impl ActivityLog {
     }
 }
 
-pub fn install(logs_dir: PathBuf, max_file_size: u64, retention_days: u32) -> AppResult<ActivityLog> {
-    fs::create_dir_all(&logs_dir).map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
+pub fn install(
+    logs_dir: PathBuf,
+    max_file_size: u64,
+    retention_days: u32,
+) -> AppResult<ActivityLog> {
+    fs::create_dir_all(&logs_dir)
+        .map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
     crate::fsutil::restrict_private_dir_perms(&logs_dir);
     let today = chrono::Local::now().date_naive();
     cleanup_old_logs(&logs_dir, retention_days, today)?;
@@ -77,7 +82,10 @@ pub fn install(logs_dir: PathBuf, max_file_size: u64, retention_days: u32) -> Ap
     }
     #[cfg(not(debug_assertions))]
     {
-        tracing_subscriber::registry().with(filter).with(file_layer).init();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(file_layer)
+            .init();
     }
 
     Ok(ActivityLog {
@@ -126,7 +134,9 @@ fn open_append(path: &Path) -> AppResult<File> {
 
 fn scan_max_seq(dir: &Path, date: NaiveDate) -> AppResult<u32> {
     let mut max_seq: Option<u32> = None;
-    for entry in fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))? {
+    for entry in
+        fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?
+    {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some((d, seq)) = parse_file_name(&name)
@@ -195,13 +205,16 @@ impl Write for Rotator {
 pub fn cleanup_old_logs(dir: &Path, retention_days: u32, today: NaiveDate) -> AppResult<usize> {
     let cutoff = today - chrono::Duration::days(retention_days as i64);
     let mut removed = 0;
-    for entry in fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))? {
+    for entry in
+        fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?
+    {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some((date, _)) = parse_file_name(&name)
             && date < cutoff
         {
-            fs::remove_file(entry.path()).map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
+            fs::remove_file(entry.path())
+                .map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
             removed += 1;
         }
     }
@@ -210,13 +223,16 @@ pub fn cleanup_old_logs(dir: &Path, retention_days: u32, today: NaiveDate) -> Ap
 
 pub fn clear_log_history(dir: &Path, today: NaiveDate) -> AppResult<usize> {
     let mut removed = 0;
-    for entry in fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))? {
+    for entry in
+        fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?
+    {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some((date, _)) = parse_file_name(&name)
             && date != today
         {
-            fs::remove_file(entry.path()).map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
+            fs::remove_file(entry.path())
+                .map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
             removed += 1;
         }
     }
@@ -225,13 +241,17 @@ pub fn clear_log_history(dir: &Path, today: NaiveDate) -> AppResult<usize> {
 
 pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
     let mut files = Vec::new();
-    for entry in fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))? {
+    for entry in
+        fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?
+    {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if parse_file_name(&name).is_none() {
             continue;
         }
-        let meta = entry.metadata().map_err(|e| AppError::Message(format!("读取日志元数据失败: {e}")))?;
+        let meta = entry
+            .metadata()
+            .map_err(|e| AppError::Message(format!("读取日志元数据失败: {e}")))?;
         let modified_secs = meta
             .modified()
             .ok()
@@ -380,7 +400,9 @@ mod tests {
     fn read_tail_respects_byte_and_line_caps() {
         let t = dir();
         let path = t.path().join("app.2026-08-15.log");
-        let content = (0..100).map(|i| format!("line{i:03}\n")).collect::<String>();
+        let content = (0..100)
+            .map(|i| format!("line{i:03}\n"))
+            .collect::<String>();
         std::fs::write(&path, &content).unwrap();
 
         let lines = read_log_tail(&path, 5, 1024 * 1024).unwrap();

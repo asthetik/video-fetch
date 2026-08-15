@@ -1027,8 +1027,7 @@ pub fn read_log_tail(state: State<'_, AppState>, name: String) -> AppResult<Vec<
 #[tauri::command]
 pub fn clear_log_history(state: State<'_, AppState>) -> AppResult<usize> {
     let today = chrono::Local::now().date_naive();
-    let removed =
-        crate::activity_log::clear_log_history(state.activity_log.logs_dir(), today)?;
+    let removed = crate::activity_log::clear_log_history(state.activity_log.logs_dir(), today)?;
     tracing::info!(target: "core", "log: 清空历史日志（{removed} 个文件）");
     Ok(removed)
 }
