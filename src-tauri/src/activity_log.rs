@@ -103,6 +103,27 @@ pub fn level_from_str(level: &str) -> tracing::Level {
     }
 }
 
+/// Replace `http(s)://...` runs with `<url>` so error text from yt-dlp never
+/// leaks full URLs (tracking params included) into the activity log.
+pub fn redact_urls(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if input[i..].starts_with("http://") || input[i..].starts_with("https://") {
+            result.push_str("<url>");
+            while let Some(&(_, ch)) = chars.peek() {
+                if ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>') {
+                    break;
+                }
+                chars.next();
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn file_name(date: NaiveDate, seq: u32) -> String {
     if seq == 0 {
         format!("{LOG_PREFIX}{date}.log")
@@ -155,10 +176,25 @@ pub(crate) struct Rotator {
     max_size: u64,
     bytes: u64,
     file: File,
+    now: Box<dyn Fn() -> NaiveDate + Send>,
 }
 
 impl Rotator {
     pub(crate) fn open(dir: PathBuf, date: NaiveDate, max_size: u64) -> AppResult<Self> {
+        Self::open_with_now(
+            dir,
+            date,
+            max_size,
+            Box::new(|| chrono::Local::now().date_naive()),
+        )
+    }
+
+    fn open_with_now(
+        dir: PathBuf,
+        date: NaiveDate,
+        max_size: u64,
+        now: Box<dyn Fn() -> NaiveDate + Send>,
+    ) -> AppResult<Self> {
         let seq = scan_max_seq(&dir, date)?;
         let path = dir.join(file_name(date, seq));
         let file = open_append(&path)?;
@@ -170,6 +206,7 @@ impl Rotator {
             max_size,
             bytes,
             file,
+            now,
         })
     }
 
@@ -183,6 +220,17 @@ impl Rotator {
     }
 
     fn write_chunk(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let today = (self.now)();
+        if today != self.date {
+            // A long-running session crossed midnight: start the new day's file
+            // instead of appending to yesterday's filename (which cleanup would
+            // later delete based on its stale name).
+            self.date = today;
+            self.seq = 0;
+            self.file =
+                open_append(&self.dir.join(file_name(today, 0))).map_err(std::io::Error::other)?;
+            self.bytes = 0;
+        }
         if self.max_size > 0 && self.bytes + buf.len() as u64 > self.max_size {
             self.rotate().map_err(std::io::Error::other)?;
         }
@@ -235,6 +283,9 @@ pub fn clear_all_logs(dir: &Path, today: NaiveDate) -> AppResult<usize> {
             continue;
         };
         if date == today {
+            // NOTE: the Rotator's byte counter is not reset here. A truncated
+            // active file may therefore trigger one spurious numbered file on
+            // the next large write — cosmetic, and accepted for simplicity.
             let file = OpenOptions::new()
                 .write(true)
                 .open(entry.path())
@@ -359,6 +410,26 @@ mod tests {
     }
 
     #[test]
+    fn rotator_rolls_to_new_day_at_midnight() {
+        let t = dir();
+        let day1 = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 8, 16).unwrap();
+        let current = std::sync::Arc::new(std::sync::Mutex::new(day1));
+        let now_ref = std::sync::Arc::clone(&current);
+        let now: Box<dyn Fn() -> NaiveDate + Send> = Box::new(move || *now_ref.lock().unwrap());
+        let mut rotator =
+            Rotator::open_with_now(t.path().to_path_buf(), day1, 10_000, now).unwrap();
+        rotator.write_chunk(b"day one").unwrap();
+        *current.lock().unwrap() = day2;
+        rotator.write_chunk(b"day two").unwrap();
+        assert!(t.path().join("app.2026-08-16.log").exists());
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("app.2026-08-16.log")).unwrap(),
+            "day two"
+        );
+    }
+
+    #[test]
     fn cleanup_removes_files_older_than_retention_by_name() {
         let t = dir();
         let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
@@ -447,5 +518,15 @@ mod tests {
         assert_eq!(level_from_str("info"), tracing::Level::INFO);
         assert_eq!(level_from_str("debug"), tracing::Level::DEBUG);
         assert_eq!(level_from_str("别的"), tracing::Level::DEBUG);
+    }
+
+    #[test]
+    fn redact_urls_hides_urls() {
+        assert_eq!(
+            redact_urls("a https://www.bilibili.com/video/BV1xx?vd_source=abc b"),
+            "a <url> b"
+        );
+        assert_eq!(redact_urls("http://x"), "<url>");
+        assert_eq!(redact_urls("无 url 文本"), "无 url 文本");
     }
 }

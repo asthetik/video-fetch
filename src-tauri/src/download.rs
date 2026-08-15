@@ -637,7 +637,11 @@ impl DownloadManager {
         let mut job = self.db.lock().map_err(lock_err)?.get_job(job_id)?;
         job.status = JobStatus::Failed;
         job.error = Some(error);
-        tracing::warn!(target: "core", "download: 失败 {job_id}: {}", job.error.as_deref().unwrap_or("未知错误"));
+        tracing::warn!(
+            target: "core",
+            "download: 失败 {job_id}: {}",
+            crate::activity_log::redact_urls(job.error.as_deref().unwrap_or("未知错误"))
+        );
         self.db.lock().map_err(lock_err)?.update_job(&job)?;
         self.emit(&job);
         Ok(())

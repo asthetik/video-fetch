@@ -473,7 +473,11 @@ pub async fn resolve_url(
                         );
                         return Ok(partial);
                     }
-                    tracing::error!(target: "core", "resolve: 失败 {e}");
+                    tracing::error!(
+                        target: "core",
+                        "resolve: 失败 {}",
+                        crate::activity_log::redact_urls(&e.to_string())
+                    );
                     return Err(e);
                 }
             }
