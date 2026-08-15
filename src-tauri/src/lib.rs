@@ -19,9 +19,10 @@ mod ytdlp;
 
 use commands::{
     build_app_state, cancel_all_jobs, cancel_job, check_download_conflict, clear_auth,
-    clear_finished_jobs, delete_job, enqueue_download, get_auth_status, get_settings,
-    import_cookies_path, list_jobs, open_path, pick_cookies_file, pick_save_dir, preview_name,
-    resolve_url, retry_job, save_settings, start_bilibili_login,
+    clear_finished_jobs, clear_log_history, delete_job, enqueue_download, get_auth_status,
+    get_settings, import_cookies_path, list_jobs, list_log_files, log_ui_events, open_path,
+    pick_cookies_file, pick_save_dir, preview_name, read_log_tail, resolve_url, retry_job,
+    save_settings, start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -44,8 +45,12 @@ pub fn run() {
             cancel_job,
             cancel_all_jobs,
             clear_finished_jobs,
+            clear_log_history,
             retry_job,
             delete_job,
+            list_log_files,
+            read_log_tail,
+            log_ui_events,
             get_settings,
             save_settings,
             get_auth_status,
@@ -57,6 +62,13 @@ pub fn run() {
             pick_save_dir,
             pick_cookies_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app_handle.try_state::<commands::AppState>() {
+                    state.activity_log.flush();
+                }
+            }
+        });
 }

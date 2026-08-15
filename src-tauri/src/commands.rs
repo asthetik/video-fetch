@@ -47,6 +47,8 @@ pub struct AppState {
     pub wbi_keys: wbi::WbiKeyCache,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
     pub active_resolve_id: AtomicU64,
+    /// Local activity log writer (files under app_dir/logs).
+    pub activity_log: crate::activity_log::ActivityLog,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -884,6 +886,13 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let auth = AuthManager::new(cache_dir);
     let _ = auth.materialize_cookies_file();
 
+    let activity_log = crate::activity_log::install(
+        app_dir.join("logs"),
+        crate::activity_log::DEFAULT_MAX_FILE_SIZE,
+        crate::activity_log::DEFAULT_RETENTION_DAYS,
+    )?;
+    tracing::info!(target: "core", "app: 启动 v{}", env!("CARGO_PKG_VERSION"));
+
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
 
@@ -919,7 +928,64 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
         active_resolve_id: AtomicU64::new(0),
+        activity_log,
     })
+}
+
+#[tauri::command]
+pub fn list_log_files(
+    state: State<'_, AppState>,
+) -> AppResult<(String, Vec<crate::activity_log::LogFileInfo>)> {
+    let dir = state.activity_log.logs_dir().to_path_buf();
+    let files = crate::activity_log::list_log_files(&dir)?;
+    Ok((dir.to_string_lossy().into_owned(), files))
+}
+
+#[tauri::command]
+pub fn read_log_tail(state: State<'_, AppState>, name: String) -> AppResult<Vec<String>> {
+    let name = Path::new(&name);
+    let ok = name.components().count() == 1
+        && matches!(
+            name.components().next(),
+            Some(std::path::Component::Normal(_))
+        );
+    if !ok {
+        return Err(AppError::Message("非法日志文件名".into()));
+    }
+    let path = state.activity_log.logs_dir().join(name);
+    crate::activity_log::read_log_tail(
+        &path,
+        crate::activity_log::TAIL_MAX_LINES,
+        crate::activity_log::TAIL_MAX_BYTES,
+    )
+}
+
+#[tauri::command]
+pub fn clear_log_history(state: State<'_, AppState>) -> AppResult<usize> {
+    let today = chrono::Local::now().date_naive();
+    let removed =
+        crate::activity_log::clear_log_history(state.activity_log.logs_dir(), today)?;
+    tracing::info!(target: "core", "log: 清空历史日志（{removed} 个文件）");
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn log_ui_events(events: Vec<crate::activity_log::UiLogEvent>) {
+    for event in events {
+        let level = crate::activity_log::level_from_str(&event.level);
+        match level {
+            tracing::Level::ERROR => {
+                tracing::error!(target: "ui", "{}: {}", event.category, event.message)
+            }
+            tracing::Level::WARN => {
+                tracing::warn!(target: "ui", "{}: {}", event.category, event.message)
+            }
+            tracing::Level::INFO => {
+                tracing::info!(target: "ui", "{}: {}", event.category, event.message)
+            }
+            _ => tracing::debug!(target: "ui", "{}: {}", event.category, event.message),
+        }
+    }
 }
 
 #[cfg(test)]
