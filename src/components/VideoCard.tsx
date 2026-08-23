@@ -25,6 +25,7 @@ interface VideoCardProps {
   authStatus: AuthStatus;
   onEnqueued: () => void;
   onRefresh: () => void;
+  active?: boolean;
   refreshing?: boolean;
   formatsLoading?: boolean;
   formatsError?: string | null;
@@ -36,6 +37,7 @@ export function VideoCard({
   authStatus,
   onEnqueued,
   onRefresh,
+  active = true,
   refreshing = false,
   formatsLoading = false,
   formatsError = null,
@@ -49,6 +51,7 @@ export function VideoCard({
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const prevVideoIdRef = useRef<string | null>(null);
+  const prevActiveRef = useRef(true);
 
   const sortedFormats = useMemo(() => sortFormats(meta.formats), [meta.formats]);
   const sortedAudioFormats = useMemo(
@@ -89,6 +92,15 @@ export function VideoCard({
     });
   }, [meta]);
 
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active) {
+      setError(null);
+      setInfo(null);
+    }
+  }, [active]);
+
   const showLoginHint = authStatus === "logged_out";
 
   const allSelected = selectedPages.size === meta.pages.length;
@@ -112,6 +124,18 @@ export function VideoCard({
 
   function selectNone() {
     setSelectedPages(new Set());
+  }
+
+  function switchMode(next: "video" | "audio") {
+    setMode(next);
+    setError(null);
+    setInfo(null);
+  }
+
+  function handleRefresh() {
+    setError(null);
+    setInfo(null);
+    onRefresh();
   }
 
   async function handleDownload() {
@@ -207,14 +231,14 @@ export function VideoCard({
         <button
           type="button"
           className={mode === "video" ? "mode-segment active" : "mode-segment"}
-          onClick={() => setMode("video")}
+          onClick={() => switchMode("video")}
         >
           视频
         </button>
         <button
           type="button"
           className={mode === "audio" ? "mode-segment active" : "mode-segment"}
-          onClick={() => setMode("audio")}
+          onClick={() => switchMode("audio")}
         >
           仅音频
         </button>
@@ -249,7 +273,7 @@ export function VideoCard({
                 type="button"
                 className="btn btn-sm"
                 style={{ marginLeft: "0.5rem" }}
-                onClick={onRefresh}
+                onClick={handleRefresh}
                 disabled={refreshing || downloading}
               >
                 重试
@@ -276,7 +300,7 @@ export function VideoCard({
                     type="button"
                     className="btn btn-sm"
                     style={{ marginLeft: "0.5rem" }}
-                    onClick={onRefresh}
+                    onClick={handleRefresh}
                     disabled={refreshing || downloading}
                   >
                     重试
@@ -375,7 +399,7 @@ export function VideoCard({
         <button
           type="button"
           className="btn"
-          onClick={onRefresh}
+          onClick={handleRefresh}
           disabled={refreshing || downloading}
         >
           {refreshing ? "刷新中…" : "刷新"}
