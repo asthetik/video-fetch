@@ -139,6 +139,7 @@ export function VideoCard({
             ? "m4a"
             : audioFormat
           : null;
+      const mediaLabel = mode === "audio" ? "音频" : "视频";
       logUi(
         "download",
         `点击下载（${mode === "audio" ? "音频" : "视频"}，${chosen}，${pageIndexes.length} P）`,
@@ -155,7 +156,7 @@ export function VideoCard({
       });
 
       if (conflict.downloading) {
-        setError("该视频已在下载队列中，请等待完成或取消后再试");
+        setError(`该${mediaLabel}已在下载队列中，请等待完成或取消后再试`);
         return;
       }
 
@@ -165,7 +166,7 @@ export function VideoCard({
           setInfo(
             pageIndexes.length > 1
               ? "所选分 P 中已有本地文件，已跳过"
-              : "本地已有该视频文件，已跳过",
+              : `本地已有该${mediaLabel}文件，已跳过`,
           );
           return;
         }

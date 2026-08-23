@@ -241,8 +241,13 @@ impl DownloadManager {
                 job.audio_format.as_deref(),
             )?;
             if active {
+                let kind = if job.audio_format.is_some() {
+                    "音频"
+                } else {
+                    "视频"
+                };
                 return Err(AppError::Message(format!(
-                    "该视频已在下载队列中（{} P{}），请等待完成或取消后再试",
+                    "该{kind}已在下载队列中（{} P{}），请等待完成或取消后再试",
                     job.video_id, job.page_index
                 )));
             }
@@ -266,8 +271,13 @@ impl DownloadManager {
                     naming::conflict_exts(audio_format),
                 )
             {
+                let kind = if job.audio_format.is_some() {
+                    "音频"
+                } else {
+                    "视频"
+                };
                 return Err(AppError::Message(format!(
-                    "本地已存在该视频文件（{} P{}），已跳过",
+                    "本地已存在该{kind}文件（{} P{}），已跳过",
                     job.video_id, job.page_index
                 )));
             }
