@@ -78,7 +78,7 @@ async fn multi_page_playurl_formats(
     pages: &[models::PageItem],
     cookie_header: Option<&str>,
     on_progress: impl Fn(Vec<models::FormatOption>),
-) -> Option<Vec<models::FormatOption>> {
+) -> Option<(Vec<models::FormatOption>, Vec<models::FormatOption>)> {
     let max_samples = if pages.len() <= 16 { pages.len() } else { 8 };
     let indices = ytdlp::sample_page_indices(pages.len() as u32, max_samples);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(PLAYURL_SAMPLE_CONCURRENCY));
@@ -103,15 +103,18 @@ async fn multi_page_playurl_formats(
                 .ok()
         });
     }
-    let mut observed = Vec::new();
+    let mut observed_video: Vec<models::FormatOption> = Vec::new();
+    let mut observed_audio: Vec<models::FormatOption> = Vec::new();
     while let Some(task) = tasks.join_next().await {
-        let Ok(Some(formats)) = task else {
+        let Ok(Some((video, audio))) = task else {
             continue;
         };
-        playurl::merge_multi_page_options(&mut observed, formats);
-        on_progress(observed.clone());
+        playurl::merge_multi_page_options(&mut observed_video, video);
+        playurl::merge_multi_page_options(&mut observed_audio, audio);
+        on_progress(observed_video.clone());
     }
-    (!observed.is_empty()).then_some(observed)
+    (!observed_video.is_empty() || !observed_audio.is_empty())
+        .then_some((observed_video, observed_audio))
 }
 
 pub fn is_resolve_current(active_id: u64, request_id: u64) -> bool {
@@ -153,6 +156,8 @@ pub struct EnqueueArgs {
     pub title: String,
     pub page_indexes: Vec<u32>,
     pub format_id: String,
+    #[serde(default)]
+    pub audio_format: Option<String>,
     pub output_template: Option<String>,
     /// Save as a new numbered copy; never overwrite. Does not bypass active-queue lock.
     #[serde(default, alias = "force")]
@@ -378,78 +383,80 @@ pub async fn resolve_url(
         _ => None,
     };
 
-    let playurl_formats: Option<Vec<models::FormatOption>> = if let Some(view) = &view_meta {
-        let bvid = resolve_cache::extract_bilibili_id(&url);
-        let keys = match state
-            .wbi_keys
-            .get_or_fetch(&client, cookie_header.as_deref())
-            .await
-        {
-            Ok(keys) => Some(keys),
-            Err(e) => {
-                tracing::warn!(target: "core", "resolve: wbi keys 失败，回退 yt-dlp: {e}");
-                None
-            }
-        };
-        match (bvid, keys) {
-            (Some(bvid), Some(keys)) if view.pages.len() == 1 => {
-                let cid = view.pages[0].page_id.clone();
-                match playurl::fetch_formats(
-                    &client,
-                    &keys,
-                    &bvid,
-                    &cid,
-                    cookie_header.as_deref(),
-                    false,
-                )
+    let playurl_formats: Option<(Vec<models::FormatOption>, Vec<models::FormatOption>)> =
+        if let Some(view) = &view_meta {
+            let bvid = resolve_cache::extract_bilibili_id(&url);
+            let keys = match state
+                .wbi_keys
+                .get_or_fetch(&client, cookie_header.as_deref())
                 .await
-                {
-                    Ok(formats) => Some(formats),
-                    Err(e) => {
-                        tracing::warn!(target: "core", "resolve: playurl 失败，回退 yt-dlp: {e}");
-                        state.wbi_keys.invalidate();
-                        None
+            {
+                Ok(keys) => Some(keys),
+                Err(e) => {
+                    tracing::warn!(target: "core", "resolve: wbi keys 失败，回退 yt-dlp: {e}");
+                    None
+                }
+            };
+            match (bvid, keys) {
+                (Some(bvid), Some(keys)) if view.pages.len() == 1 => {
+                    let cid = view.pages[0].page_id.clone();
+                    match playurl::fetch_formats(
+                        &client,
+                        &keys,
+                        &bvid,
+                        &cid,
+                        cookie_header.as_deref(),
+                        false,
+                    )
+                    .await
+                    {
+                        Ok((video, audio)) => Some((video, audio)),
+                        Err(e) => {
+                            tracing::warn!(target: "core", "resolve: playurl 失败，回退 yt-dlp: {e}");
+                            state.wbi_keys.invalidate();
+                            None
+                        }
                     }
                 }
-            }
-            (Some(bvid), Some(keys)) => {
-                let app_handle = app.clone();
-                let progress_emit = move |formats: Vec<models::FormatOption>| {
-                    let _ = app_handle.emit(
-                        RESOLVE_FORMATS_PROGRESS_EVENT,
-                        &ResolveMetaEvent {
-                            request_id,
-                            meta: models::VideoMeta {
-                                formats,
-                                ..view.clone()
+                (Some(bvid), Some(keys)) => {
+                    let app_handle = app.clone();
+                    let progress_emit = move |formats: Vec<models::FormatOption>| {
+                        let _ = app_handle.emit(
+                            RESOLVE_FORMATS_PROGRESS_EVENT,
+                            &ResolveMetaEvent {
+                                request_id,
+                                meta: models::VideoMeta {
+                                    formats,
+                                    ..view.clone()
+                                },
                             },
-                        },
-                    );
-                };
-                let result = multi_page_playurl_formats(
-                    &client,
-                    &keys,
-                    &bvid,
-                    &view.pages,
-                    cookie_header.as_deref(),
-                    progress_emit,
-                )
-                .await;
-                if result.is_none() {
-                    state.wbi_keys.invalidate();
+                        );
+                    };
+                    let result = multi_page_playurl_formats(
+                        &client,
+                        &keys,
+                        &bvid,
+                        &view.pages,
+                        cookie_header.as_deref(),
+                        progress_emit,
+                    )
+                    .await;
+                    if result.is_none() {
+                        state.wbi_keys.invalidate();
+                    }
+                    result
                 }
-                result
+                _ => None,
             }
-            _ => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let used_playurl = playurl_formats.is_some();
     let final_meta = match (view_meta, playurl_formats) {
-        (Some(mut view), Some(formats)) => {
+        (Some(mut view), Some((formats, audio_formats))) => {
             view.formats = formats;
+            view.audio_formats = audio_formats;
             view
         }
         (view_meta, _) => {
@@ -565,6 +572,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
             video_id: args.video_id.clone(),
             page_index,
             format_id: args.format_id.clone(),
+            audio_format: args.audio_format.clone(),
             title: title.clone(),
             output_template: page_template,
             status: JobStatus::Pending,

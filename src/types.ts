@@ -24,6 +24,7 @@ export interface VideoMeta {
   webpage_url: string;
   pages: PageItem[];
   formats: FormatOption[];
+  audio_formats: FormatOption[];
   platform: string;
 }
 
@@ -38,6 +39,7 @@ export interface DownloadJob {
   video_id: string;
   page_index: number;
   format_id: string;
+  audio_format?: string | null;
   title: string;
   output_template: string;
   status: JobStatus;

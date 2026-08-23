@@ -41,16 +41,27 @@ export function VideoCard({
   formatsError = null,
 }: VideoCardProps) {
   const [selectedFormatId, setSelectedFormatId] = useState("");
+  const [mode, setMode] = useState<"video" | "audio">("video");
+  const [selectedAudioId, setSelectedAudioId] = useState("");
+  const [audioFormat, setAudioFormat] = useState<"m4a" | "mp3" | "flac">("m4a");
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
   const sortedFormats = useMemo(() => sortFormats(meta.formats), [meta.formats]);
+  const sortedAudioFormats = useMemo(
+    () => sortFormats(meta.audio_formats),
+    [meta.audio_formats],
+  );
 
   useEffect(() => {
     const defaultFormat = pickDefaultFormat(meta.formats);
     setSelectedFormatId(defaultFormat?.format_id ?? "");
+    const defaultAudio = pickDefaultFormat(meta.audio_formats);
+    setSelectedAudioId(defaultAudio?.format_id ?? "");
+    setAudioFormat("m4a");
+    setMode("video");
     setSelectedPages(new Set(meta.pages.map((p) => p.index)));
     setError(null);
     setInfo(null);
@@ -82,8 +93,9 @@ export function VideoCard({
   }
 
   async function handleDownload() {
-    if (!selectedFormatId || selectedPages.size === 0) {
-      setError("请选择清晰度并至少勾选一个分 P");
+    const selectedId = mode === "audio" ? selectedAudioId : selectedFormatId;
+    if (!selectedId || selectedPages.size === 0) {
+      setError(mode === "audio" ? "请选择音质并至少勾选一个分 P" : "请选择清晰度并至少勾选一个分 P");
       setInfo(null);
       return;
     }
@@ -94,9 +106,18 @@ export function VideoCard({
     try {
       const pageIndexes = [...selectedPages].sort((a, b) => a - b);
       const chosen =
-        sortedFormats.find((f) => f.format_id === selectedFormatId)?.label ??
-        selectedFormatId;
-      logUi("download", `点击下载（${chosen}，${pageIndexes.length} P）`, "info");
+        mode === "audio"
+          ? sortedAudioFormats.find((f) => f.format_id === selectedAudioId)?.label ??
+            selectedAudioId
+          : sortedFormats.find((f) => f.format_id === selectedFormatId)?.label ??
+            selectedFormatId;
+      const audioFormatArg =
+        mode === "audio" && audioFormat !== "m4a" ? audioFormat : null;
+      logUi(
+        "download",
+        `点击下载（${mode === "audio" ? "音频" : "视频"}，${chosen}，${pageIndexes.length} P）`,
+        "info",
+      );
       const settings = await api.getSettings();
       const conflict = await api.checkDownloadConflict({
         video_id: meta.id,
@@ -129,7 +150,8 @@ export function VideoCard({
         video_id: meta.id,
         title: meta.title,
         page_indexes: pageIndexes,
-        format_id: selectedFormatId,
+        format_id: selectedId,
+        audio_format: audioFormatArg,
         save_as_copy: saveAsCopy,
         uploader: meta.uploader ?? "",
       });
@@ -153,45 +175,116 @@ export function VideoCard({
         </div>
       </div>
 
-      <div>
-        <label className="field-label" htmlFor="format-select">
-          清晰度
-        </label>
-        {formatsLoading && meta.formats.length === 0 ? (
-          <p className="loading-text">正在获取清晰度…</p>
-        ) : (
-          <select
-            id="format-select"
-            className="format-select"
-            value={selectedFormatId}
-            onChange={(e) => setSelectedFormatId(e.target.value)}
-            disabled={formatsLoading || meta.formats.length === 0}
-          >
-            {sortedFormats.map((f) => (
-              <option key={f.format_id} value={f.format_id}>
-                {f.label}
-              </option>
-            ))}
-          </select>
-        )}
-        {formatsError && (
-          <p className="url-hint error">
-            清晰度获取失败：{formatsError}
-            <button
-              type="button"
-              className="btn btn-sm"
-              style={{ marginLeft: "0.5rem" }}
-              onClick={onRefresh}
-              disabled={refreshing || downloading}
-            >
-              重试
-            </button>
-          </p>
-        )}
-        {showLoginHint && !formatsLoading && (
-          <p className="login-hint">登录后可能获得更高码率清晰度</p>
-        )}
+      <div className="mode-toggle" role="tablist">
+        <button
+          type="button"
+          className={mode === "video" ? "mode-segment active" : "mode-segment"}
+          onClick={() => setMode("video")}
+        >
+          视频
+        </button>
+        <button
+          type="button"
+          className={mode === "audio" ? "mode-segment active" : "mode-segment"}
+          onClick={() => setMode("audio")}
+        >
+          仅音频
+        </button>
       </div>
+
+      {mode === "video" ? (
+        <div>
+          <label className="field-label" htmlFor="format-select">
+            清晰度
+          </label>
+          {formatsLoading && meta.formats.length === 0 ? (
+            <p className="loading-text">正在获取清晰度…</p>
+          ) : (
+            <select
+              id="format-select"
+              className="format-select"
+              value={selectedFormatId}
+              onChange={(e) => setSelectedFormatId(e.target.value)}
+              disabled={formatsLoading || meta.formats.length === 0}
+            >
+              {sortedFormats.map((f) => (
+                <option key={f.format_id} value={f.format_id}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          )}
+          {formatsError && (
+            <p className="url-hint error">
+              清晰度获取失败：{formatsError}
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{ marginLeft: "0.5rem" }}
+                onClick={onRefresh}
+                disabled={refreshing || downloading}
+              >
+                重试
+              </button>
+            </p>
+          )}
+          {showLoginHint && !formatsLoading && (
+            <p className="login-hint">登录后可能获得更高码率清晰度</p>
+          )}
+        </div>
+      ) : (
+        <div>
+          <label className="field-label" htmlFor="audio-format-select">
+            音质
+          </label>
+          {sortedAudioFormats.length === 0 ? (
+            <p className="loading-text">该视频暂无可下载的音频</p>
+          ) : (
+            <select
+              id="audio-format-select"
+              className="format-select"
+              value={selectedAudioId}
+              onChange={(e) => setSelectedAudioId(e.target.value)}
+            >
+              {sortedAudioFormats.map((f) => (
+                <option key={f.format_id} value={f.format_id}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <label className="field-label" style={{ marginTop: "0.75rem" }}>
+            格式
+          </label>
+          <div className="mode-toggle">
+            {(["m4a", "mp3", "flac"] as const).map((fmt) => {
+              const isHires =
+                sortedAudioFormats
+                  .find((f) => f.format_id === selectedAudioId)
+                  ?.label.includes("Hi-Res") ?? false;
+              const disabled = fmt === "flac" && !isHires;
+              return (
+                <button
+                  key={fmt}
+                  type="button"
+                  className={
+                    audioFormat === fmt ? "mode-segment active" : "mode-segment"
+                  }
+                  disabled={disabled}
+                  onClick={() => setAudioFormat(fmt)}
+                >
+                  {fmt === "flac" ? "FLAC" : fmt}
+                </button>
+              );
+            })}
+          </div>
+          {!(sortedAudioFormats
+            .find((f) => f.format_id === selectedAudioId)
+            ?.label.includes("Hi-Res") ?? false) && (
+            <p className="url-hint">FLAC 仅 Hi-Res 音源可选</p>
+          )}
+        </div>
+      )}
 
       {meta.pages.length > 1 && (
         <div className="pages-section">
@@ -255,13 +348,14 @@ export function VideoCard({
           disabled={
             refreshing ||
             downloading ||
-            formatsLoading ||
-            !!formatsError ||
-            !selectedFormatId ||
+            (mode === "video" &&
+              (formatsLoading || !!formatsError || !selectedFormatId)) ||
+            (mode === "audio" &&
+              (!selectedAudioId || sortedAudioFormats.length === 0)) ||
             noneSelected
           }
         >
-          {downloading ? "加入队列…" : formatsLoading ? "等待清晰度…" : "下载"}
+          {downloading ? "加入队列…" : "下载"}
         </button>
       </div>
     </div>

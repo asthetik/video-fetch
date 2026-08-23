@@ -222,6 +222,60 @@ pub fn parse_multi_page_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption
     Ok(out)
 }
 
+/// Audio tiers from playurl `dash.audio`, highest bitrate first. Lower tiers use
+/// `bestaudio[abr<=N]`; the top tier is uncapped `bestaudio`.
+pub fn parse_audio_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
+    let data = data_of(v)?;
+    let mut formats: Vec<FormatOption> = Vec::new();
+    let mut seen: HashSet<(String, i64)> = HashSet::new();
+    if let Some(audio) = data
+        .get("dash")
+        .and_then(|d| d.get("audio"))
+        .and_then(Value::as_array)
+    {
+        for entry in audio {
+            let abr = entry
+                .get("bandwidth")
+                .and_then(Value::as_u64)
+                .map(|b| (b / 1000) as f64);
+            let codecs = entry.get("codecs").and_then(Value::as_str).unwrap_or("");
+            let key = (
+                codecs.to_string(),
+                abr.map(|a| a.round() as i64).unwrap_or(0),
+            );
+            if codecs.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            let lossless = codecs.starts_with("flac");
+            let label = if lossless {
+                "Hi-Res 无损".to_string()
+            } else {
+                format!("{:.0}kbps AAC", abr.unwrap_or(0.0))
+            };
+            formats.push(FormatOption {
+                format_id: String::new(),
+                label,
+                height: None,
+                fps: None,
+                tbr: abr,
+            });
+        }
+    }
+    formats.sort_by(|a, b| {
+        b.tbr
+            .partial_cmp(&a.tbr)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (i, f) in formats.iter_mut().enumerate() {
+        f.format_id = if i == 0 {
+            "bestaudio".to_string()
+        } else {
+            format!("bestaudio[abr<={:.0}]", f.tbr.unwrap_or(0.0))
+        };
+    }
+    Ok(formats)
+}
+
 /// Merge per-page (height, codec) options from multi-P sampling. Deduplicates by
 /// selector and keeps the highest observed bitrate/fps for sorting.
 pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<FormatOption>) {
@@ -255,7 +309,7 @@ pub async fn fetch_formats(
     cid: &str,
     cookie_header: Option<&str>,
     multi_page: bool,
-) -> AppResult<Vec<FormatOption>> {
+) -> AppResult<(Vec<FormatOption>, Vec<FormatOption>)> {
     let params: Vec<(String, String)> = vec![
         ("bvid".into(), bvid.to_string()),
         ("cid".into(), cid.to_string()),
@@ -289,11 +343,13 @@ pub async fn fetch_formats(
         .json()
         .await
         .map_err(|e| AppError::Message(format!("playurl JSON 失败: {e}")))?;
-    if multi_page {
-        parse_multi_page_playurl_formats(&body)
+    let video = if multi_page {
+        parse_multi_page_playurl_formats(&body)?
     } else {
-        parse_playurl_formats(&body)
-    }
+        parse_playurl_formats(&body)?
+    };
+    let audio = parse_audio_formats(&body)?;
+    Ok((video, audio))
 }
 
 #[cfg(test)]
@@ -422,6 +478,26 @@ mod tests {
         assert!(formats[0].label.contains("avc1.640033"));
         assert!(formats[1].format_id.contains("vcodec^=av01"));
         assert_eq!(formats[2].height, Some(720));
+    }
+
+    #[test]
+    fn parses_audio_formats_from_dash() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30216, "bandwidth": 64000, "codecs": "mp4a.40.2"},
+                        {"id": 30280, "bandwidth": 192000, "codecs": "mp4a.40.2"},
+                        {"id": 30251, "bandwidth": 1011000, "codecs": "flac"}
+                    ]
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        assert_eq!(formats.len(), 3);
+        assert_eq!(formats[0].label, "Hi-Res 无损");
+        assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
     }
 
     #[test]

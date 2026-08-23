@@ -54,6 +54,9 @@ pub struct VideoMeta {
     pub webpage_url: String,
     pub pages: Vec<PageItem>,
     pub formats: Vec<FormatOption>,
+    /// Audio-only formats for the "仅音频" mode; empty when unavailable.
+    #[serde(default)]
+    pub audio_formats: Vec<FormatOption>,
     pub platform: String,
 }
 
@@ -64,6 +67,9 @@ pub struct DownloadJob {
     pub video_id: String,
     pub page_index: u32,
     pub format_id: String,
+    /// Some("mp3" | "flac") for audio transcode; None = video / m4a (no transcode).
+    #[serde(default)]
+    pub audio_format: Option<String>,
     pub title: String,
     pub output_template: String,
     pub status: JobStatus,

@@ -165,6 +165,7 @@ fn map_video_meta(v: &serde_json::Value) -> AppResult<VideoMeta> {
         webpage_url,
         pages,
         formats,
+        audio_formats: parse_audio_only_formats(media_source_value(v)),
         platform,
     })
 }
@@ -326,6 +327,44 @@ fn is_audio_only_format(f: &serde_json::Value) -> bool {
     let height_none = f.get("height").and_then(|h| h.as_u64()).is_none();
     // height-none heuristic: no height and no real video codec
     height_none && vcodec.map(|v| v.is_empty()).unwrap_or(true)
+}
+
+/// Audio-only tiers for the "仅音频" mode, highest bitrate first. Lower tiers
+/// use `bestaudio[abr<=N]`; the top tier is uncapped `bestaudio`.
+fn parse_audio_only_formats(v: &serde_json::Value) -> Vec<FormatOption> {
+    let Some(formats) = v.get("formats").and_then(|f| f.as_array()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<FormatOption> = formats
+        .iter()
+        .filter(|f| is_audio_only_format(f))
+        .map(|f| {
+            let abr = f.get("abr").and_then(|a| a.as_f64());
+            let acodec = f.get("acodec").and_then(|c| c.as_str()).unwrap_or("");
+            let lossless = acodec.starts_with("flac");
+            let label = if lossless {
+                "Hi-Res 无损".to_string()
+            } else {
+                format!("{:.0}kbps AAC", abr.unwrap_or(0.0))
+            };
+            FormatOption {
+                format_id: String::new(),
+                label,
+                height: None,
+                fps: None,
+                tbr: abr,
+            }
+        })
+        .collect();
+    sort_formats_by_quality(&mut out);
+    for (i, f) in out.iter_mut().enumerate() {
+        f.format_id = if i == 0 {
+            "bestaudio".to_string()
+        } else {
+            format!("bestaudio[abr<={:.0}]", f.tbr.unwrap_or(0.0))
+        };
+    }
+    out
 }
 
 /// Prefix for multi-P height preferences (`vh1080` → max 1080p per part).
@@ -695,6 +734,7 @@ pub struct DownloadRequest<'a> {
     pub job_id: &'a str,
     pub url: &'a str,
     pub format_id: &'a str,
+    pub audio_format: Option<&'a str>,
     pub output_template: &'a str,
     pub output_dir: &'a Path,
     pub cookies_path: Option<&'a Path>,
@@ -720,6 +760,7 @@ pub async fn download(
         job_id,
         url,
         format_id,
+        audio_format,
         output_template,
         output_dir,
         cookies_path,
@@ -743,7 +784,11 @@ pub async fn download(
     let url = canonicalize_video_url(url);
 
     let output_spec = output_dir.join(output_template);
-    let selector = dash_format_selector(format_id);
+    let selector = if audio_format.is_some() {
+        format!("{format_id}/bestaudio/best")
+    } else {
+        dash_format_selector(format_id)
+    };
     let mut cmd = Command::new(&cfg.yt_dlp_path);
     hide_windows_console(&mut cmd);
     cmd.arg("-f").arg(&selector);
@@ -753,6 +798,9 @@ pub async fn download(
     // Numeric yt-dlp ids and other platforms keep yt-dlp's default ordering.
     if selector.starts_with("bestvideo[") {
         cmd.arg("--format-sort").arg("res,tbr");
+    }
+    if let Some(fmt) = audio_format {
+        cmd.arg("-x").arg("--audio-format").arg(fmt);
     }
     cmd
         .arg("-o")
@@ -1261,6 +1309,24 @@ mod tests {
         let meta = video_meta_from_yt_dlp_json(&v).unwrap();
         assert_eq!(meta.formats.len(), 1);
         assert_eq!(meta.formats[0].format_id, "80");
+    }
+
+    #[test]
+    fn parses_audio_only_formats_from_ytdlp_json() {
+        let v = serde_json::json!({
+            "id": "BV1xx",
+            "title": "demo",
+            "webpage_url": "https://www.bilibili.com/video/BV1xx",
+            "formats": [
+                {"format_id": "30216", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 66.0},
+                {"format_id": "30280", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 192.0},
+                {"format_id": "30251", "height": null, "vcodec": "none", "acodec": "flac", "abr": 1011.0}
+            ]
+        });
+        let meta = video_meta_from_yt_dlp_json(&v).unwrap();
+        assert_eq!(meta.audio_formats.len(), 3);
+        assert!(meta.audio_formats[0].label.contains("Hi-Res"));
+        assert_eq!(meta.audio_formats[1].format_id, "bestaudio[abr<=192]");
     }
 
     #[test]

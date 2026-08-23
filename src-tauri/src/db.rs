@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   video_id TEXT NOT NULL,
   page_index INTEGER NOT NULL,
   format_id TEXT NOT NULL,
+  audio_format TEXT,
   title TEXT NOT NULL,
   output_template TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -38,6 +39,8 @@ impl Db {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
+        // Lightweight migration for older databases.
+        let _ = conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", []);
         Self::purge_legacy_resolve_cache(&conn)?;
         Ok(Self { conn })
     }
@@ -62,10 +65,10 @@ impl Db {
     pub fn insert_job(&self, job: &DownloadJob) -> AppResult<()> {
         self.conn.execute(
             "INSERT INTO jobs (
-                id, url, video_id, page_index, format_id, title, output_template,
+                id, url, video_id, page_index, format_id, audio_format, title, output_template,
                 status, progress, error, output_path, created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now')
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'), datetime('now')
             )",
             params![
                 job.id,
@@ -73,6 +76,7 @@ impl Db {
                 job.video_id,
                 job.page_index,
                 job.format_id,
+                job.audio_format,
                 job.title,
                 job.output_template,
                 status_to_str(&job.status),
@@ -97,6 +101,7 @@ impl Db {
                 progress = ?9,
                 error = ?10,
                 output_path = ?11,
+                audio_format = ?12,
                 updated_at = datetime('now')
             WHERE id = ?1",
             params![
@@ -111,6 +116,7 @@ impl Db {
                 job.progress,
                 job.error,
                 job.output_path,
+                job.audio_format,
             ],
         )?;
         if updated == 0 {
@@ -123,7 +129,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path
+                status, progress, error, output_path, audio_format
             FROM jobs
             ORDER BY created_at DESC",
         )?;
@@ -141,6 +147,7 @@ impl Db {
                 progress: row.get(8)?,
                 error: row.get(9)?,
                 output_path: row.get(10)?,
+                audio_format: row.get(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -150,7 +157,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path
+                status, progress, error, output_path, audio_format
             FROM jobs
             WHERE id = ?1",
         )?;
@@ -168,6 +175,7 @@ impl Db {
                 progress: row.get(8)?,
                 error: row.get(9)?,
                 output_path: row.get(10)?,
+                audio_format: row.get(11)?,
             })
         })?;
         Ok(job)
@@ -332,6 +340,7 @@ mod tests {
             webpage_url: "https://www.bilibili.com/video/BV1xx".into(),
             pages: vec![],
             formats: vec![],
+            audio_formats: vec![],
             platform: "bilibili".into(),
         }
     }
@@ -425,6 +434,7 @@ mod tests {
             video_id: "BV1xx".into(),
             page_index: 1,
             format_id: format_id.into(),
+            audio_format: None,
             title: "demo".into(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Done,
@@ -441,6 +451,7 @@ mod tests {
             video_id: "BV1xx".into(),
             page_index: 1,
             format_id: "80".into(),
+            audio_format: None,
             title: "demo".into(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
