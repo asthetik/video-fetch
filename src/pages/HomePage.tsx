@@ -18,12 +18,14 @@ interface HomePageProps {
   queueRefresh: number;
   onQueueRefresh: () => void;
   onOpenHistory: () => void;
+  active?: boolean;
 }
 
 export function HomePage({
   queueRefresh,
   onQueueRefresh,
   onOpenHistory,
+  active = true,
 }: HomePageProps) {
   const [url, setUrl] = useState("");
   const [meta, setMeta] = useState<VideoMeta | null>(null);
@@ -177,7 +179,7 @@ export function HomePage({
         <VideoCard
           meta={meta}
           url={url.trim()}
-          authStatus={authStatus}
+          active={active}
           refreshing={loading}
           formatsLoading={formatsLoading}
           formatsError={formatsError}

@@ -128,6 +128,7 @@ pub fn map_view_json(data: &Value, webpage_url: &str) -> AppResult<VideoMeta> {
         webpage_url: webpage_url.to_string(),
         pages,
         formats: Vec::new(),
+        audio_formats: Vec::new(),
         platform: "bilibili".into(),
     })
 }
@@ -158,6 +159,7 @@ pub fn merge_view_with_formats(view: VideoMeta, ytdlp_meta: VideoMeta) -> VideoM
             view.pages
         },
         formats: ytdlp_meta.formats,
+        audio_formats: ytdlp_meta.audio_formats,
         platform: if view.platform.is_empty() {
             ytdlp_meta.platform
         } else {
@@ -218,6 +220,7 @@ mod tests {
                 },
             ],
             formats: vec![],
+            audio_formats: vec![],
             platform: "bilibili".into(),
         };
         let ytdlp_meta = VideoMeta {
@@ -238,6 +241,7 @@ mod tests {
                     height: Some(1080),
                     fps: Some(30),
                     tbr: Some(1000.0),
+                    hires: false,
                 },
                 crate::models::FormatOption {
                     format_id: "64".into(),
@@ -245,8 +249,10 @@ mod tests {
                     height: Some(720),
                     fps: None,
                     tbr: Some(800.0),
+                    hires: false,
                 },
             ],
+            audio_formats: vec![],
             platform: "bilibili".into(),
         };
         let merged = merge_view_with_formats(view, ytdlp_meta);

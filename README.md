@@ -21,6 +21,7 @@
 
 - 粘贴 B 站视频链接，自动列出清晰度，选好就能下载
 - 多 P（分集）视频可以勾选要下载的集数，一次全部下载
+- 支持「视频 / 仅音频」切换：仅音频可选音质档位（64/132/192kbps AAC、Hi-Res 无损）与输出格式（m4a / mp3 / FLAC，FLAC 仅 Hi-Res 源可选）
 - 登录 B 站后，可以下载大会员专属清晰度
 - 下载排队执行，可以取消、重试，历史记录随时可查
 - 安装包自带下载组件，装完就能用，不需要额外配置
@@ -30,7 +31,8 @@
 1. 打开 [Releases](https://github.com/asthetik/video-fetch/releases) 页面
 2. 下载对应系统的安装包：
    - macOS（仅 Apple 芯片）：`Video-Fetch-v*-macOS.dmg`
-   - Windows：`Video-Fetch-v*-Windows.msi` / `.exe`
+   - Windows x64：`Video-Fetch-v*-Windows-x64.msi` / `.exe`
+   - Windows arm64：`Video-Fetch-v*-Windows-arm64.msi` / `.exe`
    - Linux：`Video-Fetch-v*-Linux-*.AppImage` / `.deb`
 3. 安装后打开即可
 
@@ -61,7 +63,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 ## 使用
 
 1. 粘贴视频链接，等待解析
-2. 选择清晰度（多 P 视频还可以勾选集数）
+2. 选择清晰度（多 P 视频还可以勾选集数）；切到「仅音频」可选音质和输出格式
 3. 点击下载
 
 想要大会员清晰度？在应用内登录 B 站，或手动导入 `cookies.txt` 文件。

@@ -406,7 +406,8 @@ mod tests {
     fn rotator_opens_next_numbered_file_without_rename() {
         let t = dir();
         let d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
-        let mut rotator = Rotator::open(t.path().to_path_buf(), d, 10).unwrap();
+        let mut rotator =
+            Rotator::open_with_now(t.path().to_path_buf(), d, 10, Box::new(move || d)).unwrap();
         rotator.write_chunk(b"123456").unwrap();
         assert_eq!(rotator.seq, 0);
         rotator.write_chunk(b"67890").unwrap(); // 6 + 5 > 10 -> rotate
@@ -420,7 +421,8 @@ mod tests {
         let t = dir();
         let d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
         std::fs::write(t.path().join("app.2026-08-15.3.log"), b"old").unwrap();
-        let mut rotator = Rotator::open(t.path().to_path_buf(), d, 10_000).unwrap();
+        let mut rotator =
+            Rotator::open_with_now(t.path().to_path_buf(), d, 10_000, Box::new(move || d)).unwrap();
         assert_eq!(rotator.seq, 3);
         rotator.write_chunk(b"x").unwrap();
         assert_eq!(

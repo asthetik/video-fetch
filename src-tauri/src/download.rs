@@ -125,6 +125,7 @@ impl Downloader for YtDlpDownloader {
                 job_id: &job.id,
                 url: &job.url,
                 format_id: &job.format_id,
+                audio_format: job.audio_format.as_deref(),
                 output_template: &output_template,
                 output_dir: &work,
                 cookies_path: self.cookies_path.as_deref(),
@@ -234,14 +235,19 @@ impl DownloadManager {
 
         // Never allow a second active job for the same video page (not bypassed by save_as_copy).
         {
-            let active = self
-                .db
-                .lock()
-                .map_err(lock_err)?
-                .has_active_job(&job.video_id, job.page_index)?;
+            let active = self.db.lock().map_err(lock_err)?.has_active_job(
+                &job.video_id,
+                job.page_index,
+                job.audio_format.as_deref(),
+            )?;
             if active {
+                let kind = if job.audio_format.is_some() {
+                    "音频"
+                } else {
+                    "视频"
+                };
                 return Err(AppError::Message(format!(
-                    "该视频已在下载队列中（{} P{}），请等待完成或取消后再试",
+                    "该{kind}已在下载队列中（{} P{}），请等待完成或取消后再试",
                     job.video_id, job.page_index
                 )));
             }
@@ -253,18 +259,25 @@ impl DownloadManager {
                 .lock()
                 .map_err(lock_err)?
                 .find_done_output_paths(&job.video_id, job.page_index)?;
-            // Only skip when a matching file is still on disk (history alone is not enough).
-            if local_output_exists(
-                &save_dir,
-                &job.output_template,
-                &job.title,
-                &job.video_id,
-                "",
-                job.page_index,
-                &recorded,
-            ) {
+            let audio_format = job.audio_format.as_deref();
+            if recorded_output_exists(&recorded, audio_format)
+                || local_output_exists(
+                    &save_dir,
+                    &job.output_template,
+                    &job.title,
+                    &job.video_id,
+                    "",
+                    job.page_index,
+                    naming::conflict_exts(audio_format),
+                )
+            {
+                let kind = if job.audio_format.is_some() {
+                    "音频"
+                } else {
+                    "视频"
+                };
                 return Err(AppError::Message(format!(
-                    "本地已存在该视频文件（{} P{}），已跳过",
+                    "本地已存在该{kind}文件（{} P{}），已跳过",
                     job.video_id, job.page_index
                 )));
             }
@@ -284,11 +297,13 @@ impl DownloadManager {
         Ok(job)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn check_conflict(
         &self,
         video_id: &str,
         page_indexes: &[u32],
         format_id: &str,
+        audio_format: Option<&str>,
         title: &str,
         uploader: &str,
         template: &str,
@@ -300,17 +315,25 @@ impl DownloadManager {
         let mut exists = false;
         let mut file_exists = false;
         for &page_index in page_indexes {
-            if db.has_active_job(video_id, page_index)? {
+            if db.has_active_job(video_id, page_index, audio_format)? {
                 downloading = true;
             }
-            match db.find_job_conflict(video_id, page_index, format_id)? {
+            match db.find_job_conflict(video_id, page_index, format_id, audio_format)? {
                 JobConflict::Done => exists = true,
                 JobConflict::Active | JobConflict::None => {}
             }
             let recorded = db.find_done_output_paths(video_id, page_index)?;
-            if local_output_exists(
-                &save_dir, template, title, video_id, uploader, page_index, &recorded,
-            ) {
+            if recorded_output_exists(&recorded, audio_format)
+                || local_output_exists(
+                    &save_dir,
+                    template,
+                    title,
+                    video_id,
+                    uploader,
+                    page_index,
+                    naming::conflict_exts(audio_format),
+                )
+            {
                 file_exists = true;
             }
         }
@@ -755,7 +778,24 @@ fn resolve_work_product(work: &Path, reported: &Path) -> Option<PathBuf> {
     fsutil::find_work_product(work)
 }
 
-/// True when a recorded path or the predicted output name already exists on disk.
+/// True when a recorded path of the same kind (and, for audio, the same
+/// container) already exists on disk.
+fn recorded_output_exists(recorded_paths: &[String], audio_format: Option<&str>) -> bool {
+    recorded_paths.iter().any(|path| {
+        let p = Path::new(path);
+        let kind_matches = match audio_format {
+            Some(fmt) => p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case(fmt))
+                .unwrap_or(false),
+            None => !naming::path_is_audio_output(p),
+        };
+        kind_matches && p.is_file()
+    })
+}
+
+/// True when the predicted output name already exists on disk for this media kind.
 fn local_output_exists(
     save_dir: &Path,
     template: &str,
@@ -763,14 +803,9 @@ fn local_output_exists(
     video_id: &str,
     uploader: &str,
     page_index: u32,
-    recorded_paths: &[String],
+    exts: &[&str],
 ) -> bool {
-    for path in recorded_paths {
-        if PathBuf::from(path).is_file() {
-            return true;
-        }
-    }
-    for ext in naming::OUTPUT_EXTS {
+    for ext in exts {
         let relative =
             naming::preview_filename(template, title, video_id, uploader, ext, page_index);
         if save_dir.join(&relative).is_file() {
@@ -950,6 +985,7 @@ mod tests {
             video_id: "BV1xx".into(),
             page_index: 1,
             format_id: "80".into(),
+            audio_format: None,
             title: "demo".into(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
@@ -1461,6 +1497,7 @@ mod tests {
             "BV1xx",
             "",
             1,
+            None,
         );
         assert!(job.output_template.contains(" (1)"));
         let enqueued = manager.enqueue(job, true).unwrap();
@@ -1565,6 +1602,7 @@ mod tests {
                 "BV1xx",
                 &[1, 2],
                 "80",
+                None,
                 "demo",
                 "",
                 "%(title)s [%(id)s].%(ext)s",
@@ -1582,6 +1620,7 @@ mod tests {
                 "BV2yy",
                 &[1],
                 "80",
+                None,
                 "only-file",
                 "",
                 "%(title)s [%(id)s].%(ext)s",
@@ -1590,6 +1629,47 @@ mod tests {
         assert!(conflict.file_exists);
         assert!(!conflict.exists);
         assert!(!conflict.downloading);
+
+        let audio_conflict = manager
+            .check_conflict(
+                "BV2yy",
+                &[1],
+                "bestaudio",
+                Some("m4a"),
+                "only-file",
+                "",
+                "%(title)s [%(id)s].%(ext)s",
+            )
+            .unwrap();
+        assert!(!audio_conflict.file_exists);
+
+        // An existing .m4a must not block a new .mp3 of the same source.
+        let m4a_path = dir.path().join("only-file [BV2yy].m4a");
+        std::fs::write(&m4a_path, b"x").unwrap();
+        let mp3_conflict = manager
+            .check_conflict(
+                "BV2yy",
+                &[1],
+                "bestaudio",
+                Some("mp3"),
+                "only-file",
+                "",
+                "%(title)s [%(id)s].%(ext)s",
+            )
+            .unwrap();
+        assert!(!mp3_conflict.file_exists);
+        let m4a_conflict = manager
+            .check_conflict(
+                "BV2yy",
+                &[1],
+                "bestaudio",
+                Some("m4a"),
+                "only-file",
+                "",
+                "%(title)s [%(id)s].%(ext)s",
+            )
+            .unwrap();
+        assert!(m4a_conflict.file_exists);
     }
 
     #[tokio::test]

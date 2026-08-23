@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   video_id TEXT NOT NULL,
   page_index INTEGER NOT NULL,
   format_id TEXT NOT NULL,
+  audio_format TEXT,
   title TEXT NOT NULL,
   output_template TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -30,6 +31,15 @@ CREATE TABLE IF NOT EXISTS resolve_cache (
 );
 "#;
 
+/// Whether `table` currently has `column`, per SQLite's table_info pragma.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> AppResult<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(cols.iter().any(|c| c == column))
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -38,6 +48,14 @@ impl Db {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
+        // Lightweight migration for older databases. Fresh DBs already carry the
+        // column from SCHEMA (a blind ALTER would fail with "duplicate column"),
+        // but swallowing every error would also hide genuine failures (locked or
+        // corrupt DB) that break every later statement referencing audio_format.
+        // Check first and propagate unexpected errors.
+        if !column_exists(&conn, "jobs", "audio_format")? {
+            conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", [])?;
+        }
         Self::purge_legacy_resolve_cache(&conn)?;
         Ok(Self { conn })
     }
@@ -62,10 +80,10 @@ impl Db {
     pub fn insert_job(&self, job: &DownloadJob) -> AppResult<()> {
         self.conn.execute(
             "INSERT INTO jobs (
-                id, url, video_id, page_index, format_id, title, output_template,
+                id, url, video_id, page_index, format_id, audio_format, title, output_template,
                 status, progress, error, output_path, created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now')
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'), datetime('now')
             )",
             params![
                 job.id,
@@ -73,6 +91,7 @@ impl Db {
                 job.video_id,
                 job.page_index,
                 job.format_id,
+                job.audio_format,
                 job.title,
                 job.output_template,
                 status_to_str(&job.status),
@@ -97,6 +116,7 @@ impl Db {
                 progress = ?9,
                 error = ?10,
                 output_path = ?11,
+                audio_format = ?12,
                 updated_at = datetime('now')
             WHERE id = ?1",
             params![
@@ -111,6 +131,7 @@ impl Db {
                 job.progress,
                 job.error,
                 job.output_path,
+                job.audio_format,
             ],
         )?;
         if updated == 0 {
@@ -123,7 +144,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path
+                status, progress, error, output_path, audio_format
             FROM jobs
             ORDER BY created_at DESC",
         )?;
@@ -141,6 +162,7 @@ impl Db {
                 progress: row.get(8)?,
                 error: row.get(9)?,
                 output_path: row.get(10)?,
+                audio_format: row.get(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -150,7 +172,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path
+                status, progress, error, output_path, audio_format
             FROM jobs
             WHERE id = ?1",
         )?;
@@ -168,6 +190,7 @@ impl Db {
                 progress: row.get(8)?,
                 error: row.get(9)?,
                 output_path: row.get(10)?,
+                audio_format: row.get(11)?,
             })
         })?;
         Ok(job)
@@ -179,12 +202,14 @@ impl Db {
         video_id: &str,
         page_index: u32,
         format_id: &str,
+        audio_format: Option<&str>,
     ) -> AppResult<JobConflict> {
         let status: Option<String> = self
             .conn
             .query_row(
                 "SELECT status FROM jobs
                  WHERE video_id = ?1 AND page_index = ?2 AND format_id = ?3
+                   AND audio_format IS ?4
                    AND status IN ('pending', 'running', 'done')
                  ORDER BY CASE status
                    WHEN 'running' THEN 0
@@ -192,7 +217,7 @@ impl Db {
                    WHEN 'done' THEN 2
                  END
                  LIMIT 1",
-                params![video_id, page_index, format_id],
+                params![video_id, page_index, format_id, audio_format],
                 |row| row.get(0),
             )
             .optional()?;
@@ -204,13 +229,20 @@ impl Db {
         })
     }
 
-    /// Any pending/running job for this video page, regardless of format.
-    pub fn has_active_job(&self, video_id: &str, page_index: u32) -> AppResult<bool> {
+    /// Any pending/running job for this video page of the same media kind:
+    /// video requests only conflict with other video jobs, audio requests only
+    /// with other audio jobs.
+    pub fn has_active_job(
+        &self,
+        video_id: &str,
+        page_index: u32,
+        audio_format: Option<&str>,
+    ) -> AppResult<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM jobs
-             WHERE video_id = ?1 AND page_index = ?2
+             WHERE video_id = ?1 AND page_index = ?2 AND audio_format IS ?3
                AND status IN ('pending', 'running')",
-            params![video_id, page_index],
+            params![video_id, page_index, audio_format],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -332,8 +364,51 @@ mod tests {
             webpage_url: "https://www.bilibili.com/video/BV1xx".into(),
             pages: vec![],
             formats: vec![],
+            audio_formats: vec![],
             platform: "bilibili".into(),
         }
+    }
+
+    #[test]
+    fn migrates_old_db_without_audio_format_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        // Simulate a pre-0.3.1 database: jobs table without audio_format.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    page_index INTEGER NOT NULL,
+                    format_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    output_template TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress REAL NOT NULL DEFAULT 0,
+                    error TEXT,
+                    output_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert!(column_exists(&db.conn, "jobs", "audio_format").unwrap());
+        // The migrated column must be usable end to end.
+        let mut job = sample_job_for_db("migrated-job");
+        job.audio_format = Some("m4a".into());
+        db.insert_job(&job).unwrap();
+        let loaded = db
+            .list_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == "migrated-job")
+            .unwrap();
+        assert_eq!(loaded.audio_format.as_deref(), Some("m4a"));
     }
 
     #[test]
@@ -425,6 +500,7 @@ mod tests {
             video_id: "BV1xx".into(),
             page_index: 1,
             format_id: format_id.into(),
+            audio_format: None,
             title: "demo".into(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Done,
@@ -441,6 +517,7 @@ mod tests {
             video_id: "BV1xx".into(),
             page_index: 1,
             format_id: "80".into(),
+            audio_format: None,
             title: "demo".into(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
@@ -456,9 +533,54 @@ mod tests {
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "80").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
             JobConflict::Done
         );
+    }
+
+    #[test]
+    fn find_job_conflict_distinguishes_audio_containers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut m4a = sample_job("bestaudio");
+        m4a.audio_format = Some("m4a".into());
+        db.insert_job(&m4a).unwrap();
+        assert_eq!(
+            db.find_job_conflict("BV1xx", 1, "bestaudio", Some("m4a"))
+                .unwrap(),
+            JobConflict::Done
+        );
+        // Same tier, different container: not the same file.
+        assert_eq!(
+            db.find_job_conflict("BV1xx", 1, "bestaudio", Some("mp3"))
+                .unwrap(),
+            JobConflict::None
+        );
+        assert_eq!(
+            db.find_job_conflict("BV1xx", 1, "bestaudio", None).unwrap(),
+            JobConflict::None
+        );
+    }
+
+    #[test]
+    fn has_active_job_distinguishes_video_and_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+
+        let mut audio = sample_job_for_db("audio-1");
+        audio.audio_format = Some("m4a".into());
+        db.insert_job(&audio).unwrap();
+
+        // A pending audio job blocks another audio request, but not a video one.
+        assert!(db.has_active_job("BV1xx", 1, Some("m4a")).unwrap());
+        assert!(!db.has_active_job("BV1xx", 1, None).unwrap());
+
+        let mut video = sample_job_for_db("video-1");
+        video.audio_format = None;
+        db.insert_job(&video).unwrap();
+
+        assert!(db.has_active_job("BV1xx", 1, None).unwrap());
+        assert!(db.has_active_job("BV1xx", 1, Some("m4a")).unwrap());
     }
 
     #[test]
@@ -467,7 +589,7 @@ mod tests {
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "64").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "64", None).unwrap(),
             JobConflict::None
         );
     }
@@ -478,7 +600,7 @@ mod tests {
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "80").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
             JobConflict::Done
         );
 
@@ -489,7 +611,7 @@ mod tests {
         running.output_path = None;
         db.insert_job(&running).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "80").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
             JobConflict::Active
         );
     }

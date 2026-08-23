@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::naming::OUTPUT_EXTS;
+use crate::naming::{AUDIO_OUTPUT_EXTS, OUTPUT_EXTS};
 
 /// Restrict a private file to owner-only on Unix (0600). No-op elsewhere.
 pub(crate) fn restrict_private_file_perms(path: &Path) {
@@ -34,7 +34,10 @@ pub fn work_dir_for(work_root: &Path, job_id: &str) -> PathBuf {
 
 fn has_output_ext(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    OUTPUT_EXTS.iter().any(|ext| lower.ends_with(ext))
+    OUTPUT_EXTS
+        .iter()
+        .chain(AUDIO_OUTPUT_EXTS.iter())
+        .any(|ext| lower.ends_with(ext))
 }
 
 pub fn find_work_product(work: &Path) -> Option<PathBuf> {

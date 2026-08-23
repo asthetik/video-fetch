@@ -43,6 +43,10 @@ pub struct FormatOption {
     /// Approximate total bitrate (kbps) from yt-dlp `tbr`; used for sort/default.
     #[serde(default)]
     pub tbr: Option<f64>,
+    /// True when this audio stream is lossless (FLAC). Structured so the UI
+    /// doesn't gate FLAC on label text.
+    #[serde(default)]
+    pub hires: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +58,9 @@ pub struct VideoMeta {
     pub webpage_url: String,
     pub pages: Vec<PageItem>,
     pub formats: Vec<FormatOption>,
+    /// Audio-only formats for the "仅音频" mode; empty when unavailable.
+    #[serde(default)]
+    pub audio_formats: Vec<FormatOption>,
     pub platform: String,
 }
 
@@ -64,6 +71,9 @@ pub struct DownloadJob {
     pub video_id: String,
     pub page_index: u32,
     pub format_id: String,
+    /// Some("m4a" | "mp3" | "flac") for audio-only jobs; None = video.
+    #[serde(default)]
+    pub audio_format: Option<String>,
     pub title: String,
     pub output_template: String,
     pub status: JobStatus,

@@ -166,6 +166,7 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
             height: Some(var.height),
             fps: (var.fps > 0).then_some(var.fps),
             tbr: Some(var.tbr_kbps as f64),
+            hires: false,
         });
     }
     kept.sort_by(|a, b| {
@@ -210,6 +211,7 @@ pub fn parse_multi_page_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption
             height: Some(height),
             fps: (fps > 0).then_some(fps),
             tbr: Some(tbr as f64),
+            hires: false,
         })
         .collect();
     out.sort_by(|a, b| {
@@ -222,8 +224,80 @@ pub fn parse_multi_page_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption
     Ok(out)
 }
 
+/// Audio tiers from playurl `dash.audio`, plus Hi-Res in `dash.flac` and Dolby
+/// in `dash.dolby`. Highest bitrate first. Lower tiers use `bestaudio[abr<=N]`;
+/// the top tier is uncapped `bestaudio`.
+pub fn parse_audio_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
+    let data = data_of(v)?;
+    let mut formats: Vec<FormatOption> = Vec::new();
+    let mut seen: HashSet<(String, i64)> = HashSet::new();
+    for_each_dash_audio(data, |entry| {
+        let abr = entry
+            .get("bandwidth")
+            .and_then(Value::as_u64)
+            .map(|b| (b / 1000) as f64);
+        let codecs = entry.get("codecs").and_then(Value::as_str).unwrap_or("");
+        if codecs.is_empty() {
+            return;
+        }
+        // Entries without a usable bitrate can't form a tier cap and would
+        // render as "0kbps"; skip them instead of falling through to the top.
+        let Some(abr) = abr else {
+            return;
+        };
+        let key = (codecs.to_string(), abr.round() as i64);
+        if !seen.insert(key) {
+            return;
+        }
+        formats.push(FormatOption {
+            format_id: String::new(),
+            label: crate::ytdlp::audio_stream_label(codecs, Some(abr)),
+            height: None,
+            fps: None,
+            tbr: Some(abr),
+            hires: codecs.to_ascii_lowercase().starts_with("flac"),
+        });
+    });
+    formats.sort_by(|a, b| {
+        b.tbr
+            .partial_cmp(&a.tbr)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for f in formats.iter_mut() {
+        f.format_id = crate::ytdlp::audio_tier_selector(f.hires, f.tbr);
+    }
+    Ok(formats)
+}
+
+fn for_each_dash_audio(data: &Value, mut visit: impl FnMut(&Value)) {
+    let Some(dash) = data.get("dash") else {
+        return;
+    };
+    if let Some(arr) = dash.get("audio").and_then(Value::as_array) {
+        for entry in arr {
+            visit(entry);
+        }
+    }
+    for key in ["flac", "dolby"] {
+        let Some(node) = dash.get(key) else {
+            continue;
+        };
+        let audio = node.get("audio").unwrap_or(node);
+        if let Some(arr) = audio.as_array() {
+            for entry in arr {
+                visit(entry);
+            }
+        } else if audio.is_object() {
+            visit(audio);
+        }
+    }
+}
+
 /// Merge per-page (height, codec) options from multi-P sampling. Deduplicates by
-/// selector and keeps the highest observed bitrate/fps for sorting.
+/// selector and keeps the highest observed bitrate/fps for sorting. Matching
+/// selectors also OR `hires` and keep the Hi-Res label once any page reports
+/// lossless. Hi-Res uses `bestaudio[acodec^=flac]`; lossy tiers use
+/// `bestaudio[abr<=N]`, so they do not share a selector.
 pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<FormatOption>) {
     for option in incoming {
         if let Some(existing) = target.iter_mut().find(|o| o.format_id == option.format_id) {
@@ -235,6 +309,10 @@ pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<Fo
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
+            if option.hires {
+                existing.hires = true;
+                existing.label = option.label;
+            }
         } else {
             target.push(option);
         }
@@ -255,7 +333,7 @@ pub async fn fetch_formats(
     cid: &str,
     cookie_header: Option<&str>,
     multi_page: bool,
-) -> AppResult<Vec<FormatOption>> {
+) -> AppResult<(Vec<FormatOption>, Vec<FormatOption>)> {
     let params: Vec<(String, String)> = vec![
         ("bvid".into(), bvid.to_string()),
         ("cid".into(), cid.to_string()),
@@ -289,11 +367,13 @@ pub async fn fetch_formats(
         .json()
         .await
         .map_err(|e| AppError::Message(format!("playurl JSON 失败: {e}")))?;
-    if multi_page {
-        parse_multi_page_playurl_formats(&body)
+    let video = if multi_page {
+        parse_multi_page_playurl_formats(&body)?
     } else {
-        parse_playurl_formats(&body)
-    }
+        parse_playurl_formats(&body)?
+    };
+    let audio = parse_audio_formats(&body)?;
+    Ok((video, audio))
 }
 
 #[cfg(test)]
@@ -425,6 +505,96 @@ mod tests {
     }
 
     #[test]
+    fn parses_audio_formats_from_dash() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30216, "bandwidth": 64000, "codecs": "mp4a.40.2"},
+                        {"id": 30280, "bandwidth": 192000, "codecs": "mp4a.40.2"},
+                        {"id": 30251, "bandwidth": 1011000, "codecs": "flac"}
+                    ]
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        assert_eq!(formats.len(), 3);
+        assert_eq!(formats[0].label, "Hi-Res 无损");
+        assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
+    }
+
+    #[test]
+    fn parses_hires_from_dash_flac_object() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30216, "bandwidth": 64000, "codecs": "mp4a.40.2"},
+                        {"id": 30280, "bandwidth": 192000, "codecs": "mp4a.40.2"}
+                    ],
+                    "flac": {
+                        "display": true,
+                        "audio": {"id": 30251, "bandwidth": 1011000, "codecs": "flac"}
+                    }
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        assert_eq!(formats.len(), 3);
+        assert_eq!(formats[0].label, "Hi-Res 无损");
+        assert_eq!(formats[0].format_id, "bestaudio[acodec^=flac]");
+        assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
+        assert!(formats[0].hires);
+        assert!(!formats[1].hires);
+    }
+
+    #[test]
+    fn keeps_hires_uncapped_when_dolby_has_higher_bitrate() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30280, "bandwidth": 192000, "codecs": "mp4a.40.2"}
+                    ],
+                    "flac": {
+                        "display": true,
+                        "audio": {"id": 30251, "bandwidth": 1011000, "codecs": "flac"}
+                    },
+                    "dolby": {
+                        "display": true,
+                        "audio": {"id": 30250, "bandwidth": 2000000, "codecs": "ec-3"}
+                    }
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        let flac = formats.iter().find(|f| f.hires).unwrap();
+        assert_eq!(flac.format_id, "bestaudio[acodec^=flac]");
+        assert!(!flac.format_id.contains("abr<="));
+    }
+
+    #[test]
+    fn skips_audio_entries_without_bandwidth() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30216, "bandwidth": 64000, "codecs": "mp4a.40.2"},
+                        {"id": 30299, "codecs": "mp4a.40.2"}
+                    ]
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].label, "64kbps AAC");
+    }
+
+    #[test]
     fn merge_multi_page_options_dedupes_and_keeps_max_bitrate() {
         let page = |bandwidth: u32| {
             vec![FormatOption {
@@ -433,11 +603,43 @@ mod tests {
                 height: Some(1080),
                 fps: Some(24),
                 tbr: Some(bandwidth as f64),
+                hires: false,
             }]
         };
         let mut observed = page(3000);
         merge_multi_page_options(&mut observed, page(4200));
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].tbr, Some(4200.0));
+    }
+
+    fn audio_tier(hires: bool, tbr: f64) -> Vec<FormatOption> {
+        vec![FormatOption {
+            format_id: "bestaudio".into(),
+            label: if hires {
+                "Hi-Res 无损".into()
+            } else {
+                "192kbps AAC".into()
+            },
+            height: None,
+            fps: None,
+            tbr: Some(tbr),
+            hires,
+        }]
+    }
+
+    #[test]
+    fn merge_multi_page_audio_ors_hires_and_keeps_hires_label() {
+        let mut observed = audio_tier(false, 192.0);
+        merge_multi_page_options(&mut observed, audio_tier(true, 1011.0));
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].hires);
+        assert_eq!(observed[0].label, "Hi-Res 无损");
+        assert_eq!(observed[0].tbr, Some(1011.0));
+
+        let mut from_hires = audio_tier(true, 1011.0);
+        merge_multi_page_options(&mut from_hires, audio_tier(false, 192.0));
+        assert!(from_hires[0].hires);
+        assert_eq!(from_hires[0].label, "Hi-Res 无损");
+        assert_eq!(from_hires[0].tbr, Some(1011.0));
     }
 }

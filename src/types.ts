@@ -14,6 +14,8 @@ export interface FormatOption {
   fps?: number | null;
   /** Approximate total bitrate (kbps); used for sort/default. */
   tbr?: number | null;
+  /** True when this audio stream is lossless (FLAC). */
+  hires?: boolean;
 }
 
 export interface VideoMeta {
@@ -24,6 +26,7 @@ export interface VideoMeta {
   webpage_url: string;
   pages: PageItem[];
   formats: FormatOption[];
+  audio_formats: FormatOption[];
   platform: string;
 }
 
@@ -38,6 +41,7 @@ export interface DownloadJob {
   video_id: string;
   page_index: number;
   format_id: string;
+  audio_format?: string | null;
   title: string;
   output_template: string;
   status: JobStatus;

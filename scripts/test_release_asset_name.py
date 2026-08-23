@@ -15,14 +15,14 @@ class TestAssetFilename(unittest.TestCase):
             "Video-Fetch-v0.1.2-macOS.dmg",
         )
 
-    def test_windows_x64_omits_arch(self) -> None:
+    def test_windows_x64_includes_arch(self) -> None:
         self.assertEqual(
             asset_filename("Windows", "x64", "0.1.2", "msi"),
-            "Video-Fetch-v0.1.2-Windows.msi",
+            "Video-Fetch-v0.1.2-Windows-x64.msi",
         )
         self.assertEqual(
             asset_filename("Windows", "x64", "0.1.2", "exe"),
-            "Video-Fetch-v0.1.2-Windows.exe",
+            "Video-Fetch-v0.1.2-Windows-x64.exe",
         )
 
     def test_windows_arm64_includes_arch(self) -> None:
