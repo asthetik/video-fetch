@@ -298,7 +298,9 @@ fn for_each_dash_audio(data: &Value, mut visit: impl FnMut(&Value)) {
 }
 
 /// Merge per-page (height, codec) options from multi-P sampling. Deduplicates by
-/// selector and keeps the highest observed bitrate/fps for sorting.
+/// selector and keeps the highest observed bitrate/fps for sorting. Audio top
+/// tiers share `bestaudio`; `hires` is OR'd so a later Hi-Res page is not
+/// dropped, and the Hi-Res label is kept once any page reports lossless.
 pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<FormatOption>) {
     for option in incoming {
         if let Some(existing) = target.iter_mut().find(|o| o.format_id == option.format_id) {
@@ -310,6 +312,10 @@ pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<Fo
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
+            if option.hires {
+                existing.hires = true;
+                existing.label = option.label;
+            }
         } else {
             target.push(option);
         }
@@ -581,5 +587,36 @@ mod tests {
         merge_multi_page_options(&mut observed, page(4200));
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].tbr, Some(4200.0));
+    }
+
+    fn audio_tier(hires: bool, tbr: f64) -> Vec<FormatOption> {
+        vec![FormatOption {
+            format_id: "bestaudio".into(),
+            label: if hires {
+                "Hi-Res 无损".into()
+            } else {
+                "192kbps AAC".into()
+            },
+            height: None,
+            fps: None,
+            tbr: Some(tbr),
+            hires,
+        }]
+    }
+
+    #[test]
+    fn merge_multi_page_audio_ors_hires_and_keeps_hires_label() {
+        let mut observed = audio_tier(false, 192.0);
+        merge_multi_page_options(&mut observed, audio_tier(true, 1011.0));
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].hires);
+        assert_eq!(observed[0].label, "Hi-Res 无损");
+        assert_eq!(observed[0].tbr, Some(1011.0));
+
+        let mut from_hires = audio_tier(true, 1011.0);
+        merge_multi_page_options(&mut from_hires, audio_tier(false, 192.0));
+        assert!(from_hires[0].hires);
+        assert_eq!(from_hires[0].label, "Hi-Res 无损");
+        assert_eq!(from_hires[0].tbr, Some(1011.0));
     }
 }
