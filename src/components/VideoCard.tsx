@@ -54,6 +54,10 @@ export function VideoCard({
     () => sortFormats(meta.audio_formats),
     [meta.audio_formats],
   );
+  const audioIsHires =
+    sortedAudioFormats
+      .find((f) => f.format_id === selectedAudioId)
+      ?.label.includes("Hi-Res") ?? false;
 
   useEffect(() => {
     const defaultFormat = pickDefaultFormat(meta.formats);
@@ -234,53 +238,50 @@ export function VideoCard({
         </div>
       ) : (
         <div>
-          <label className="field-label" htmlFor="audio-format-select">
-            音质
-          </label>
-          {sortedAudioFormats.length === 0 ? (
-            <p className="loading-text">该视频暂无可下载的音频</p>
-          ) : (
-            <select
-              id="audio-format-select"
-              className="format-select"
-              value={selectedAudioId}
-              onChange={(e) => setSelectedAudioId(e.target.value)}
-            >
-              {sortedAudioFormats.map((f) => (
-                <option key={f.format_id} value={f.format_id}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
-          )}
-          <label className="field-label" style={{ marginTop: "0.75rem" }}>
-            格式
-          </label>
-          <div className="mode-toggle">
-            {(["m4a", "mp3", "flac"] as const).map((fmt) => {
-              const isHires =
-                sortedAudioFormats
-                  .find((f) => f.format_id === selectedAudioId)
-                  ?.label.includes("Hi-Res") ?? false;
-              const disabled = fmt === "flac" && !isHires;
-              return (
-                <button
-                  key={fmt}
-                  type="button"
-                  className={
-                    audioFormat === fmt ? "mode-segment active" : "mode-segment"
-                  }
-                  disabled={disabled}
-                  onClick={() => setAudioFormat(fmt)}
+          <div className="audio-format-row">
+            <div>
+              <label className="field-label" htmlFor="audio-format-select">
+                音质
+              </label>
+              {sortedAudioFormats.length === 0 ? (
+                <p className="loading-text">该视频暂无可下载的音频</p>
+              ) : (
+                <select
+                  id="audio-format-select"
+                  className="format-select"
+                  value={selectedAudioId}
+                  onChange={(e) => setSelectedAudioId(e.target.value)}
                 >
-                  {fmt === "flac" ? "FLAC" : fmt}
-                </button>
-              );
-            })}
+                  {sortedAudioFormats.map((f) => (
+                    <option key={f.format_id} value={f.format_id}>
+                      {f.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div>
+              <label className="field-label" htmlFor="audio-container-select">
+                格式
+              </label>
+              <select
+                id="audio-container-select"
+                className="format-select audio-container-select"
+                value={audioFormat}
+                disabled={sortedAudioFormats.length === 0}
+                onChange={(e) =>
+                  setAudioFormat(e.target.value as "m4a" | "mp3" | "flac")
+                }
+              >
+                {(["m4a", "mp3", "flac"] as const).map((fmt) => (
+                  <option key={fmt} value={fmt} disabled={fmt === "flac" && !audioIsHires}>
+                    {fmt === "flac" ? "FLAC" : fmt}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-          {!(sortedAudioFormats
-            .find((f) => f.format_id === selectedAudioId)
-            ?.label.includes("Hi-Res") ?? false) && (
+          {!audioIsHires && (
             <p className="url-hint">FLAC 仅 Hi-Res 音源可选</p>
           )}
         </div>

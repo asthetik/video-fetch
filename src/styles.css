@@ -316,13 +316,14 @@ body {
 }
 
 .mode-segment {
-  padding: 0.35rem 0.9rem;
+  padding: 0.4rem 0.9rem;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--muted);
   font-size: 0.85rem;
   cursor: pointer;
+  text-align: center;
 }
 
 .mode-segment:hover:not(:disabled) {
@@ -339,6 +340,17 @@ body {
 .mode-segment:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.audio-format-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.audio-container-select {
+  min-height: 100%;
 }
 
 .video-thumb {
