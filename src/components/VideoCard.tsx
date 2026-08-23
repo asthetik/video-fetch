@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/tauri";
 import { logUi } from "../lib/activityLog";
 import type { AuthStatus, FormatOption, VideoMeta } from "../types";
@@ -48,6 +48,7 @@ export function VideoCard({
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const prevVideoIdRef = useRef<string | null>(null);
 
   const sortedFormats = useMemo(() => sortFormats(meta.formats), [meta.formats]);
   const sortedAudioFormats = useMemo(
@@ -60,15 +61,33 @@ export function VideoCard({
       ?.label.includes("Hi-Res") ?? false;
 
   useEffect(() => {
-    const defaultFormat = pickDefaultFormat(meta.formats);
-    setSelectedFormatId(defaultFormat?.format_id ?? "");
-    const defaultAudio = pickDefaultFormat(meta.audio_formats);
-    setSelectedAudioId(defaultAudio?.format_id ?? "");
-    setAudioFormat("m4a");
-    setMode("video");
-    setSelectedPages(new Set(meta.pages.map((p) => p.index)));
-    setError(null);
-    setInfo(null);
+    if (!audioIsHires && audioFormat === "flac") {
+      setAudioFormat("m4a");
+    }
+  }, [audioIsHires, audioFormat]);
+
+  useEffect(() => {
+    const videoChanged = prevVideoIdRef.current !== meta.id;
+    prevVideoIdRef.current = meta.id;
+    if (videoChanged) {
+      setMode("video");
+      setAudioFormat("m4a");
+      setSelectedPages(new Set(meta.pages.map((p) => p.index)));
+      setError(null);
+      setInfo(null);
+    }
+    setSelectedFormatId((prev) => {
+      if (!videoChanged && prev && meta.formats.some((f) => f.format_id === prev)) {
+        return prev;
+      }
+      return pickDefaultFormat(meta.formats)?.format_id ?? "";
+    });
+    setSelectedAudioId((prev) => {
+      if (!videoChanged && prev && meta.audio_formats.some((f) => f.format_id === prev)) {
+        return prev;
+      }
+      return pickDefaultFormat(meta.audio_formats)?.format_id ?? "";
+    });
   }, [meta]);
 
   const showLoginHint = authStatus === "logged_out";
@@ -115,8 +134,12 @@ export function VideoCard({
             selectedAudioId
           : sortedFormats.find((f) => f.format_id === selectedFormatId)?.label ??
             selectedFormatId;
-      const audioFormatArg =
-        mode === "audio" && audioFormat !== "m4a" ? audioFormat : null;
+      const container =
+        mode === "audio"
+          ? audioFormat === "flac" && !audioIsHires
+            ? "m4a"
+            : audioFormat
+          : null;
       logUi(
         "download",
         `点击下载（${mode === "audio" ? "音频" : "视频"}，${chosen}，${pageIndexes.length} P）`,
@@ -126,9 +149,10 @@ export function VideoCard({
       const conflict = await api.checkDownloadConflict({
         video_id: meta.id,
         page_indexes: pageIndexes,
-        format_id: selectedFormatId,
+        format_id: selectedId,
         title: meta.title,
         uploader: meta.uploader ?? "",
+        audio_format: container,
       });
 
       if (conflict.downloading) {
@@ -155,7 +179,7 @@ export function VideoCard({
         title: meta.title,
         page_indexes: pageIndexes,
         format_id: selectedId,
-        audio_format: audioFormatArg,
+        audio_format: container,
         save_as_copy: saveAsCopy,
         uploader: meta.uploader ?? "",
       });
@@ -243,7 +267,9 @@ export function VideoCard({
               <label className="field-label" htmlFor="audio-format-select">
                 音质
               </label>
-              {sortedAudioFormats.length === 0 ? (
+              {formatsLoading && sortedAudioFormats.length === 0 ? (
+                <p className="loading-text">正在获取音质…</p>
+              ) : sortedAudioFormats.length === 0 ? (
                 <p className="loading-text">该视频暂无可下载的音频</p>
               ) : (
                 <select
@@ -352,11 +378,20 @@ export function VideoCard({
             (mode === "video" &&
               (formatsLoading || !!formatsError || !selectedFormatId)) ||
             (mode === "audio" &&
-              (!selectedAudioId || sortedAudioFormats.length === 0)) ||
+              (formatsLoading ||
+                !!formatsError ||
+                !selectedAudioId ||
+                sortedAudioFormats.length === 0)) ||
             noneSelected
           }
         >
-          {downloading ? "加入队列…" : "下载"}
+          {downloading
+            ? "加入队列…"
+            : formatsLoading
+              ? mode === "audio"
+                ? "等待音质…"
+                : "等待清晰度…"
+              : "下载"}
         </button>
       </div>
     </div>

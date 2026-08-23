@@ -67,7 +67,7 @@ pub struct DownloadJob {
     pub video_id: String,
     pub page_index: u32,
     pub format_id: String,
-    /// Some("mp3" | "flac") for audio transcode; None = video / m4a (no transcode).
+    /// Some("m4a" | "mp3" | "flac") for audio-only jobs; None = video.
     #[serde(default)]
     pub audio_format: Option<String>,
     pub title: String,

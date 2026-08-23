@@ -222,45 +222,37 @@ pub fn parse_multi_page_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption
     Ok(out)
 }
 
-/// Audio tiers from playurl `dash.audio`, highest bitrate first. Lower tiers use
-/// `bestaudio[abr<=N]`; the top tier is uncapped `bestaudio`.
+/// Audio tiers from playurl `dash.audio`, plus Hi-Res in `dash.flac` and Dolby
+/// in `dash.dolby`. Highest bitrate first. Lower tiers use `bestaudio[abr<=N]`;
+/// the top tier is uncapped `bestaudio`.
 pub fn parse_audio_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
     let data = data_of(v)?;
     let mut formats: Vec<FormatOption> = Vec::new();
     let mut seen: HashSet<(String, i64)> = HashSet::new();
-    if let Some(audio) = data
-        .get("dash")
-        .and_then(|d| d.get("audio"))
-        .and_then(Value::as_array)
-    {
-        for entry in audio {
-            let abr = entry
-                .get("bandwidth")
-                .and_then(Value::as_u64)
-                .map(|b| (b / 1000) as f64);
-            let codecs = entry.get("codecs").and_then(Value::as_str).unwrap_or("");
-            let key = (
-                codecs.to_string(),
-                abr.map(|a| a.round() as i64).unwrap_or(0),
-            );
-            if codecs.is_empty() || !seen.insert(key) {
-                continue;
-            }
-            let lossless = codecs.starts_with("flac");
-            let label = if lossless {
-                "Hi-Res 无损".to_string()
-            } else {
-                format!("{:.0}kbps AAC", abr.unwrap_or(0.0))
-            };
-            formats.push(FormatOption {
-                format_id: String::new(),
-                label,
-                height: None,
-                fps: None,
-                tbr: abr,
-            });
+    for_each_dash_audio(data, |entry| {
+        let abr = entry
+            .get("bandwidth")
+            .and_then(Value::as_u64)
+            .map(|b| (b / 1000) as f64);
+        let codecs = entry.get("codecs").and_then(Value::as_str).unwrap_or("");
+        if codecs.is_empty() {
+            return;
         }
-    }
+        let key = (
+            codecs.to_string(),
+            abr.map(|a| a.round() as i64).unwrap_or(0),
+        );
+        if !seen.insert(key) {
+            return;
+        }
+        formats.push(FormatOption {
+            format_id: String::new(),
+            label: crate::ytdlp::audio_stream_label(codecs, abr),
+            height: None,
+            fps: None,
+            tbr: abr,
+        });
+    });
     formats.sort_by(|a, b| {
         b.tbr
             .partial_cmp(&a.tbr)
@@ -274,6 +266,30 @@ pub fn parse_audio_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
         };
     }
     Ok(formats)
+}
+
+fn for_each_dash_audio(data: &Value, mut visit: impl FnMut(&Value)) {
+    let Some(dash) = data.get("dash") else {
+        return;
+    };
+    if let Some(arr) = dash.get("audio").and_then(Value::as_array) {
+        for entry in arr {
+            visit(entry);
+        }
+    }
+    for key in ["flac", "dolby"] {
+        let Some(node) = dash.get(key) else {
+            continue;
+        };
+        let audio = node.get("audio").unwrap_or(node);
+        if let Some(arr) = audio.as_array() {
+            for entry in arr {
+                visit(entry);
+            }
+        } else if audio.is_object() {
+            visit(audio);
+        }
+    }
 }
 
 /// Merge per-page (height, codec) options from multi-P sampling. Deduplicates by
@@ -497,6 +513,30 @@ mod tests {
         let formats = parse_audio_formats(&v).unwrap();
         assert_eq!(formats.len(), 3);
         assert_eq!(formats[0].label, "Hi-Res 无损");
+        assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
+    }
+
+    #[test]
+    fn parses_hires_from_dash_flac_object() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30216, "bandwidth": 64000, "codecs": "mp4a.40.2"},
+                        {"id": 30280, "bandwidth": 192000, "codecs": "mp4a.40.2"}
+                    ],
+                    "flac": {
+                        "display": true,
+                        "audio": {"id": 30251, "bandwidth": 1011000, "codecs": "flac"}
+                    }
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        assert_eq!(formats.len(), 3);
+        assert_eq!(formats[0].label, "Hi-Res 无损");
+        assert_eq!(formats[0].format_id, "bestaudio");
         assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
     }
 

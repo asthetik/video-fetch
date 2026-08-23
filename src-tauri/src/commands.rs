@@ -77,7 +77,7 @@ async fn multi_page_playurl_formats(
     bvid: &str,
     pages: &[models::PageItem],
     cookie_header: Option<&str>,
-    on_progress: impl Fn(Vec<models::FormatOption>),
+    on_progress: impl Fn(Vec<models::FormatOption>, Vec<models::FormatOption>),
 ) -> Option<(Vec<models::FormatOption>, Vec<models::FormatOption>)> {
     let max_samples = if pages.len() <= 16 { pages.len() } else { 8 };
     let indices = ytdlp::sample_page_indices(pages.len() as u32, max_samples);
@@ -111,7 +111,7 @@ async fn multi_page_playurl_formats(
         };
         playurl::merge_multi_page_options(&mut observed_video, video);
         playurl::merge_multi_page_options(&mut observed_audio, audio);
-        on_progress(observed_video.clone());
+        on_progress(observed_video.clone(), observed_audio.clone());
     }
     (!observed_video.is_empty() || !observed_audio.is_empty())
         .then_some((observed_video, observed_audio))
@@ -164,6 +164,20 @@ pub struct EnqueueArgs {
     pub save_as_copy: bool,
     #[serde(default)]
     pub uploader: String,
+}
+
+fn normalize_audio_format(value: Option<String>) -> AppResult<Option<String>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed {
+        "m4a" | "mp3" | "flac" => Ok(Some(trimmed.to_string())),
+        other => Err(AppError::Message(format!("不支持的音频格式: {other}"))),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,18 +434,21 @@ pub async fn resolve_url(
                 }
                 (Some(bvid), Some(keys)) => {
                     let app_handle = app.clone();
-                    let progress_emit = move |formats: Vec<models::FormatOption>| {
-                        let _ = app_handle.emit(
-                            RESOLVE_FORMATS_PROGRESS_EVENT,
-                            &ResolveMetaEvent {
-                                request_id,
-                                meta: models::VideoMeta {
-                                    formats,
-                                    ..view.clone()
+                    let progress_emit =
+                        move |formats: Vec<models::FormatOption>,
+                              audio_formats: Vec<models::FormatOption>| {
+                            let _ = app_handle.emit(
+                                RESOLVE_FORMATS_PROGRESS_EVENT,
+                                &ResolveMetaEvent {
+                                    request_id,
+                                    meta: models::VideoMeta {
+                                        formats,
+                                        audio_formats,
+                                        ..view.clone()
+                                    },
                                 },
-                            },
-                        );
-                    };
+                            );
+                        };
                     let result = multi_page_playurl_formats(
                         &client,
                         &keys,
@@ -535,6 +552,12 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
         .filter(|s| !s.is_empty())
         .unwrap_or(&settings.filename_template);
     naming::validate_output_template(base_template).map_err(AppError::Message)?;
+    let audio_format = match normalize_audio_format(args.audio_format.clone())? {
+        Some(fmt) => Some(fmt),
+        None if args.format_id.starts_with("bestaudio") => Some("m4a".into()),
+        None => None,
+    };
+    let audio_job = audio_format.is_some();
     let multi_page = args.page_indexes.len() > 1;
     let template = ensure_playlist_index_template(base_template, multi_page);
     let title = if args.title.is_empty() {
@@ -561,6 +584,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
                 &args.video_id,
                 &uploader,
                 page_index,
+                audio_job,
             )
         } else {
             template.clone()
@@ -572,7 +596,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
             video_id: args.video_id.clone(),
             page_index,
             format_id: args.format_id.clone(),
-            audio_format: args.audio_format.clone(),
+            audio_format: audio_format.clone(),
             title: title.clone(),
             output_template: page_template,
             status: JobStatus::Pending,

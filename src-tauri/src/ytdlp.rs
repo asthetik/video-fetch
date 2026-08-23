@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -329,33 +329,55 @@ fn is_audio_only_format(f: &serde_json::Value) -> bool {
     height_none && vcodec.map(|v| v.is_empty()).unwrap_or(true)
 }
 
+pub(crate) fn audio_stream_label(codecs: &str, abr: Option<f64>) -> String {
+    let c = codecs.to_ascii_lowercase();
+    if c.starts_with("flac") {
+        return "Hi-Res 无损".to_string();
+    }
+    let kbps = format!("{:.0}kbps", abr.unwrap_or(0.0));
+    if c.contains("ec-3") || c.contains("eac3") || c.contains("ac-3") || c.starts_with("ac3") {
+        format!("{kbps} Dolby")
+    } else if c.starts_with("mp4a") || c.contains("aac") {
+        format!("{kbps} AAC")
+    } else {
+        let short = codecs.split('.').next().unwrap_or(codecs);
+        if short.is_empty() {
+            kbps
+        } else {
+            format!("{kbps} {short}")
+        }
+    }
+}
+
 /// Audio-only tiers for the "仅音频" mode, highest bitrate first. Lower tiers
 /// use `bestaudio[abr<=N]`; the top tier is uncapped `bestaudio`.
 fn parse_audio_only_formats(v: &serde_json::Value) -> Vec<FormatOption> {
     let Some(formats) = v.get("formats").and_then(|f| f.as_array()) else {
         return Vec::new();
     };
-    let mut out: Vec<FormatOption> = formats
-        .iter()
-        .filter(|f| is_audio_only_format(f))
-        .map(|f| {
-            let abr = f.get("abr").and_then(|a| a.as_f64());
-            let acodec = f.get("acodec").and_then(|c| c.as_str()).unwrap_or("");
-            let lossless = acodec.starts_with("flac");
-            let label = if lossless {
-                "Hi-Res 无损".to_string()
-            } else {
-                format!("{:.0}kbps AAC", abr.unwrap_or(0.0))
-            };
-            FormatOption {
-                format_id: String::new(),
-                label,
-                height: None,
-                fps: None,
-                tbr: abr,
-            }
-        })
-        .collect();
+    let mut seen: HashSet<(String, i64)> = HashSet::new();
+    let mut out: Vec<FormatOption> = Vec::new();
+    for f in formats.iter().filter(|f| is_audio_only_format(f)) {
+        let abr = f.get("abr").and_then(|a| a.as_f64());
+        let acodec = f.get("acodec").and_then(|c| c.as_str()).unwrap_or("");
+        if acodec.is_empty() {
+            continue;
+        }
+        let key = (
+            acodec.to_string(),
+            abr.map(|a| a.round() as i64).unwrap_or(0),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(FormatOption {
+            format_id: String::new(),
+            label: audio_stream_label(acodec, abr),
+            height: None,
+            fps: None,
+            tbr: abr,
+        });
+    }
     sort_formats_by_quality(&mut out);
     for (i, f) in out.iter_mut().enumerate() {
         f.format_id = if i == 0 {
@@ -509,6 +531,39 @@ pub fn dash_format_selector(format_id: &str) -> String {
         return format!("bestvideo[height<={height}]+bestaudio/best");
     }
     format!("{format_id}+bestaudio/bestvideo+bestaudio/best")
+}
+
+pub(crate) struct DownloadFormatPlan {
+    pub selector: String,
+    pub extract_audio: Option<String>,
+}
+
+fn is_audio_only_selector(format_id: &str) -> bool {
+    format_id.starts_with("bestaudio")
+}
+
+/// Audio jobs must never go through `dash_format_selector`, including legacy
+/// m4a rows that stored `audio_format = None` with a `bestaudio*` format id.
+pub(crate) fn download_format_plan(
+    format_id: &str,
+    audio_format: Option<&str>,
+) -> DownloadFormatPlan {
+    let extract = match audio_format {
+        Some(fmt) => Some(fmt.to_string()),
+        None if is_audio_only_selector(format_id) => Some("m4a".to_string()),
+        None => None,
+    };
+    if extract.is_some() {
+        DownloadFormatPlan {
+            selector: format!("{format_id}/bestaudio/best"),
+            extract_audio: extract,
+        }
+    } else {
+        DownloadFormatPlan {
+            selector: dash_format_selector(format_id),
+            extract_audio: None,
+        }
+    }
 }
 
 pub(crate) fn resolution_label(height: Option<u32>, fps: Option<u32>) -> String {
@@ -784,22 +839,18 @@ pub async fn download(
     let url = canonicalize_video_url(url);
 
     let output_spec = output_dir.join(output_template);
-    let selector = if audio_format.is_some() {
-        format!("{format_id}/bestaudio/best")
-    } else {
-        dash_format_selector(format_id)
-    };
+    let plan = download_format_plan(format_id, audio_format);
     let mut cmd = Command::new(&cfg.yt_dlp_path);
     hide_windows_console(&mut cmd);
-    cmd.arg("-f").arg(&selector);
+    cmd.arg("-f").arg(&plan.selector);
     // Bilibili DASH selectors (vh height caps, exact single-P bands, multi-P
     // codec options) all resolve through bestvideo[...]; sort by resolution then
     // bitrate so the default download stays on the highest-bitrate stream.
     // Numeric yt-dlp ids and other platforms keep yt-dlp's default ordering.
-    if selector.starts_with("bestvideo[") {
+    if plan.selector.starts_with("bestvideo[") {
         cmd.arg("--format-sort").arg("res,tbr");
     }
-    if let Some(fmt) = audio_format {
+    if let Some(fmt) = plan.extract_audio.as_deref() {
         cmd.arg("-x").arg("--audio-format").arg(fmt);
     }
     cmd
@@ -1327,6 +1378,44 @@ mod tests {
         assert_eq!(meta.audio_formats.len(), 3);
         assert!(meta.audio_formats[0].label.contains("Hi-Res"));
         assert_eq!(meta.audio_formats[1].format_id, "bestaudio[abr<=192]");
+    }
+
+    #[test]
+    fn audio_only_formats_dedupe_same_codec_and_bitrate() {
+        let v = serde_json::json!({
+            "id": "BV1xx",
+            "title": "demo",
+            "webpage_url": "https://www.bilibili.com/video/BV1xx",
+            "formats": [
+                {"format_id": "30280", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 192.0},
+                {"format_id": "30280-dup", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 192.0},
+                {"format_id": "30216", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 66.0}
+            ]
+        });
+        let meta = video_meta_from_yt_dlp_json(&v).unwrap();
+        assert_eq!(meta.audio_formats.len(), 2);
+        assert_eq!(meta.audio_formats[0].format_id, "bestaudio");
+        assert_eq!(meta.audio_formats[1].format_id, "bestaudio[abr<=66]");
+    }
+
+    #[test]
+    fn download_format_plan_keeps_audio_jobs_off_video_selector() {
+        let m4a = download_format_plan("bestaudio", Some("m4a"));
+        assert_eq!(m4a.selector, "bestaudio/bestaudio/best");
+        assert_eq!(m4a.extract_audio.as_deref(), Some("m4a"));
+        assert!(!m4a.selector.contains("bestvideo"));
+
+        let capped = download_format_plan("bestaudio[abr<=192]", Some("mp3"));
+        assert_eq!(capped.selector, "bestaudio[abr<=192]/bestaudio/best");
+        assert_eq!(capped.extract_audio.as_deref(), Some("mp3"));
+
+        let legacy_m4a = download_format_plan("bestaudio", None);
+        assert_eq!(legacy_m4a.selector, "bestaudio/bestaudio/best");
+        assert_eq!(legacy_m4a.extract_audio.as_deref(), Some("m4a"));
+
+        let video = download_format_plan("80", None);
+        assert_eq!(video.selector, dash_format_selector("80"));
+        assert!(video.extract_audio.is_none());
     }
 
     #[test]

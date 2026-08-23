@@ -15,7 +15,7 @@ export interface EnqueueArgs {
   title?: string;
   page_indexes: number[];
   format_id: string;
-  /** Some("mp3" | "flac") for audio transcode; omit/null for video or m4a. */
+  /** "m4a" | "mp3" | "flac" for audio-only jobs; omit/null for video. */
   audio_format?: string | null;
   output_template?: string | null;
   /** Save another copy with (n) suffix; never overwrite. */
@@ -29,6 +29,7 @@ export interface CheckConflictArgs {
   format_id: string;
   title?: string;
   uploader?: string;
+  audio_format?: string | null;
 }
 
 export interface DownloadConflict {

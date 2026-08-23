@@ -254,16 +254,18 @@ impl DownloadManager {
                 .lock()
                 .map_err(lock_err)?
                 .find_done_output_paths(&job.video_id, job.page_index)?;
-            // Only skip when a matching file is still on disk (history alone is not enough).
-            if local_output_exists(
-                &save_dir,
-                &job.output_template,
-                &job.title,
-                &job.video_id,
-                "",
-                job.page_index,
-                &recorded,
-            ) {
+            let audio = job.audio_format.is_some();
+            if recorded_output_exists(&recorded, audio)
+                || local_output_exists(
+                    &save_dir,
+                    &job.output_template,
+                    &job.title,
+                    &job.video_id,
+                    "",
+                    job.page_index,
+                    naming::conflict_exts(audio),
+                )
+            {
                 return Err(AppError::Message(format!(
                     "本地已存在该视频文件（{} P{}），已跳过",
                     job.video_id, job.page_index
@@ -297,6 +299,7 @@ impl DownloadManager {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
         let save_dir = PathBuf::from(&settings.save_dir);
         let db = self.db.lock().map_err(lock_err)?;
+        let audio = format_id.starts_with("bestaudio");
         let mut downloading = false;
         let mut exists = false;
         let mut file_exists = false;
@@ -309,9 +312,17 @@ impl DownloadManager {
                 JobConflict::Active | JobConflict::None => {}
             }
             let recorded = db.find_done_output_paths(video_id, page_index)?;
-            if local_output_exists(
-                &save_dir, template, title, video_id, uploader, page_index, &recorded,
-            ) {
+            if recorded_output_exists(&recorded, audio)
+                || local_output_exists(
+                    &save_dir,
+                    template,
+                    title,
+                    video_id,
+                    uploader,
+                    page_index,
+                    naming::conflict_exts(audio),
+                )
+            {
                 file_exists = true;
             }
         }
@@ -757,6 +768,13 @@ fn resolve_work_product(work: &Path, reported: &Path) -> Option<PathBuf> {
 }
 
 /// True when a recorded path or the predicted output name already exists on disk.
+fn recorded_output_exists(recorded_paths: &[String], audio: bool) -> bool {
+    recorded_paths.iter().any(|path| {
+        naming::path_is_audio_output(Path::new(path)) == audio && PathBuf::from(path).is_file()
+    })
+}
+
+/// True when the predicted output name already exists on disk for this media kind.
 fn local_output_exists(
     save_dir: &Path,
     template: &str,
@@ -764,14 +782,9 @@ fn local_output_exists(
     video_id: &str,
     uploader: &str,
     page_index: u32,
-    recorded_paths: &[String],
+    exts: &[&str],
 ) -> bool {
-    for path in recorded_paths {
-        if PathBuf::from(path).is_file() {
-            return true;
-        }
-    }
-    for ext in naming::OUTPUT_EXTS {
+    for ext in exts {
         let relative =
             naming::preview_filename(template, title, video_id, uploader, ext, page_index);
         if save_dir.join(&relative).is_file() {
@@ -1463,6 +1476,7 @@ mod tests {
             "BV1xx",
             "",
             1,
+            false,
         );
         assert!(job.output_template.contains(" (1)"));
         let enqueued = manager.enqueue(job, true).unwrap();
@@ -1592,6 +1606,18 @@ mod tests {
         assert!(conflict.file_exists);
         assert!(!conflict.exists);
         assert!(!conflict.downloading);
+
+        let audio_conflict = manager
+            .check_conflict(
+                "BV2yy",
+                &[1],
+                "bestaudio",
+                "only-file",
+                "",
+                "%(title)s [%(id)s].%(ext)s",
+            )
+            .unwrap();
+        assert!(!audio_conflict.file_exists);
     }
 
     #[tokio::test]
