@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/tauri";
 import { logUi } from "../lib/activityLog";
-import type { AuthStatus, FormatOption, VideoMeta } from "../types";
+import type { FormatOption, VideoMeta } from "../types";
 
 /** Highest resolution first, then highest bitrate within the same resolution. */
 function sortFormats(formats: FormatOption[]): FormatOption[] {
@@ -22,7 +22,6 @@ function pickDefaultFormat(formats: FormatOption[]): FormatOption | null {
 interface VideoCardProps {
   meta: VideoMeta;
   url: string;
-  authStatus: AuthStatus;
   onEnqueued: () => void;
   onRefresh: () => void;
   active?: boolean;
@@ -34,7 +33,6 @@ interface VideoCardProps {
 export function VideoCard({
   meta,
   url,
-  authStatus,
   onEnqueued,
   onRefresh,
   active = true,
@@ -100,8 +98,6 @@ export function VideoCard({
       setInfo(null);
     }
   }, [active]);
-
-  const showLoginHint = authStatus === "logged_out";
 
   const allSelected = selectedPages.size === meta.pages.length;
   const noneSelected = selectedPages.size === 0;
@@ -227,10 +223,11 @@ export function VideoCard({
         </div>
       </div>
 
-      <div className="mode-toggle" role="tablist">
+      <div className="mode-toggle" role="group" aria-label="下载类型">
         <button
           type="button"
           className={mode === "video" ? "mode-segment active" : "mode-segment"}
+          aria-pressed={mode === "video"}
           onClick={() => switchMode("video")}
         >
           视频
@@ -238,6 +235,7 @@ export function VideoCard({
         <button
           type="button"
           className={mode === "audio" ? "mode-segment active" : "mode-segment"}
+          aria-pressed={mode === "audio"}
           onClick={() => switchMode("audio")}
         >
           仅音频
@@ -279,9 +277,6 @@ export function VideoCard({
                 重试
               </button>
             </p>
-          )}
-          {showLoginHint && !formatsLoading && (
-            <p className="login-hint">登录后可能获得更高码率清晰度</p>
           )}
         </div>
       ) : (
@@ -338,15 +333,16 @@ export function VideoCard({
               >
                 {(["m4a", "mp3", "flac"] as const).map((fmt) => (
                   <option key={fmt} value={fmt} disabled={fmt === "flac" && !audioIsHires}>
-                    {fmt === "flac" ? "FLAC" : fmt}
+                    {fmt === "flac"
+                      ? audioIsHires
+                        ? "FLAC"
+                        : "FLAC（需 Hi-Res）"
+                      : fmt}
                   </option>
                 ))}
               </select>
             </div>
           </div>
-          {!audioIsHires && (
-            <p className="url-hint">FLAC 仅 Hi-Res 音源可选</p>
-          )}
         </div>
       )}
 

@@ -179,7 +179,6 @@ export function HomePage({
         <VideoCard
           meta={meta}
           url={url.trim()}
-          authStatus={authStatus}
           active={active}
           refreshing={loading}
           formatsLoading={formatsLoading}
