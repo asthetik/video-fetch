@@ -43,6 +43,10 @@ pub struct FormatOption {
     /// Approximate total bitrate (kbps) from yt-dlp `tbr`; used for sort/default.
     #[serde(default)]
     pub tbr: Option<f64>,
+    /// True when this audio stream is lossless (FLAC). Structured so the UI
+    /// doesn't gate FLAC on label text.
+    #[serde(default)]
+    pub hires: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

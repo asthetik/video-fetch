@@ -241,6 +241,7 @@ mod tests {
                     height: Some(1080),
                     fps: Some(30),
                     tbr: Some(1000.0),
+                    hires: false,
                 },
                 crate::models::FormatOption {
                     format_id: "64".into(),
@@ -248,6 +249,7 @@ mod tests {
                     height: Some(720),
                     fps: None,
                     tbr: Some(800.0),
+                    hires: false,
                 },
             ],
             audio_formats: vec![],

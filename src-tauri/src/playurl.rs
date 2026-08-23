@@ -166,6 +166,7 @@ pub fn parse_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
             height: Some(var.height),
             fps: (var.fps > 0).then_some(var.fps),
             tbr: Some(var.tbr_kbps as f64),
+            hires: false,
         });
     }
     kept.sort_by(|a, b| {
@@ -210,6 +211,7 @@ pub fn parse_multi_page_playurl_formats(v: &Value) -> AppResult<Vec<FormatOption
             height: Some(height),
             fps: (fps > 0).then_some(fps),
             tbr: Some(tbr as f64),
+            hires: false,
         })
         .collect();
     out.sort_by(|a, b| {
@@ -238,19 +240,22 @@ pub fn parse_audio_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
         if codecs.is_empty() {
             return;
         }
-        let key = (
-            codecs.to_string(),
-            abr.map(|a| a.round() as i64).unwrap_or(0),
-        );
+        // Entries without a usable bitrate can't form a tier cap and would
+        // render as "0kbps"; skip them instead of falling through to the top.
+        let Some(abr) = abr else {
+            return;
+        };
+        let key = (codecs.to_string(), abr.round() as i64);
         if !seen.insert(key) {
             return;
         }
         formats.push(FormatOption {
             format_id: String::new(),
-            label: crate::ytdlp::audio_stream_label(codecs, abr),
+            label: crate::ytdlp::audio_stream_label(codecs, Some(abr)),
             height: None,
             fps: None,
-            tbr: abr,
+            tbr: Some(abr),
+            hires: codecs.to_ascii_lowercase().starts_with("flac"),
         });
     });
     formats.sort_by(|a, b| {
@@ -538,6 +543,26 @@ mod tests {
         assert_eq!(formats[0].label, "Hi-Res 无损");
         assert_eq!(formats[0].format_id, "bestaudio");
         assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
+        assert!(formats[0].hires);
+        assert!(!formats[1].hires);
+    }
+
+    #[test]
+    fn skips_audio_entries_without_bandwidth() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30216, "bandwidth": 64000, "codecs": "mp4a.40.2"},
+                        {"id": 30299, "codecs": "mp4a.40.2"}
+                    ]
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        assert_eq!(formats.len(), 1);
+        assert_eq!(formats[0].label, "64kbps AAC");
     }
 
     #[test]
@@ -549,6 +574,7 @@ mod tests {
                 height: Some(1080),
                 fps: Some(24),
                 tbr: Some(bandwidth as f64),
+                hires: false,
             }]
         };
         let mut observed = page(3000);

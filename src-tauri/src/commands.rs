@@ -186,6 +186,8 @@ pub struct CheckConflictArgs {
     pub page_indexes: Vec<u32>,
     pub format_id: String,
     #[serde(default)]
+    pub audio_format: Option<String>,
+    #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub uploader: String,
@@ -214,6 +216,12 @@ pub fn check_download_conflict(
     } else {
         args.title.clone()
     };
+    // Mirror enqueue_download: legacy bestaudio rows count as m4a jobs.
+    let audio_format = match normalize_audio_format(args.audio_format)? {
+        Some(fmt) => Some(fmt),
+        None if args.format_id.starts_with("bestaudio") => Some("m4a".into()),
+        None => None,
+    };
     let multi_page = args.page_indexes.len() > 1;
     let template = ensure_playlist_index_template(&settings.filename_template, multi_page);
 
@@ -221,6 +229,7 @@ pub fn check_download_conflict(
         &args.video_id,
         &args.page_indexes,
         &args.format_id,
+        audio_format.as_deref(),
         &title,
         &args.uploader,
         &template,
@@ -557,7 +566,13 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
         None if args.format_id.starts_with("bestaudio") => Some("m4a".into()),
         None => None,
     };
-    let audio_job = audio_format.is_some();
+    // FLAC is only real on the uncapped Hi-Res tier; a capped tier would
+    // silently upsample a lossy stream into a "lossless" file.
+    if audio_format.as_deref() == Some("flac")
+        && crate::ytdlp::audio_tier_cap(&args.format_id).is_some()
+    {
+        return Err(AppError::Message("FLAC 仅支持 Hi-Res 无损档位".into()));
+    }
     let multi_page = args.page_indexes.len() > 1;
     let template = ensure_playlist_index_template(base_template, multi_page);
     let title = if args.title.is_empty() {
@@ -584,7 +599,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
                 &args.video_id,
                 &uploader,
                 page_index,
-                audio_job,
+                audio_format.as_deref(),
             )
         } else {
             template.clone()

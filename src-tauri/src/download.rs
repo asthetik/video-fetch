@@ -254,8 +254,8 @@ impl DownloadManager {
                 .lock()
                 .map_err(lock_err)?
                 .find_done_output_paths(&job.video_id, job.page_index)?;
-            let audio = job.audio_format.is_some();
-            if recorded_output_exists(&recorded, audio)
+            let audio_format = job.audio_format.as_deref();
+            if recorded_output_exists(&recorded, audio_format)
                 || local_output_exists(
                     &save_dir,
                     &job.output_template,
@@ -263,7 +263,7 @@ impl DownloadManager {
                     &job.video_id,
                     "",
                     job.page_index,
-                    naming::conflict_exts(audio),
+                    naming::conflict_exts(audio_format),
                 )
             {
                 return Err(AppError::Message(format!(
@@ -287,11 +287,13 @@ impl DownloadManager {
         Ok(job)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn check_conflict(
         &self,
         video_id: &str,
         page_indexes: &[u32],
         format_id: &str,
+        audio_format: Option<&str>,
         title: &str,
         uploader: &str,
         template: &str,
@@ -299,7 +301,6 @@ impl DownloadManager {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
         let save_dir = PathBuf::from(&settings.save_dir);
         let db = self.db.lock().map_err(lock_err)?;
-        let audio = format_id.starts_with("bestaudio");
         let mut downloading = false;
         let mut exists = false;
         let mut file_exists = false;
@@ -307,12 +308,12 @@ impl DownloadManager {
             if db.has_active_job(video_id, page_index)? {
                 downloading = true;
             }
-            match db.find_job_conflict(video_id, page_index, format_id)? {
+            match db.find_job_conflict(video_id, page_index, format_id, audio_format)? {
                 JobConflict::Done => exists = true,
                 JobConflict::Active | JobConflict::None => {}
             }
             let recorded = db.find_done_output_paths(video_id, page_index)?;
-            if recorded_output_exists(&recorded, audio)
+            if recorded_output_exists(&recorded, audio_format)
                 || local_output_exists(
                     &save_dir,
                     template,
@@ -320,7 +321,7 @@ impl DownloadManager {
                     video_id,
                     uploader,
                     page_index,
-                    naming::conflict_exts(audio),
+                    naming::conflict_exts(audio_format),
                 )
             {
                 file_exists = true;
@@ -767,10 +768,20 @@ fn resolve_work_product(work: &Path, reported: &Path) -> Option<PathBuf> {
     fsutil::find_work_product(work)
 }
 
-/// True when a recorded path or the predicted output name already exists on disk.
-fn recorded_output_exists(recorded_paths: &[String], audio: bool) -> bool {
+/// True when a recorded path of the same kind (and, for audio, the same
+/// container) already exists on disk.
+fn recorded_output_exists(recorded_paths: &[String], audio_format: Option<&str>) -> bool {
     recorded_paths.iter().any(|path| {
-        naming::path_is_audio_output(Path::new(path)) == audio && PathBuf::from(path).is_file()
+        let p = Path::new(path);
+        let kind_matches = match audio_format {
+            Some(fmt) => p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case(fmt))
+                .unwrap_or(false),
+            None => !naming::path_is_audio_output(p),
+        };
+        kind_matches && p.is_file()
     })
 }
 
@@ -1476,7 +1487,7 @@ mod tests {
             "BV1xx",
             "",
             1,
-            false,
+            None,
         );
         assert!(job.output_template.contains(" (1)"));
         let enqueued = manager.enqueue(job, true).unwrap();
@@ -1581,6 +1592,7 @@ mod tests {
                 "BV1xx",
                 &[1, 2],
                 "80",
+                None,
                 "demo",
                 "",
                 "%(title)s [%(id)s].%(ext)s",
@@ -1598,6 +1610,7 @@ mod tests {
                 "BV2yy",
                 &[1],
                 "80",
+                None,
                 "only-file",
                 "",
                 "%(title)s [%(id)s].%(ext)s",
@@ -1612,12 +1625,41 @@ mod tests {
                 "BV2yy",
                 &[1],
                 "bestaudio",
+                Some("m4a"),
                 "only-file",
                 "",
                 "%(title)s [%(id)s].%(ext)s",
             )
             .unwrap();
         assert!(!audio_conflict.file_exists);
+
+        // An existing .m4a must not block a new .mp3 of the same source.
+        let m4a_path = dir.path().join("only-file [BV2yy].m4a");
+        std::fs::write(&m4a_path, b"x").unwrap();
+        let mp3_conflict = manager
+            .check_conflict(
+                "BV2yy",
+                &[1],
+                "bestaudio",
+                Some("mp3"),
+                "only-file",
+                "",
+                "%(title)s [%(id)s].%(ext)s",
+            )
+            .unwrap();
+        assert!(!mp3_conflict.file_exists);
+        let m4a_conflict = manager
+            .check_conflict(
+                "BV2yy",
+                &[1],
+                "bestaudio",
+                Some("m4a"),
+                "only-file",
+                "",
+                "%(title)s [%(id)s].%(ext)s",
+            )
+            .unwrap();
+        assert!(m4a_conflict.file_exists);
     }
 
     #[tokio::test]

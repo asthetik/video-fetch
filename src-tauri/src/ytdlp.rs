@@ -297,6 +297,7 @@ fn parse_formats(v: &serde_json::Value) -> Vec<FormatOption> {
                 height,
                 fps,
                 tbr,
+                hires: false,
             })
         })
         .collect();
@@ -363,19 +364,22 @@ fn parse_audio_only_formats(v: &serde_json::Value) -> Vec<FormatOption> {
         if acodec.is_empty() {
             continue;
         }
-        let key = (
-            acodec.to_string(),
-            abr.map(|a| a.round() as i64).unwrap_or(0),
-        );
+        // Entries without a usable bitrate can't form a tier cap and would
+        // render as "0kbps"; skip them instead of falling through to the top.
+        let Some(abr) = abr else {
+            continue;
+        };
+        let key = (acodec.to_string(), abr.round() as i64);
         if !seen.insert(key) {
             continue;
         }
         out.push(FormatOption {
             format_id: String::new(),
-            label: audio_stream_label(acodec, abr),
+            label: audio_stream_label(acodec, Some(abr)),
             height: None,
             fps: None,
-            tbr: abr,
+            tbr: Some(abr),
+            hires: acodec.to_ascii_lowercase().starts_with("flac"),
         });
     }
     sort_formats_by_quality(&mut out);
@@ -466,6 +470,7 @@ fn multi_page_quality_from_observed(observed: &[FormatOption]) -> Vec<FormatOpti
             height: Some(h),
             fps,
             tbr: None,
+            hires: false,
         })
         .collect()
 }
@@ -542,6 +547,59 @@ fn is_audio_only_selector(format_id: &str) -> bool {
     format_id.starts_with("bestaudio")
 }
 
+/// Parses the abr cap out of an audio tier selector like `bestaudio[abr<=64]`.
+/// Uncapped selectors (`bestaudio`) and exact numeric ids return None.
+pub(crate) fn audio_tier_cap(format_id: &str) -> Option<f64> {
+    let rest = format_id.strip_prefix("bestaudio[abr<=")?;
+    rest.strip_suffix(']')?.parse::<f64>().ok()
+}
+
+/// Exact (format_id, codec) of the highest-abr audio-only stream yt-dlp
+/// reports at or below `cap`, mirroring `bestaudio[abr<=N]` selection
+/// semantics. Playurl floors bandwidth/1000 when building caps while yt-dlp
+/// keeps the float abr (66.6 kbps rounds to a 66 cap), so compare on floored abr.
+fn best_audio_format_under(v: &serde_json::Value, cap: f64) -> Option<(String, String)> {
+    let formats = v.get("formats")?.as_array()?;
+    let mut best: Option<(f64, String, String)> = None;
+    for f in formats.iter().filter(|f| is_audio_only_format(f)) {
+        let Some(abr) = f.get("abr").and_then(|a| a.as_f64()) else {
+            continue;
+        };
+        let Some(id) = f.get("format_id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        if abr.floor() <= cap && best.as_ref().map(|(b, _, _)| abr > *b).unwrap_or(true) {
+            let codec = f.get("acodec").and_then(|c| c.as_str()).unwrap_or("");
+            best = Some((abr, id.to_string(), codec.to_string()));
+        }
+    }
+    best.map(|(_, id, codec)| (id, codec))
+}
+
+/// Highest-abr FLAC stream in yt-dlp's table; None when the video has no
+/// lossless source. Used to refuse FLAC jobs that would otherwise silently
+/// transcode a lossy stream into a "lossless" file.
+fn best_flac_audio_format(v: &serde_json::Value) -> Option<(String, String)> {
+    let formats = v.get("formats")?.as_array()?;
+    let mut best: Option<(f64, String, String)> = None;
+    for f in formats.iter().filter(|f| is_audio_only_format(f)) {
+        let codec = f.get("acodec").and_then(|c| c.as_str()).unwrap_or("");
+        if !codec.to_ascii_lowercase().starts_with("flac") {
+            continue;
+        }
+        let Some(abr) = f.get("abr").and_then(|a| a.as_f64()) else {
+            continue;
+        };
+        let Some(id) = f.get("format_id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        if best.as_ref().map(|(b, _, _)| abr > *b).unwrap_or(true) {
+            best = Some((abr, id.to_string(), codec.to_string()));
+        }
+    }
+    best.map(|(_, id, codec)| (id, codec))
+}
+
 /// Audio jobs must never go through `dash_format_selector`, including legacy
 /// m4a rows that stored `audio_format = None` with a `bestaudio*` format id.
 pub(crate) fn download_format_plan(
@@ -554,8 +612,16 @@ pub(crate) fn download_format_plan(
         None => None,
     };
     if extract.is_some() {
+        // Audio jobs never fall back to a video stream (`/best`): when no
+        // audio stream matches, yt-dlp errors out instead of silently
+        // downloading the video. The uncapped top tier needs no chain.
+        let selector = if format_id == "bestaudio" {
+            "bestaudio".to_string()
+        } else {
+            format!("{format_id}/bestaudio")
+        };
         DownloadFormatPlan {
-            selector: format!("{format_id}/bestaudio/best"),
+            selector,
             extract_audio: extract,
         }
     } else {
@@ -759,11 +825,12 @@ async fn enrich_multi_page_formats_by_sampling(
     meta.formats = finalize_formats_for_pages(observed, meta.pages.len());
 }
 
-async fn fetch_formats_for_url(
+/// Runs `yt-dlp -J` and returns the parsed format table JSON, if any.
+async fn fetch_json_for_url(
     cfg: &YtDlpConfig,
     url: &str,
     cookies_path: Option<&Path>,
-) -> Option<Vec<FormatOption>> {
+) -> Option<serde_json::Value> {
     let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
     hide_windows_console(&mut cmd);
     cmd.arg("-J").arg("--no-playlist");
@@ -779,8 +846,17 @@ async fn fetch_formats_for_url(
     if !output.status.success() {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    Some(parse_formats(&v))
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+async fn fetch_formats_for_url(
+    cfg: &YtDlpConfig,
+    url: &str,
+    cookies_path: Option<&Path>,
+) -> Option<Vec<FormatOption>> {
+    fetch_json_for_url(cfg, url, cookies_path)
+        .await
+        .map(|v| parse_formats(&v))
 }
 
 /// Inputs for a single yt-dlp download spawn.
@@ -839,7 +915,38 @@ pub async fn download(
     let url = canonicalize_video_url(url);
 
     let output_spec = output_dir.join(output_template);
-    let plan = download_format_plan(format_id, audio_format);
+    let mut plan = download_format_plan(format_id, audio_format);
+    // Audio tiers from the playurl path are `bestaudio[abr<=N]` caps derived
+    // from playurl bandwidths, but yt-dlp resolves them against its own format
+    // table at download time. If that table lacks a matching stream the cap
+    // falls through to `bestaudio` and the user silently gets the highest tier
+    // under a low-tier label. Pin the cap to the exact format id yt-dlp
+    // reports whenever possible so the tier label matches reality.
+    let wants_flac = audio_format == Some("flac");
+    if plan.extract_audio.is_some()
+        && (audio_tier_cap(format_id).is_some() || wants_flac)
+        && let Some(json) = fetch_json_for_url(cfg, &url, cookies_path).await
+    {
+        if wants_flac {
+            // Never upsample a lossy source into a "lossless" FLAC.
+            match best_flac_audio_format(&json) {
+                Some((exact, _)) => plan.selector = format!("{exact}/bestaudio"),
+                None => {
+                    return Err(AppError::Message(
+                        "该视频没有 Hi-Res 无损音源，无法下载 FLAC".into(),
+                    ));
+                }
+            }
+        } else if let Some(cap) = audio_tier_cap(format_id) {
+            match best_audio_format_under(&json, cap) {
+                Some((exact, _)) => plan.selector = format!("{exact}/bestaudio"),
+                None => tracing::warn!(
+                    target: "core",
+                    "download: 音频档位 {format_id} 在 yt-dlp 格式表中无匹配流，可能回退到更高音质"
+                ),
+            }
+        }
+    }
     let mut cmd = Command::new(&cfg.yt_dlp_path);
     hide_windows_console(&mut cmd);
     cmd.arg("-f").arg(&plan.selector);
@@ -1295,6 +1402,7 @@ mod tests {
                 height: Some(1080),
                 fps: Some(24),
                 tbr: Some(800.0),
+                hires: false,
             },
             FormatOption {
                 format_id: "bestvideo[height=720][vcodec^=avc1]+bestaudio/bestvideo[height=720]+bestaudio/best".into(),
@@ -1302,6 +1410,7 @@ mod tests {
                 height: Some(720),
                 fps: Some(24),
                 tbr: Some(400.0),
+                hires: false,
             },
         ];
         assert_eq!(finalize_formats_for_pages(rich, 2).len(), 2);
@@ -1312,6 +1421,7 @@ mod tests {
             height: Some(1080),
             fps: Some(30),
             tbr: Some(2000.0),
+            hires: false,
         }];
         assert_eq!(finalize_formats_for_pages(raw, 2)[0].format_id, "vh1080");
     }
@@ -1401,21 +1511,82 @@ mod tests {
     #[test]
     fn download_format_plan_keeps_audio_jobs_off_video_selector() {
         let m4a = download_format_plan("bestaudio", Some("m4a"));
-        assert_eq!(m4a.selector, "bestaudio/bestaudio/best");
+        assert_eq!(m4a.selector, "bestaudio");
         assert_eq!(m4a.extract_audio.as_deref(), Some("m4a"));
         assert!(!m4a.selector.contains("bestvideo"));
 
         let capped = download_format_plan("bestaudio[abr<=192]", Some("mp3"));
-        assert_eq!(capped.selector, "bestaudio[abr<=192]/bestaudio/best");
+        assert_eq!(capped.selector, "bestaudio[abr<=192]/bestaudio");
         assert_eq!(capped.extract_audio.as_deref(), Some("mp3"));
 
         let legacy_m4a = download_format_plan("bestaudio", None);
-        assert_eq!(legacy_m4a.selector, "bestaudio/bestaudio/best");
+        assert_eq!(legacy_m4a.selector, "bestaudio");
         assert_eq!(legacy_m4a.extract_audio.as_deref(), Some("m4a"));
 
         let video = download_format_plan("80", None);
         assert_eq!(video.selector, dash_format_selector("80"));
         assert!(video.extract_audio.is_none());
+    }
+
+    #[test]
+    fn audio_tier_cap_parses_only_capped_audio_selectors() {
+        assert_eq!(audio_tier_cap("bestaudio[abr<=64]"), Some(64.0));
+        assert_eq!(audio_tier_cap("bestaudio[abr<=192]"), Some(192.0));
+        assert_eq!(audio_tier_cap("bestaudio"), None);
+        assert_eq!(audio_tier_cap("30216"), None);
+        assert_eq!(audio_tier_cap("bestvideo[height=1080]"), None);
+    }
+
+    #[test]
+    fn best_audio_format_under_picks_highest_abr_at_or_below_cap() {
+        let v = serde_json::json!({
+            "formats": [
+                {"format_id": "30216", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 66.6},
+                {"format_id": "30280", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 192.0},
+                {"format_id": "30251", "height": null, "vcodec": "none", "acodec": "flac", "abr": 1011.0},
+                {"format_id": "80", "height": 1080, "vcodec": "avc1", "abr": 100.0}
+            ]
+        });
+        // Playurl floors bandwidth/1000, so a 66.6 kbps stream matches cap 66.
+        assert_eq!(best_audio_format_under(&v, 66.0).unwrap().0, "30216");
+        assert_eq!(best_audio_format_under(&v, 192.0).unwrap().0, "30280");
+        assert_eq!(
+            best_audio_format_under(&v, 5000.0).unwrap(),
+            ("30251".into(), "flac".into())
+        );
+        // No stream at or below the cap: nothing to pin, fall back to the cap.
+        assert_eq!(best_audio_format_under(&v, 32.0), None);
+        // Video-only streams are ignored even when their tbr fits the cap.
+        assert!(
+            best_audio_format_under(
+                &serde_json::json!({
+                    "formats": [{"format_id": "80", "height": 1080, "vcodec": "avc1", "abr": 64.0}]
+                }),
+                64.0
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn best_flac_audio_format_finds_highest_abr_flac_or_none() {
+        let v = serde_json::json!({
+            "formats": [
+                {"format_id": "30280", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 192.0},
+                {"format_id": "30251", "height": null, "vcodec": "none", "acodec": "flac", "abr": 1011.0}
+            ]
+        });
+        assert_eq!(
+            best_flac_audio_format(&v).unwrap(),
+            ("30251".into(), "flac".into())
+        );
+        // No flac stream: FLAC jobs must be refused, not upsampled.
+        let lossy = serde_json::json!({
+            "formats": [
+                {"format_id": "30280", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 192.0}
+            ]
+        });
+        assert_eq!(best_flac_audio_format(&lossy), None);
     }
 
     #[test]

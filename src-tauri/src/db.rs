@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS resolve_cache (
 );
 "#;
 
+/// Whether `table` currently has `column`, per SQLite's table_info pragma.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> AppResult<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(cols.iter().any(|c| c == column))
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -39,8 +48,14 @@ impl Db {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
-        // Lightweight migration for older databases.
-        let _ = conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", []);
+        // Lightweight migration for older databases. Fresh DBs already carry the
+        // column from SCHEMA (a blind ALTER would fail with "duplicate column"),
+        // but swallowing every error would also hide genuine failures (locked or
+        // corrupt DB) that break every later statement referencing audio_format.
+        // Check first and propagate unexpected errors.
+        if !column_exists(&conn, "jobs", "audio_format")? {
+            conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", [])?;
+        }
         Self::purge_legacy_resolve_cache(&conn)?;
         Ok(Self { conn })
     }
@@ -187,12 +202,14 @@ impl Db {
         video_id: &str,
         page_index: u32,
         format_id: &str,
+        audio_format: Option<&str>,
     ) -> AppResult<JobConflict> {
         let status: Option<String> = self
             .conn
             .query_row(
                 "SELECT status FROM jobs
                  WHERE video_id = ?1 AND page_index = ?2 AND format_id = ?3
+                   AND audio_format IS ?4
                    AND status IN ('pending', 'running', 'done')
                  ORDER BY CASE status
                    WHEN 'running' THEN 0
@@ -200,7 +217,7 @@ impl Db {
                    WHEN 'done' THEN 2
                  END
                  LIMIT 1",
-                params![video_id, page_index, format_id],
+                params![video_id, page_index, format_id, audio_format],
                 |row| row.get(0),
             )
             .optional()?;
@@ -346,6 +363,48 @@ mod tests {
     }
 
     #[test]
+    fn migrates_old_db_without_audio_format_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        // Simulate a pre-0.3.1 database: jobs table without audio_format.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    page_index INTEGER NOT NULL,
+                    format_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    output_template TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress REAL NOT NULL DEFAULT 0,
+                    error TEXT,
+                    output_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert!(column_exists(&db.conn, "jobs", "audio_format").unwrap());
+        // The migrated column must be usable end to end.
+        let mut job = sample_job_for_db("migrated-job");
+        job.audio_format = Some("m4a".into());
+        db.insert_job(&job).unwrap();
+        let loaded = db
+            .list_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == "migrated-job")
+            .unwrap();
+        assert_eq!(loaded.audio_format.as_deref(), Some("m4a"));
+    }
+
+    #[test]
     fn open_purges_legacy_resolve_cache_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");
@@ -467,8 +526,32 @@ mod tests {
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "80").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
             JobConflict::Done
+        );
+    }
+
+    #[test]
+    fn find_job_conflict_distinguishes_audio_containers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut m4a = sample_job("bestaudio");
+        m4a.audio_format = Some("m4a".into());
+        db.insert_job(&m4a).unwrap();
+        assert_eq!(
+            db.find_job_conflict("BV1xx", 1, "bestaudio", Some("m4a"))
+                .unwrap(),
+            JobConflict::Done
+        );
+        // Same tier, different container: not the same file.
+        assert_eq!(
+            db.find_job_conflict("BV1xx", 1, "bestaudio", Some("mp3"))
+                .unwrap(),
+            JobConflict::None
+        );
+        assert_eq!(
+            db.find_job_conflict("BV1xx", 1, "bestaudio", None).unwrap(),
+            JobConflict::None
         );
     }
 
@@ -478,7 +561,7 @@ mod tests {
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "64").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "64", None).unwrap(),
             JobConflict::None
         );
     }
@@ -489,7 +572,7 @@ mod tests {
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "80").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
             JobConflict::Done
         );
 
@@ -500,7 +583,7 @@ mod tests {
         running.output_path = None;
         db.insert_job(&running).unwrap();
         assert_eq!(
-            db.find_job_conflict("BV1xx", 1, "80").unwrap(),
+            db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
             JobConflict::Active
         );
     }

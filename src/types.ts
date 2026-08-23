@@ -14,6 +14,8 @@ export interface FormatOption {
   fps?: number | null;
   /** Approximate total bitrate (kbps); used for sort/default. */
   tbr?: number | null;
+  /** True when this audio stream is lossless (FLAC). */
+  hires?: boolean;
 }
 
 export interface VideoMeta {

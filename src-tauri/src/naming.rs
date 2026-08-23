@@ -8,11 +8,20 @@ pub const OUTPUT_EXTS: &[&str] = &["mp4", "mkv", "webm", "flv", "mov"];
 /// Audio containers produced by `-x --audio-format`.
 pub const AUDIO_OUTPUT_EXTS: &[&str] = &["m4a", "mp3", "flac", "opus", "ogg", "aac", "wav"];
 
-pub fn conflict_exts(audio: bool) -> &'static [&'static str] {
-    if audio {
-        AUDIO_OUTPUT_EXTS
-    } else {
-        OUTPUT_EXTS
+const M4A_EXTS: &[&str] = &["m4a"];
+const MP3_EXTS: &[&str] = &["mp3"];
+const FLAC_EXTS: &[&str] = &["flac"];
+
+/// Extensions that count as "the same file" for skip-existing checks. Audio
+/// containers are distinct: an existing .m4a must not block a new .mp3 of the
+/// same source, and save-as-copy numbering only counts same-container files.
+pub fn conflict_exts(audio_format: Option<&str>) -> &'static [&'static str] {
+    match audio_format {
+        Some("m4a") => M4A_EXTS,
+        Some("mp3") => MP3_EXTS,
+        Some("flac") => FLAC_EXTS,
+        Some(_) => AUDIO_OUTPUT_EXTS,
+        None => OUTPUT_EXTS,
     }
 }
 
@@ -181,9 +190,9 @@ fn any_ext_exists(
     id: &str,
     uploader: &str,
     page_index: u32,
-    audio: bool,
+    audio_format: Option<&str>,
 ) -> bool {
-    conflict_exts(audio).iter().any(|ext| {
+    conflict_exts(audio_format).iter().any(|ext| {
         let rel = preview_filename(template, title, id, uploader, ext, page_index);
         save_dir.join(rel).is_file()
     })
@@ -197,14 +206,30 @@ pub fn next_available_output_template(
     id: &str,
     uploader: &str,
     page_index: u32,
-    audio: bool,
+    audio_format: Option<&str>,
 ) -> String {
-    if !any_ext_exists(save_dir, template, title, id, uploader, page_index, audio) {
+    if !any_ext_exists(
+        save_dir,
+        template,
+        title,
+        id,
+        uploader,
+        page_index,
+        audio_format,
+    ) {
         return template.to_string();
     }
     for n in 1u32..=10_000 {
         let candidate = with_copy_suffix(template, n);
-        if !any_ext_exists(save_dir, &candidate, title, id, uploader, page_index, audio) {
+        if !any_ext_exists(
+            save_dir,
+            &candidate,
+            title,
+            id,
+            uploader,
+            page_index,
+            audio_format,
+        ) {
             return candidate;
         }
     }
@@ -249,7 +274,7 @@ mod tests {
             "BV1",
             "",
             1,
-            false,
+            None,
         );
         assert_eq!(tmpl, "%(title)s [%(id)s] (2).%(ext)s");
     }
@@ -264,7 +289,7 @@ mod tests {
             "BV9",
             "",
             1,
-            false,
+            None,
         );
         assert_eq!(tmpl, "%(title)s [%(id)s].%(ext)s");
     }
@@ -280,7 +305,24 @@ mod tests {
             "BV1",
             "",
             1,
-            true,
+            Some("m4a"),
+        );
+        assert_eq!(tmpl, "%(title)s [%(id)s].%(ext)s");
+    }
+
+    #[test]
+    fn next_available_audio_ignores_other_container_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("demo [BV1].m4a"), b"x").unwrap();
+        // An existing .m4a must not count as a copy of a new .mp3.
+        let tmpl = next_available_output_template(
+            dir.path(),
+            "%(title)s [%(id)s].%(ext)s",
+            "demo",
+            "BV1",
+            "",
+            1,
+            Some("mp3"),
         );
         assert_eq!(tmpl, "%(title)s [%(id)s].%(ext)s");
     }

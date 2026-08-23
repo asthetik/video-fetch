@@ -56,9 +56,8 @@ export function VideoCard({
     [meta.audio_formats],
   );
   const audioIsHires =
-    sortedAudioFormats
-      .find((f) => f.format_id === selectedAudioId)
-      ?.label.includes("Hi-Res") ?? false;
+    sortedAudioFormats.find((f) => f.format_id === selectedAudioId)?.hires ??
+    false;
 
   useEffect(() => {
     if (!audioIsHires && audioFormat === "flac") {
@@ -269,6 +268,19 @@ export function VideoCard({
               </label>
               {formatsLoading && sortedAudioFormats.length === 0 ? (
                 <p className="loading-text">正在获取音质…</p>
+              ) : formatsError ? (
+                <p className="url-hint error">
+                  音质获取失败：{formatsError}
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    style={{ marginLeft: "0.5rem" }}
+                    onClick={onRefresh}
+                    disabled={refreshing || downloading}
+                  >
+                    重试
+                  </button>
+                </p>
               ) : sortedAudioFormats.length === 0 ? (
                 <p className="loading-text">该视频暂无可下载的音频</p>
               ) : (
