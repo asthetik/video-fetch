@@ -30,7 +30,8 @@
 1. 打开 [Releases](https://github.com/asthetik/video-fetch/releases) 页面
 2. 下载对应系统的安装包：
    - macOS（仅 Apple 芯片）：`Video-Fetch-v*-macOS.dmg`
-   - Windows：`Video-Fetch-v*-Windows.msi` / `.exe`
+   - Windows x64：`Video-Fetch-v*-Windows-x64.msi` / `.exe`
+   - Windows arm64：`Video-Fetch-v*-Windows-arm64.msi` / `.exe`
    - Linux：`Video-Fetch-v*-Linux-*.AppImage` / `.deb`
 3. 安装后打开即可
 

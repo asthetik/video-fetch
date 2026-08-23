@@ -5,7 +5,7 @@ Template: Video-Fetch-v{version}-{OS}[-{arch}].{ext}
 
 Rules:
 - macOS: never append arch
-- Windows: append -arm64 only when arch is arm64; x64 omits arch
+- Windows: always append arch (-x64 or -arm64)
 - Linux: always append x86_64 or arm64
 """
 
@@ -34,7 +34,7 @@ def asset_filename(os_name: str, arch: str, version: str, ext: str) -> str:
         stem = f"Video-Fetch-v{ver}-macOS"
     elif os_name == "Windows":
         if arch in {"x64", "x86_64", "amd64"}:
-            stem = f"Video-Fetch-v{ver}-Windows"
+            stem = f"Video-Fetch-v{ver}-Windows-x64"
         elif arch == "arm64":
             stem = f"Video-Fetch-v{ver}-Windows-arm64"
         else:
