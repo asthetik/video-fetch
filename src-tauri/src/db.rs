@@ -229,13 +229,20 @@ impl Db {
         })
     }
 
-    /// Any pending/running job for this video page, regardless of format.
-    pub fn has_active_job(&self, video_id: &str, page_index: u32) -> AppResult<bool> {
+    /// Any pending/running job for this video page of the same media kind:
+    /// video requests only conflict with other video jobs, audio requests only
+    /// with other audio jobs.
+    pub fn has_active_job(
+        &self,
+        video_id: &str,
+        page_index: u32,
+        audio_format: Option<&str>,
+    ) -> AppResult<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM jobs
-             WHERE video_id = ?1 AND page_index = ?2
+             WHERE video_id = ?1 AND page_index = ?2 AND audio_format IS ?3
                AND status IN ('pending', 'running')",
-            params![video_id, page_index],
+            params![video_id, page_index, audio_format],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -553,6 +560,27 @@ mod tests {
             db.find_job_conflict("BV1xx", 1, "bestaudio", None).unwrap(),
             JobConflict::None
         );
+    }
+
+    #[test]
+    fn has_active_job_distinguishes_video_and_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+
+        let mut audio = sample_job_for_db("audio-1");
+        audio.audio_format = Some("m4a".into());
+        db.insert_job(&audio).unwrap();
+
+        // A pending audio job blocks another audio request, but not a video one.
+        assert!(db.has_active_job("BV1xx", 1, Some("m4a")).unwrap());
+        assert!(!db.has_active_job("BV1xx", 1, None).unwrap());
+
+        let mut video = sample_job_for_db("video-1");
+        video.audio_format = None;
+        db.insert_job(&video).unwrap();
+
+        assert!(db.has_active_job("BV1xx", 1, None).unwrap());
+        assert!(db.has_active_job("BV1xx", 1, Some("m4a")).unwrap());
     }
 
     #[test]

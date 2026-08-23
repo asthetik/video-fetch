@@ -235,11 +235,11 @@ impl DownloadManager {
 
         // Never allow a second active job for the same video page (not bypassed by save_as_copy).
         {
-            let active = self
-                .db
-                .lock()
-                .map_err(lock_err)?
-                .has_active_job(&job.video_id, job.page_index)?;
+            let active = self.db.lock().map_err(lock_err)?.has_active_job(
+                &job.video_id,
+                job.page_index,
+                job.audio_format.as_deref(),
+            )?;
             if active {
                 return Err(AppError::Message(format!(
                     "该视频已在下载队列中（{} P{}），请等待完成或取消后再试",
@@ -305,7 +305,7 @@ impl DownloadManager {
         let mut exists = false;
         let mut file_exists = false;
         for &page_index in page_indexes {
-            if db.has_active_job(video_id, page_index)? {
+            if db.has_active_job(video_id, page_index, audio_format)? {
                 downloading = true;
             }
             match db.find_job_conflict(video_id, page_index, format_id, audio_format)? {
