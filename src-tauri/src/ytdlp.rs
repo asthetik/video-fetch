@@ -383,12 +383,8 @@ fn parse_audio_only_formats(v: &serde_json::Value) -> Vec<FormatOption> {
         });
     }
     sort_formats_by_quality(&mut out);
-    for (i, f) in out.iter_mut().enumerate() {
-        f.format_id = if i == 0 {
-            "bestaudio".to_string()
-        } else {
-            format!("bestaudio[abr<={:.0}]", f.tbr.unwrap_or(0.0))
-        };
+    for f in out.iter_mut() {
+        f.format_id = audio_tier_selector(f.hires, f.tbr);
     }
     out
 }
@@ -552,6 +548,17 @@ fn is_audio_only_selector(format_id: &str) -> bool {
 pub(crate) fn audio_tier_cap(format_id: &str) -> Option<f64> {
     let rest = format_id.strip_prefix("bestaudio[abr<=")?;
     rest.strip_suffix(']')?.parse::<f64>().ok()
+}
+
+/// Selector for a single audio tier. Hi-Res pins to the FLAC stream so a
+/// higher-bitrate Dolby track cannot demote it to a capped tier; lossy tiers
+/// cap on their own bitrate.
+pub(crate) fn audio_tier_selector(hires: bool, abr: Option<f64>) -> String {
+    if hires {
+        "bestaudio[acodec^=flac]".to_string()
+    } else {
+        format!("bestaudio[abr<={:.0}]", abr.unwrap_or(0.0))
+    }
 }
 
 /// Exact (format_id, codec) of the highest-abr audio-only stream yt-dlp
@@ -1504,7 +1511,7 @@ mod tests {
         });
         let meta = video_meta_from_yt_dlp_json(&v).unwrap();
         assert_eq!(meta.audio_formats.len(), 2);
-        assert_eq!(meta.audio_formats[0].format_id, "bestaudio");
+        assert_eq!(meta.audio_formats[0].format_id, "bestaudio[abr<=192]");
         assert_eq!(meta.audio_formats[1].format_id, "bestaudio[abr<=66]");
     }
 

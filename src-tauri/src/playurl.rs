@@ -263,12 +263,8 @@ pub fn parse_audio_formats(v: &Value) -> AppResult<Vec<FormatOption>> {
             .partial_cmp(&a.tbr)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    for (i, f) in formats.iter_mut().enumerate() {
-        f.format_id = if i == 0 {
-            "bestaudio".to_string()
-        } else {
-            format!("bestaudio[abr<={:.0}]", f.tbr.unwrap_or(0.0))
-        };
+    for f in formats.iter_mut() {
+        f.format_id = crate::ytdlp::audio_tier_selector(f.hires, f.tbr);
     }
     Ok(formats)
 }
@@ -298,9 +294,10 @@ fn for_each_dash_audio(data: &Value, mut visit: impl FnMut(&Value)) {
 }
 
 /// Merge per-page (height, codec) options from multi-P sampling. Deduplicates by
-/// selector and keeps the highest observed bitrate/fps for sorting. Audio top
-/// tiers share `bestaudio`; `hires` is OR'd so a later Hi-Res page is not
-/// dropped, and the Hi-Res label is kept once any page reports lossless.
+/// selector and keeps the highest observed bitrate/fps for sorting. Matching
+/// selectors also OR `hires` and keep the Hi-Res label once any page reports
+/// lossless. Hi-Res uses `bestaudio[acodec^=flac]`; lossy tiers use
+/// `bestaudio[abr<=N]`, so they do not share a selector.
 pub fn merge_multi_page_options(target: &mut Vec<FormatOption>, incoming: Vec<FormatOption>) {
     for option in incoming {
         if let Some(existing) = target.iter_mut().find(|o| o.format_id == option.format_id) {
@@ -547,10 +544,36 @@ mod tests {
         let formats = parse_audio_formats(&v).unwrap();
         assert_eq!(formats.len(), 3);
         assert_eq!(formats[0].label, "Hi-Res 无损");
-        assert_eq!(formats[0].format_id, "bestaudio");
+        assert_eq!(formats[0].format_id, "bestaudio[acodec^=flac]");
         assert_eq!(formats[1].format_id, "bestaudio[abr<=192]");
         assert!(formats[0].hires);
         assert!(!formats[1].hires);
+    }
+
+    #[test]
+    fn keeps_hires_uncapped_when_dolby_has_higher_bitrate() {
+        let v = serde_json::json!({
+            "code": 0,
+            "data": {
+                "dash": {
+                    "audio": [
+                        {"id": 30280, "bandwidth": 192000, "codecs": "mp4a.40.2"}
+                    ],
+                    "flac": {
+                        "display": true,
+                        "audio": {"id": 30251, "bandwidth": 1011000, "codecs": "flac"}
+                    },
+                    "dolby": {
+                        "display": true,
+                        "audio": {"id": 30250, "bandwidth": 2000000, "codecs": "ec-3"}
+                    }
+                }
+            }
+        });
+        let formats = parse_audio_formats(&v).unwrap();
+        let flac = formats.iter().find(|f| f.hires).unwrap();
+        assert_eq!(flac.format_id, "bestaudio[acodec^=flac]");
+        assert!(!flac.format_id.contains("abr<="));
     }
 
     #[test]
