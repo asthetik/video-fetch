@@ -1152,6 +1152,9 @@ body {
 .batch-modal {
   width: min(100%, 24rem);
 }
+.batch-modal .mode-toggle {
+  margin-bottom: 0.85rem;
+}
 .batch-modal .modal-actions {
   flex-direction: row;
   justify-content: flex-end;
