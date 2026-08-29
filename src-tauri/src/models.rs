@@ -58,7 +58,7 @@ pub struct VideoMeta {
     pub webpage_url: String,
     pub pages: Vec<PageItem>,
     pub formats: Vec<FormatOption>,
-    /// Audio-only formats for the "仅音频" mode; empty when unavailable.
+    /// Audio-only formats for the app's audio-only mode; empty when unavailable.
     #[serde(default)]
     pub audio_formats: Vec<FormatOption>,
     pub platform: String,
@@ -92,6 +92,8 @@ pub struct SpaceInfo {
 pub enum UrlKind {
     Video,
     Space { mid: u64 },
+    // Host is space.bilibili.com but the mid segment is missing/non-numeric.
+    InvalidSpace,
     Unknown,
 }
 

@@ -46,7 +46,7 @@ pub struct AppState {
     pub settings: std::sync::Mutex<AppSettings>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
-    /// space_info 进程内缓存：mid -> (UP 主名, 写入时刻)，TTL 10 分钟。
+    /// In-process space_info cache: mid -> (uploader name, written-at instant), TTL 10 minutes.
     pub space_info_cache: std::sync::Mutex<HashMap<u64, (String, std::time::Instant)>>,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
     pub active_resolve_id: AtomicU64,
@@ -337,6 +337,11 @@ fn tauri_cookie_to_app(c: &tauri::webview::Cookie<'_>) -> Cookie {
 pub fn detect_url(url: String) -> models::UrlKind {
     if let Some(mid) = platform::parse_space_mid(&url) {
         return models::UrlKind::Space { mid };
+    }
+    if let Ok(parsed) = Url::parse(url.trim())
+        && parsed.host_str() == Some("space.bilibili.com")
+    {
+        return models::UrlKind::InvalidSpace;
     }
     let canonical = platform::canonicalize_video_url(&url);
     if platform::detect_platform(&canonical).is_some() {
@@ -694,7 +699,7 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
             }
             Ok(models::SpaceInfo { name })
         }
-        // spec：acc/info 失败不阻塞列表，UI 以「共 N 个视频」缺省。
+        // Spec: an acc/info failure must not block the list; the UI falls back to the "N videos" header.
         Err(e) => {
             tracing::warn!(target: "core", "space: acc/info 失败（UI 缺省）: {e}");
             Ok(models::SpaceInfo {
@@ -1486,6 +1491,22 @@ mod detect_url_tests {
         assert_eq!(
             detect_url("https://example.com/nope".into()),
             models::UrlKind::Unknown
+        );
+    }
+
+    #[test]
+    fn detect_url_invalid_space_mid() {
+        assert_eq!(
+            detect_url("https://space.bilibili.com/abc".into()),
+            models::UrlKind::InvalidSpace
+        );
+        assert_eq!(
+            detect_url("https://space.bilibili.com/".into()),
+            models::UrlKind::InvalidSpace
+        );
+        assert_eq!(
+            detect_url("https://space.bilibili.com/470995011/video".into()),
+            models::UrlKind::Space { mid: 470995011 }
         );
     }
 }

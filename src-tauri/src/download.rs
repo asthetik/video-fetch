@@ -1885,7 +1885,7 @@ mod tests {
         std::fs::create_dir_all(&save_dir).unwrap();
         let db = Db::open(&save_dir.join("jobs.db")).unwrap();
 
-        // 预置一个同 video/page 的 Pending 任务 → 第二次入队必须报 DuplicateActive。
+        // Pre-seed a Pending job with the same video/page: the second enqueue must report DuplicateActive.
         let mut active = sample_job("job-active");
         active.video_id = "BV1active".into();
         active.page_index = 1;
@@ -1930,7 +1930,7 @@ mod tests {
             EnqueueKind::DuplicateActive
         );
 
-        // 单发路径文案回归：逐字包含既有提示。
+        // Single-video path message regression: must contain the exact existing notice.
         let err = manager.enqueue(dup, false).unwrap_err().to_string();
         assert!(err.contains("已在下载队列中"), "unexpected: {err}");
         assert!(err.contains("BV1active"), "unexpected: {err}");

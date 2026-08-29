@@ -350,7 +350,7 @@ pub(crate) fn audio_stream_label(codecs: &str, abr: Option<f64>) -> String {
     }
 }
 
-/// Audio-only tiers for the "仅音频" mode, highest bitrate first. Lower tiers
+/// Audio-only tiers for the app's audio-only mode, highest bitrate first. Lower tiers
 /// use `bestaudio[abr<=N]`; the top tier is uncapped `bestaudio`.
 fn parse_audio_only_formats(v: &serde_json::Value) -> Vec<FormatOption> {
     let Some(formats) = v.get("formats").and_then(|f| f.as_array()) else {

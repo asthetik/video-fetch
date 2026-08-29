@@ -7,6 +7,10 @@ import type {
   CancelAllResult,
   ClearFinishedResult,
   LogFileInfo,
+  UrlKind,
+  SpacePage,
+  SpaceInfo,
+  BatchEnqueueResult,
 } from "../types";
 
 export interface EnqueueArgs {
@@ -94,4 +98,13 @@ export const api = {
   openPath: (path: string) => invoke<void>("open_path", { path }),
   pickSaveDir: () => invoke<string>("pick_save_dir"),
   pickCookiesFile: () => invoke<string>("pick_cookies_file"),
+  detectUrl: (url: string) => invoke<UrlKind>("detect_url", { url }),
+  spaceInfo: (mid: number) => invoke<SpaceInfo>("space_info", { mid }),
+  spaceListVideos: (mid: number, pn: number, keyword: string, order: string) =>
+    invoke<SpacePage>("space_list_videos", { mid, pn, keyword, order }),
+  spaceEnqueueBatch: (args: {
+    items: { bvid: string; title: string }[];
+    format_id: string;
+    audio_format?: string | null;
+  }) => invoke<BatchEnqueueResult>("space_enqueue_batch", { args }),
 };

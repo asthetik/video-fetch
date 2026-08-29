@@ -6,6 +6,7 @@ import {
   type ResolveMetaEvent,
 } from "../lib/tauri";
 import { DownloadQueue } from "../components/DownloadQueue";
+import { SpaceListView } from "../components/SpaceListView";
 import { UrlBar } from "../components/UrlBar";
 import { VideoCard } from "../components/VideoCard";
 import type { AuthStatus as AuthStatusType, VideoMeta } from "../types";
@@ -29,6 +30,7 @@ export function HomePage({
 }: HomePageProps) {
   const [url, setUrl] = useState("");
   const [meta, setMeta] = useState<VideoMeta | null>(null);
+  const [space, setSpace] = useState<{ mid: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [formatsLoading, setFormatsLoading] = useState(false);
   const [formatsError, setFormatsError] = useState<string | null>(null);
@@ -55,6 +57,29 @@ export function HomePage({
         setMeta(null);
       }
       try {
+        const kind = await api.detectUrl(nextUrl);
+        if (requestIdRef.current !== requestId) {
+          return;
+        }
+        if (kind.kind === "space") {
+          setSpace({ mid: kind.mid });
+          setMeta(null);
+          setFormatsLoading(false);
+          setFormatsError(null);
+          setError(null);
+          setLoading(false);
+          return;
+        }
+        if (kind.kind === "invalid_space") {
+          setSpace(null);
+          setMeta(null);
+          setFormatsLoading(false);
+          setFormatsError(null);
+          setError("无效的空间链接");
+          setLoading(false);
+          return;
+        }
+        setSpace(null);
         const result = await api.resolveUrl(nextUrl, force, requestId);
         if (requestIdRef.current !== requestId) {
           return;
@@ -173,19 +198,28 @@ export function HomePage({
         />
       </div>
 
-      {loading && !meta && <p className="loading-text">正在获取视频信息…</p>}
+      {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
 
-      {meta && (
-        <VideoCard
-          meta={meta}
-          url={url.trim()}
+      {space ? (
+        <SpaceListView
+          key={space.mid}
+          mid={space.mid}
           active={active}
-          refreshing={loading}
-          formatsLoading={formatsLoading}
-          formatsError={formatsError}
           onEnqueued={handleEnqueued}
-          onRefresh={() => void handleResolve(url.trim(), true)}
         />
+      ) : (
+        meta && (
+          <VideoCard
+            meta={meta}
+            url={url.trim()}
+            active={active}
+            refreshing={loading}
+            formatsLoading={formatsLoading}
+            formatsError={formatsError}
+            onEnqueued={handleEnqueued}
+            onRefresh={() => void handleResolve(url.trim(), true)}
+          />
+        )
       )}
 
       <DownloadQueue

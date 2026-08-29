@@ -7,7 +7,7 @@ pub const SPACE_ARC_SEARCH_URL: &str = "https://api.bilibili.com/x/space/wbi/arc
 pub const SPACE_ACC_INFO_URL: &str = "https://api.bilibili.com/x/space/wbi/acc/info";
 pub const SPACE_PAGE_SIZE: u32 = 50;
 
-/// arc/search 排序参数；兜底模式只支持默认 Pubdate。
+/// arc/search sort parameter; the fallback mode only supports the default Pubdate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpaceOrder {
     Pubdate,
@@ -77,7 +77,7 @@ pub async fn fetch_arc_search(
     parse_arc_search(&body)
 }
 
-/// 非 0 code（含风控 -412）→ Err，由调用方做降级判定。
+/// Non-zero `code` (incl. risk-control -412) -> Err; the caller decides on fallback.
 pub fn parse_arc_search(v: &Value) -> AppResult<SpacePage> {
     let code = v.get("code").and_then(Value::as_i64).unwrap_or(-1);
     if code != 0 {
@@ -132,7 +132,7 @@ pub fn parse_arc_search(v: &Value) -> AppResult<SpacePage> {
     })
 }
 
-/// acc/info 的 data.name；code != 0 → Err（命令层转为空 name 缺省）。
+/// acc/info's `data.name`; code != 0 -> Err (the command layer maps it to an empty-name default).
 pub fn parse_acc_info(v: &Value) -> AppResult<String> {
     let code = v.get("code").and_then(Value::as_i64).unwrap_or(-1);
     if code != 0 {
@@ -148,7 +148,7 @@ pub fn parse_acc_info(v: &Value) -> AppResult<String> {
         .to_string())
 }
 
-/// `length` 为 "mm:ss" 或 "hh:mm:ss"；解析失败 → 0（前端渲染为「—」）。
+/// `length` is "mm:ss" or "hh:mm:ss"; a parse failure -> 0 (the frontend renders 0 as a dash).
 fn parse_length(s: &str) -> u64 {
     let mut secs: u64 = 0;
     for part in s.split(':') {
@@ -158,7 +158,7 @@ fn parse_length(s: &str) -> u64 {
     secs
 }
 
-/// B 站封面常为协议相对地址 `//i0.hdslb.com/...`，补全为 https。
+/// Bilibili covers are often protocol-relative (`//i0.hdslb.com/...`); complete to https.
 fn normalize_cover(pic: &str) -> String {
     if let Some(rest) = pic.strip_prefix("//") {
         format!("https://{rest}")
@@ -256,8 +256,9 @@ pub fn parse_flat_playlist(v: &Value) -> AppResult<SpacePage> {
     })
 }
 
-/// 兜底只服务默认视图（无关键词、默认排序）——flat playlist 无法过滤/排序，
-/// 其余请求必须显式报错而不是静默给错数据。
+/// The fallback only serves the default view (no keyword, default sort) — a flat
+/// playlist cannot filter or sort, so anything else must fail explicitly instead of
+/// silently returning wrong data.
 pub fn fallback_allowed(keyword: &str, order: SpaceOrder) -> bool {
     keyword.trim().is_empty() && order == SpaceOrder::Pubdate
 }
