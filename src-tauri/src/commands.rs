@@ -46,6 +46,8 @@ pub struct AppState {
     pub settings: std::sync::Mutex<AppSettings>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
+    /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
+    pub http_client: reqwest::Client,
     /// In-process space_info cache: mid -> (uploader name, written-at instant), TTL 10 minutes.
     pub space_info_cache: std::sync::Mutex<HashMap<u64, (String, std::time::Instant)>>,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
@@ -567,15 +569,6 @@ pub async fn resolve_url(
     Ok(final_meta)
 }
 
-fn space_http_client() -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(bilibili_view::USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))
-}
-
 #[tauri::command]
 pub async fn space_list_videos(
     state: State<'_, AppState>,
@@ -592,14 +585,11 @@ pub async fn space_list_videos(
     let keyword = keyword.unwrap_or_default();
 
     let stored_cookies = state.auth.cookies()?;
-    let cookies_path = state
-        .auth
-        .materialize_cookies_file_from(stored_cookies.as_deref())?;
     let cookie_header = stored_cookies
         .as_deref()
         .map(cookies::cookie_header_for_bilibili)
         .filter(|s| !s.is_empty());
-    let client = space_http_client()?;
+    let client = state.http_client.clone();
 
     let primary = match state
         .wbi_keys
@@ -631,8 +621,13 @@ pub async fn space_list_videos(
             );
             state.wbi_keys.invalidate();
             if !crate::space::fallback_allowed(&keyword, order) {
-                return Err(crate::space::degraded_reject_error());
+                return Err(crate::space::degraded_reject_error(&keyword));
             }
+            // Only the yt-dlp fallback reads the cookies file; the primary
+            // path talks to the API with the header alone.
+            let cookies_path = state
+                .auth
+                .materialize_cookies_file_from(stored_cookies.as_deref())?;
             let page = pn as u64;
             let size = crate::space::SPACE_PAGE_SIZE as u64;
             let start = (page - 1) * size + 1;
@@ -664,37 +659,24 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
         .as_deref()
         .map(cookies::cookie_header_for_bilibili)
         .filter(|s| !s.is_empty());
-    let client = space_http_client()?;
+    let client = state.http_client.clone();
 
     let fetched = async {
         let keys = state
             .wbi_keys
             .get_or_fetch(&client, cookie_header.as_deref())
             .await?;
-        let params = vec![("mid".to_string(), mid.to_string())];
-        let (wts, w_rid) = wbi::sign(&keys, &params);
-        let mut req = client
-            .get(crate::space::SPACE_ACC_INFO_URL)
-            .header("Referer", format!("https://space.bilibili.com/{mid}/"))
-            .query(&params)
-            .query(&[("wts", wts.as_str()), ("w_rid", w_rid.as_str())]);
-        if let Some(c) = cookie_header {
-            req = req.header("Cookie", c);
-        }
-        let body: serde_json::Value = req
-            .send()
-            .await
-            .map_err(|e| AppError::Message(format!("空间信息请求失败: {e}")))?
-            .json()
-            .await
-            .map_err(|e| AppError::Message(format!("空间信息 JSON 解析失败: {e}")))?;
-        crate::space::parse_acc_info(&body)
+        crate::space::fetch_acc_info(&client, &keys, mid, cookie_header.as_deref()).await
     }
     .await;
 
     match fetched {
         Ok(name) => {
-            if let Ok(mut cache) = state.space_info_cache.lock() {
+            // An empty name means an anomalous payload, not a real value; do
+            // not pin it in the cache where it would outlive the anomaly.
+            if !name.is_empty()
+                && let Ok(mut cache) = state.space_info_cache.lock()
+            {
                 cache.insert(mid, (name.clone(), std::time::Instant::now()));
             }
             Ok(models::SpaceInfo { name })
@@ -1332,6 +1314,13 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         .collect();
     cleanup_orphan_work_dirs(&work_root, &active_ids);
 
+    let http_client = reqwest::Client::builder()
+        .user_agent(bilibili_view::USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
+
     Ok(AppState {
         app_dir,
         auth,
@@ -1339,6 +1328,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         settings: std::sync::Mutex::new(settings),
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
+        http_client,
         space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
@@ -1545,16 +1535,12 @@ mod space_batch_tests {
                 .collect::<Vec<_>>()
         };
         assert!(validate_space_batch_args(&items(1), "vh1080", None).is_ok());
-        assert!(
-            validate_space_batch_args(&items(1), "bestvideo+bestaudio/best", None).is_ok()
-        );
+        assert!(validate_space_batch_args(&items(1), "bestvideo+bestaudio/best", None).is_ok());
         assert!(validate_space_batch_args(&items(1), "worstvideo", None).is_err());
         assert!(validate_space_batch_args(&items(0), "vh1080", None).is_err());
         assert!(validate_space_batch_args(&items(1), "bestaudio", None).is_err());
         assert!(validate_space_batch_args(&items(1), "bestaudio", Some("flac")).is_ok());
-        assert!(
-            validate_space_batch_args(&items(1), "bestaudio[abr<=192]", Some("flac")).is_err()
-        );
+        assert!(validate_space_batch_args(&items(1), "bestaudio[abr<=192]", Some("flac")).is_err());
     }
 
     #[test]

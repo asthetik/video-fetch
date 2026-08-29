@@ -15,6 +15,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
   const [items, setItems] = useState<SpaceVideoItem[]>([]);
   const [total, setTotal] = useState(0);
   const [degraded, setDegraded] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [uploader, setUploader] = useState("");
   const [keyword, setKeyword] = useState("");
   const [searchInput, setSearchInput] = useState("");
@@ -28,6 +29,9 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
   const [failedItems, setFailedItems] = useState<{ bvid: string; error: string }[]>([]);
   const requestIdRef = useRef(0);
   const pageRef = useRef(1);
+  // The exact request that failed, so 重试 re-issues it: retrying a failed
+  // load-more must re-append, not replace the accumulated pages with one.
+  const failedReqRef = useRef<{ pn: number; append: boolean }>({ pn: 1, append: false });
   const selectAllRef = useRef<HTMLInputElement>(null);
   const summaryRef = useRef<HTMLParagraphElement>(null);
 
@@ -48,8 +52,10 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
         setItems((prev) => (append ? [...prev, ...page.items] : page.items));
         setTotal(page.total);
         setDegraded(page.degraded);
+        setHasMore(page.has_more);
       } catch (err) {
         if (requestIdRef.current !== requestId) return;
+        failedReqRef.current = { pn, append };
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (requestIdRef.current === requestId) {
@@ -80,6 +86,14 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
       cancelled = true;
     };
   }, [mid, keyword, order, loadPage]);
+
+  useEffect(() => {
+    // A tab switch hides the dialog via `open={dialogOpen && active}`; clear
+    // the flag too so returning to this page does not silently re-open it.
+    if (!active) {
+      setDialogOpen(false);
+    }
+  }, [active]);
 
   function toggleSelect(item: SpaceVideoItem) {
     setSelected((prev) => {
@@ -156,7 +170,8 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     <div className="space-list-block">
       <div className="space-header">
         <h2 className="page-title">
-          {uploader ? `${uploader} · ` : ""}共 {total} 个视频
+          {uploader ? `${uploader} · ` : ""}
+          {degraded ? `已加载 ${items.length} 个视频` : `共 ${total} 个视频`}
         </h2>
       </div>
 
@@ -200,7 +215,10 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
             type="button"
             className="btn btn-sm"
             style={{ marginLeft: "0.5rem" }}
-            onClick={() => void loadPage(pageRef.current, false, keyword, order)}
+            onClick={() => {
+            const failed = failedReqRef.current;
+            void loadPage(failed.pn, failed.append, keyword, order);
+          }}
           >
             重试
           </button>
@@ -264,7 +282,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
         </ul>
       )}
 
-      {!loading && !error && items.length < total && (
+      {!loading && !error && hasMore && (
         <div className="space-more">
           <button
             type="button"
@@ -272,7 +290,11 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
             disabled={moreLoading}
             onClick={() => void loadPage(pageRef.current + 1, true, keyword, order)}
           >
-            {moreLoading ? "加载中…" : `加载更多（已加载 ${items.length}/${total}）`}
+            {moreLoading
+              ? "加载中…"
+              : degraded
+                ? `加载更多（已加载 ${items.length}）`
+                : `加载更多（已加载 ${items.length}/${total}）`}
           </button>
         </div>
       )}

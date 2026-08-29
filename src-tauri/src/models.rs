@@ -79,6 +79,10 @@ pub struct SpacePage {
     pub items: Vec<SpaceVideoItem>,
     pub total: u64,
     pub degraded: bool,
+    /// Whether another page exists after this one. The flat-playlist fallback
+    /// cannot know the real total, so the UI must key "load more" off this
+    /// flag instead of comparing `items.len()` against `total`.
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

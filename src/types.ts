@@ -97,6 +97,7 @@ export interface SpacePage {
   items: SpaceVideoItem[];
   total: number;
   degraded: boolean;
+  has_more: boolean;
 }
 
 export interface SpaceInfo {

@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { useModalFocus } from "../lib/useModalFocus";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 export interface BatchFormatDialogProps {
@@ -30,6 +31,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
   const [confirmOpen, setConfirmOpen] = useState(false);
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
+  useModalFocus(open, panelRef);
 
   useEffect(() => {
     if (open) {
@@ -38,20 +40,6 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
       setAudioIdx(0);
       setConfirmOpen(false);
     }
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const previous =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    panelRef.current?.focus();
-    return () => {
-      previous?.focus();
-    };
   }, [open]);
 
   const audioTier = AUDIO_TIERS[audioIdx];

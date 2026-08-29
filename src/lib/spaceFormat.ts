@@ -6,12 +6,13 @@ export function formatPlayCount(n: number): string {
   return String(n);
 }
 
-/** Unix seconds → YYYY-MM-DD; 0 renders as "—" (fallback mode has no date). */
+/** Unix seconds → YYYY-MM-DD in Bilibili's fixed UTC+8 so dates match the
+ * source site regardless of the viewer's timezone; 0 renders as "—". */
 export function formatDate(secs: number): string {
   if (!secs) return "—";
-  const d = new Date(secs * 1000);
+  const d = new Date(secs * 1000 + 8 * 3600 * 1000);
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
 }
 
 /** Seconds → mm:ss / hh:mm:ss; 0 renders as "—". */

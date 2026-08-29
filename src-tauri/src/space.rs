@@ -74,7 +74,9 @@ pub async fn fetch_arc_search(
         .json()
         .await
         .map_err(|e| AppError::Message(format!("空间列表 JSON 解析失败: {e}")))?;
-    parse_arc_search(&body)
+    let mut page = parse_arc_search(&body)?;
+    page.has_more = u64::from(pn) * u64::from(SPACE_PAGE_SIZE) < page.total;
+    Ok(page)
 }
 
 /// Non-zero `code` (incl. risk-control -412) -> Err; the caller decides on fallback.
@@ -129,6 +131,7 @@ pub fn parse_arc_search(v: &Value) -> AppResult<SpacePage> {
         items,
         total,
         degraded: false,
+        has_more: false,
     })
 }
 
@@ -186,18 +189,12 @@ pub async fn fetch_via_ytdlp(
     end: u64,
     cookies_path: Option<&std::path::Path>,
 ) -> AppResult<SpacePage> {
-    let mut cmd = tokio::process::Command::new(ytdlp_path);
-    #[cfg(windows)]
-    crate::ytdlp::hide_windows_console(&mut cmd);
+    let mut cmd = crate::ytdlp::base_command(ytdlp_path, cookies_path);
     cmd.arg("--flat-playlist")
         .arg("-J")
         .arg("--playlist-items")
         .arg(format!("{start}:{end}"))
         .arg(format!("https://space.bilibili.com/{mid}/video"));
-    if let Some(p) = cookies_path.filter(|p| p.exists()) {
-        cmd.arg("--cookies").arg(p);
-    }
-    cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
     let out = cmd
         .output()
         .await
@@ -211,13 +208,17 @@ pub async fn fetch_via_ytdlp(
     }
     let json: Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| AppError::Message(format!("yt-dlp 空间列表 JSON 解析失败: {e}")))?;
-    parse_flat_playlist(&json)
+    parse_flat_playlist(&json, start, end)
 }
 
 /// Flat playlists have no filter/sort support: play count is unavailable,
 /// and missing date/duration stay 0 so the UI renders them as "—".
-pub fn parse_flat_playlist(v: &Value) -> AppResult<SpacePage> {
-    let total = v.get("playlist_count").and_then(Value::as_u64).unwrap_or(0);
+///
+/// With `--playlist-items` slicing yt-dlp omits `playlist_count`, so the real
+/// total is unknowable: a full page reports the window end as a floor and
+/// `has_more` assumes more exist; a short page means the playlist ended.
+pub fn parse_flat_playlist(v: &Value, start: u64, end: u64) -> AppResult<SpacePage> {
+    let page_size = end - start + 1;
     let mut items = Vec::new();
     if let Some(entries) = v.get("entries").and_then(Value::as_array) {
         for entry in entries {
@@ -249,10 +250,23 @@ pub fn parse_flat_playlist(v: &Value) -> AppResult<SpacePage> {
             });
         }
     }
+    let known_total = v.get("playlist_count").and_then(Value::as_u64);
+    let full_page = items.len() as u64 >= page_size;
+    let total = known_total.unwrap_or(if full_page {
+        end
+    } else {
+        start - 1 + items.len() as u64
+    });
+    // Without a known count the playlist continues iff the window came back full.
+    let has_more = match known_total {
+        Some(count) => end < count,
+        None => full_page,
+    };
     Ok(SpacePage {
         items,
         total,
         degraded: true,
+        has_more,
     })
 }
 
@@ -263,8 +277,45 @@ pub fn fallback_allowed(keyword: &str, order: SpaceOrder) -> bool {
     keyword.trim().is_empty() && order == SpaceOrder::Pubdate
 }
 
-pub fn degraded_reject_error() -> AppError {
-    AppError::Message("空间列表接口暂不可用，降级模式不支持搜索/排序，请清除搜索条件后重试".into())
+/// The rejection message must name the remedy that actually applies: an empty
+/// keyword means the sort toggle (only Pubdate degrades) is what blocks the
+/// fallback; otherwise it is the search term.
+pub fn degraded_reject_error(keyword: &str) -> AppError {
+    if keyword.trim().is_empty() {
+        AppError::Message(
+            "空间列表接口暂不可用，降级模式不支持排序，请切回「最新发布」后重试".into(),
+        )
+    } else {
+        AppError::Message("空间列表接口暂不可用，降级模式不支持搜索，请清除搜索条件后重试".into())
+    }
+}
+
+/// GET acc/info and return `data.name`; a non-zero `code` becomes Err (the
+/// caller maps it to the empty-name UI default).
+pub async fn fetch_acc_info(
+    client: &reqwest::Client,
+    keys: &WbiKeys,
+    mid: u64,
+    cookie_header: Option<&str>,
+) -> AppResult<String> {
+    let params = vec![("mid".to_string(), mid.to_string())];
+    let (wts, w_rid) = wbi::sign(keys, &params);
+    let mut req = client
+        .get(SPACE_ACC_INFO_URL)
+        .header("Referer", format!("https://space.bilibili.com/{mid}/"))
+        .query(&params)
+        .query(&[("wts", wts.as_str()), ("w_rid", w_rid.as_str())]);
+    if let Some(c) = cookie_header {
+        req = req.header("Cookie", c);
+    }
+    let body: Value = req
+        .send()
+        .await
+        .map_err(|e| AppError::Message(format!("空间信息请求失败: {e}")))?
+        .json()
+        .await
+        .map_err(|e| AppError::Message(format!("空间信息 JSON 解析失败: {e}")))?;
+    parse_acc_info(&body)
 }
 
 #[cfg(test)]
@@ -330,7 +381,10 @@ mod tests {
     fn parse_arc_search_rejects_nonzero_code() {
         let body = json!({ "code": -412, "message": "请求被拦截" });
         let err = parse_arc_search(&body).unwrap_err().to_string();
-        assert!(err.contains("-412"), "risk-control code must surface: {err}");
+        assert!(
+            err.contains("-412"),
+            "risk-control code must surface: {err}"
+        );
     }
 
     #[test]
@@ -352,8 +406,9 @@ mod tests {
                 { "id": "BV1yy411c7mE", "title": "刑法第2讲" }
             ]
         });
-        let page = parse_flat_playlist(&body).unwrap();
+        let page = parse_flat_playlist(&body, 1, 50).unwrap();
         assert!(page.degraded);
+        assert!(page.has_more);
         assert_eq!(page.total, 1200);
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].play, None);
@@ -362,6 +417,24 @@ mod tests {
         assert_eq!(page.items[1].duration_secs, 0);
         assert_eq!(page.items[1].pubdate, 0);
         assert_eq!(page.items[1].cover, None);
+    }
+
+    #[test]
+    fn parse_flat_playlist_without_count_keeps_paging_while_full() {
+        let full_page = json!({ "entries": [
+            { "id": "BV1xx411c7mD", "title": "a" },
+            { "id": "BV1yy411c7mE", "title": "b" },
+        ]});
+        let page = parse_flat_playlist(&full_page, 51, 52).unwrap();
+        assert_eq!(page.total, 52);
+        assert!(page.has_more);
+
+        let short_page = json!({ "entries": [
+            { "id": "BV1zz411c7mF", "title": "c" },
+        ]});
+        let page = parse_flat_playlist(&short_page, 53, 54).unwrap();
+        assert_eq!(page.total, 53);
+        assert!(!page.has_more);
     }
 
     #[test]
@@ -382,7 +455,16 @@ mod tests {
     }
 
     #[test]
-    fn degraded_reject_error_mentions_clearing_search() {
-        assert!(degraded_reject_error().to_string().contains("清除搜索条件"));
+    fn degraded_reject_error_names_the_matching_remedy() {
+        assert!(
+            degraded_reject_error("刑法")
+                .to_string()
+                .contains("清除搜索条件")
+        );
+        assert!(
+            degraded_reject_error("  ")
+                .to_string()
+                .contains("切回「最新发布」")
+        );
     }
 }

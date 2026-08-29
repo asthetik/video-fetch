@@ -707,6 +707,18 @@ pub(crate) fn hide_windows_console(cmd: &mut Command) {
     }
 }
 
+/// Shared yt-dlp spawn policy: no console window on Windows, an optional
+/// cookie file (ignored when missing), and UTF-8 Python IO for stable JSON.
+pub fn base_command(ytdlp_path: &Path, cookies_path: Option<&Path>) -> Command {
+    let mut cmd = Command::new(ytdlp_path);
+    hide_windows_console(&mut cmd);
+    if let Some(p) = cookies_path.filter(|p| p.exists()) {
+        cmd.arg("--cookies").arg(p);
+    }
+    cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
+    cmd
+}
+
 pub async fn resolve_meta(
     cfg: &YtDlpConfig,
     url: &str,

@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef } from "react";
+import { useId, useRef } from "react";
+import { useModalFocus } from "../lib/useModalFocus";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -27,20 +28,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const previous =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    panelRef.current?.focus();
-    return () => {
-      previous?.focus();
-    };
-  }, [open]);
+  useModalFocus(open, panelRef);
 
   if (!open) {
     return null;
