@@ -68,7 +68,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
           }}
         >
           <div
-            className="modal"
+            className="modal batch-modal"
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
