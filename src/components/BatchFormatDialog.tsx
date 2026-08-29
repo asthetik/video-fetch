@@ -21,7 +21,7 @@ const VIDEO_TIERS = [
 const AUDIO_TIERS = [
   { formatId: "bestaudio", audioFormat: "m4a", label: "m4a（AAC 最高音质）" },
   { formatId: "bestaudio", audioFormat: "mp3", label: "mp3" },
-  { formatId: "bestaudio", audioFormat: "flac", label: "FLAC（需 Hi-Res，无音源的视频将失败）" },
+  { formatId: "bestaudio", audioFormat: "flac", label: "FLAC（需 Hi-Res 无损音源）" },
 ];
 
 export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchFormatDialogProps) {
@@ -68,7 +68,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
           }}
         >
           <div
-            className="modal"
+            className="modal batch-modal"
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
@@ -93,7 +93,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
             {mode === "video" ? (
               <div>
                 <label className="field-label" htmlFor="batch-video-tier">
-                  清晰度（统一应用到全部选中视频）
+                  清晰度
                 </label>
                 <select
                   id="batch-video-tier"
