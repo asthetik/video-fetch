@@ -160,6 +160,16 @@ pub struct DownloadManager {
     cancelled: Arc<Mutex<HashMap<String, bool>>>,
 }
 
+/// Structured outcome of one enqueue attempt. The single-video command maps
+/// kinds back to the exact same user-facing strings as before; the batch
+/// command counts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueKind {
+    Enqueued,
+    DuplicateActive,
+    AlreadyExists,
+}
+
 impl DownloadManager {
     #[cfg(test)]
     pub fn new(
@@ -227,9 +237,17 @@ impl DownloadManager {
         )
     }
 
+    /// Runs the full enqueue pipeline — active-queue check, skip-existing checks, DB
+    /// insert, emit, runner spawn — and reports the outcome structurally so the batch
+    /// command can classify results without parsing user-facing messages.
+    ///
     /// When `save_as_copy` is true, skip duplicate-done and local-file checks but never bypass
     /// the active-queue lock above.
-    pub fn enqueue(&self, mut job: DownloadJob, save_as_copy: bool) -> AppResult<DownloadJob> {
+    pub fn enqueue_classified(
+        &self,
+        job: &mut DownloadJob,
+        save_as_copy: bool,
+    ) -> AppResult<EnqueueKind> {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
         let save_dir = PathBuf::from(&settings.save_dir);
 
@@ -241,15 +259,7 @@ impl DownloadManager {
                 job.audio_format.as_deref(),
             )?;
             if active {
-                let kind = if job.audio_format.is_some() {
-                    "音频"
-                } else {
-                    "视频"
-                };
-                return Err(AppError::Message(format!(
-                    "该{kind}已在下载队列中（{} P{}），请等待完成或取消后再试",
-                    job.video_id, job.page_index
-                )));
+                return Ok(EnqueueKind::DuplicateActive);
             }
         }
 
@@ -271,15 +281,7 @@ impl DownloadManager {
                     naming::conflict_exts(audio_format),
                 )
             {
-                let kind = if job.audio_format.is_some() {
-                    "音频"
-                } else {
-                    "视频"
-                };
-                return Err(AppError::Message(format!(
-                    "本地已存在该{kind}文件（{} P{}），已跳过",
-                    job.video_id, job.page_index
-                )));
+                return Ok(EnqueueKind::AlreadyExists);
             }
         }
 
@@ -291,10 +293,42 @@ impl DownloadManager {
         job.error = None;
         job.output_path = None;
 
-        self.db.lock().map_err(lock_err)?.insert_job(&job)?;
-        self.emit(&job);
-        self.spawn_runner(job.id.clone());
-        Ok(job)
+        let prepared = job.clone();
+        self.db.lock().map_err(lock_err)?.insert_job(job)?;
+        self.emit(&prepared);
+        self.spawn_runner(prepared.id.clone());
+        Ok(EnqueueKind::Enqueued)
+    }
+
+    /// When `save_as_copy` is true, skip duplicate-done and local-file checks but never bypass
+    /// the active-queue lock above.
+    pub fn enqueue(&self, mut job: DownloadJob, save_as_copy: bool) -> AppResult<DownloadJob> {
+        let kind = self.enqueue_classified(&mut job, save_as_copy)?;
+        match kind {
+            EnqueueKind::Enqueued => Ok(job),
+            EnqueueKind::DuplicateActive => {
+                let media = if job.audio_format.is_some() {
+                    "音频"
+                } else {
+                    "视频"
+                };
+                Err(AppError::Message(format!(
+                    "该{media}已在下载队列中（{} P{}），请等待完成或取消后再试",
+                    job.video_id, job.page_index
+                )))
+            }
+            EnqueueKind::AlreadyExists => {
+                let media = if job.audio_format.is_some() {
+                    "音频"
+                } else {
+                    "视频"
+                };
+                Err(AppError::Message(format!(
+                    "本地已存在该{media}文件（{} P{}），已跳过",
+                    job.video_id, job.page_index
+                )))
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1842,5 +1876,63 @@ mod tests {
     fn save_dir_must_be_writable() {
         let dir = tempfile::tempdir().unwrap();
         check_save_dir_writable(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn enqueue_classified_flags_duplicate_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+
+        // 预置一个同 video/page 的 Pending 任务 → 第二次入队必须报 DuplicateActive。
+        let mut active = sample_job("job-active");
+        active.video_id = "BV1active".into();
+        active.page_index = 1;
+        active.status = JobStatus::Pending;
+        db.insert_job(&active).unwrap();
+
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        struct NeverDownloader;
+        #[async_trait]
+        impl Downloader for NeverDownloader {
+            async fn run(
+                &self,
+                _: &DownloadJob,
+                _: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                Err("should not run".into())
+            }
+        }
+        let manager = DownloadManager::new(
+            db,
+            test_settings(&save_dir),
+            Arc::new(NeverDownloader) as Arc<dyn Downloader>,
+            Arc::new(emitter),
+            Arc::new(Mutex::new(HashMap::new())),
+            dir.path().join("work"),
+        )
+        .unwrap();
+
+        let mut fresh = sample_job("job-fresh");
+        fresh.video_id = "BV1other".into();
+        fresh.page_index = 1;
+        assert_eq!(
+            manager.enqueue_classified(&mut fresh, false).unwrap(),
+            EnqueueKind::Enqueued
+        );
+
+        let mut dup = sample_job("job-dup");
+        dup.video_id = "BV1active".into();
+        dup.page_index = 1;
+        assert_eq!(
+            manager.enqueue_classified(&mut dup, false).unwrap(),
+            EnqueueKind::DuplicateActive
+        );
+
+        // 单发路径文案回归：逐字包含既有提示。
+        let err = manager.enqueue(dup, false).unwrap_err().to_string();
+        assert!(err.contains("已在下载队列中"), "unexpected: {err}");
+        assert!(err.contains("BV1active"), "unexpected: {err}");
     }
 }
