@@ -58,10 +58,47 @@ pub struct VideoMeta {
     pub webpage_url: String,
     pub pages: Vec<PageItem>,
     pub formats: Vec<FormatOption>,
-    /// Audio-only formats for the "仅音频" mode; empty when unavailable.
+    /// Audio-only formats for the app's audio-only mode; empty when unavailable.
     #[serde(default)]
     pub audio_formats: Vec<FormatOption>,
     pub platform: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceVideoItem {
+    pub bvid: String,
+    pub title: String,
+    pub duration_secs: u64,
+    pub play: Option<u64>,
+    pub pubdate: i64,
+    pub cover: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpacePage {
+    pub items: Vec<SpaceVideoItem>,
+    pub total: u64,
+    pub degraded: bool,
+    /// Whether another page exists after this one. The flat-playlist fallback
+    /// cannot know the real total, so the UI must key "load more" off this
+    /// flag instead of comparing `items.len()` against `total`.
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    pub name: String,
+}
+
+/// Classification of a user-pasted URL; drives the home page's video/space split.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UrlKind {
+    Video,
+    Space { mid: u64 },
+    // Host is space.bilibili.com but the mid segment is missing/non-numeric.
+    InvalidSpace,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,4 +158,44 @@ pub struct CancelAllResult {
 #[serde(rename_all = "camelCase")]
 pub struct ClearFinishedResult {
     pub cleared: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchEnqueueItem {
+    pub bvid: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchEnqueueFailed {
+    pub bvid: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchEnqueueResult {
+    pub enqueued: u32,
+    pub skipped_existing: u32,
+    pub skipped_active: u32,
+    pub failed: Vec<BatchEnqueueFailed>,
+}
+
+#[cfg(test)]
+mod url_kind_tests {
+    use super::*;
+
+    #[test]
+    fn url_kind_serializes_tagged() {
+        let v = serde_json::to_value(UrlKind::Space { mid: 470995011 }).unwrap();
+        assert_eq!(v["kind"], "space");
+        assert_eq!(v["mid"], 470995011);
+        assert_eq!(
+            serde_json::to_value(UrlKind::Video).unwrap()["kind"],
+            "video"
+        );
+        assert_eq!(
+            serde_json::to_value(UrlKind::Unknown).unwrap()["kind"],
+            "unknown"
+        );
+    }
 }

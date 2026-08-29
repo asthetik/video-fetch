@@ -140,12 +140,16 @@ pub async fn fetch_keys(
 /// In-memory WBI key cache with a 24h TTL; callers retry via `invalidate` on risk-control rejections.
 pub struct WbiKeyCache {
     inner: Mutex<Option<(WbiKeys, Instant)>>,
+    /// Serializes concurrent fetches so the first space view issues one nav
+    /// request, not one per concurrent caller.
+    fetch_lock: tokio::sync::Mutex<()>,
 }
 
 impl WbiKeyCache {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            fetch_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -158,14 +162,25 @@ impl WbiKeyCache {
         client: &reqwest::Client,
         cookie_header: Option<&str>,
     ) -> AppResult<WbiKeys> {
-        if let Some((keys, at)) = self.inner.lock().expect("wbi cache lock poisoned").as_ref()
-            && at.elapsed() < Duration::from_secs(24 * 3600)
-        {
-            return Ok(keys.clone());
+        if let Some(keys) = self.cached() {
+            return Ok(keys);
+        }
+        let _guard = self.fetch_lock.lock().await;
+        // Re-check: another task may have fetched while we waited on the lock.
+        if let Some(keys) = self.cached() {
+            return Ok(keys);
         }
         let keys = fetch_keys(client, cookie_header).await?;
         *self.inner.lock().expect("wbi cache lock poisoned") = Some((keys.clone(), Instant::now()));
         Ok(keys)
+    }
+
+    fn cached(&self) -> Option<WbiKeys> {
+        let guard = self.inner.lock().expect("wbi cache lock poisoned");
+        guard
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(24 * 3600))
+            .map(|(keys, _)| keys.clone())
     }
 }
 

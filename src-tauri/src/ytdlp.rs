@@ -350,7 +350,7 @@ pub(crate) fn audio_stream_label(codecs: &str, abr: Option<f64>) -> String {
     }
 }
 
-/// Audio-only tiers for the "仅音频" mode, highest bitrate first. Lower tiers
+/// Audio-only tiers for the app's audio-only mode, highest bitrate first. Lower tiers
 /// use `bestaudio[abr<=N]`; the top tier is uncapped `bestaudio`.
 fn parse_audio_only_formats(v: &serde_json::Value) -> Vec<FormatOption> {
     let Some(formats) = v.get("formats").and_then(|f| f.as_array()) else {
@@ -699,12 +699,24 @@ fn missing_yt_dlp_message() -> String {
 /// On Windows, spawn without a console window (CREATE_NO_WINDOW).
 /// Otherwise GUI launches of yt-dlp briefly show a black terminal window.
 #[cfg_attr(not(windows), allow(unused_variables))]
-fn hide_windows_console(cmd: &mut Command) {
+pub(crate) fn hide_windows_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+/// Shared yt-dlp spawn policy: no console window on Windows, an optional
+/// cookie file (ignored when missing), and UTF-8 Python IO for stable JSON.
+pub fn base_command(ytdlp_path: &Path, cookies_path: Option<&Path>) -> Command {
+    let mut cmd = Command::new(ytdlp_path);
+    hide_windows_console(&mut cmd);
+    if let Some(p) = cookies_path.filter(|p| p.exists()) {
+        cmd.arg("--cookies").arg(p);
+    }
+    cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
+    cmd
 }
 
 pub async fn resolve_meta(

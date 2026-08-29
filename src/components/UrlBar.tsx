@@ -52,7 +52,7 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
           id="video-url"
           className="url-input"
           type="url"
-          placeholder="粘贴 B 站视频链接…"
+          placeholder="粘贴 B 站视频或 UP 主空间链接…"
           value={url}
           onChange={(e) => handleChange(e.target.value)}
           onPaste={() => logUi("input", "粘贴链接", "info")}

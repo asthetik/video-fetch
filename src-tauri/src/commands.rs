@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +46,10 @@ pub struct AppState {
     pub settings: std::sync::Mutex<AppSettings>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
+    /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
+    pub http_client: reqwest::Client,
+    /// In-process space_info cache: mid -> (uploader name, written-at instant), TTL 10 minutes.
+    pub space_info_cache: std::sync::Mutex<HashMap<u64, (String, std::time::Instant)>>,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
     pub active_resolve_id: AtomicU64,
     /// Local activity log writer (files under app_dir/logs).
@@ -328,6 +333,26 @@ fn tauri_cookie_to_app(c: &tauri::webview::Cookie<'_>) -> Cookie {
     }
 }
 
+/// Pure URL classification, no network. Space URLs enter the list view;
+/// everything else keeps the existing resolve flow (and its errors).
+#[tauri::command]
+pub fn detect_url(url: String) -> models::UrlKind {
+    if let Some(mid) = platform::parse_space_mid(&url) {
+        return models::UrlKind::Space { mid };
+    }
+    if let Ok(parsed) = Url::parse(url.trim())
+        && parsed.host_str() == Some("space.bilibili.com")
+    {
+        return models::UrlKind::InvalidSpace;
+    }
+    let canonical = platform::canonicalize_video_url(&url);
+    if platform::detect_platform(&canonical).is_some() {
+        models::UrlKind::Video
+    } else {
+        models::UrlKind::Unknown
+    }
+}
+
 #[tauri::command]
 pub async fn resolve_url(
     app: AppHandle,
@@ -545,6 +570,128 @@ pub async fn resolve_url(
 }
 
 #[tauri::command]
+pub async fn space_list_videos(
+    state: State<'_, AppState>,
+    mid: u64,
+    pn: u32,
+    keyword: Option<String>,
+    order: Option<String>,
+) -> AppResult<models::SpacePage> {
+    let pn = pn.max(1);
+    let order = order
+        .as_deref()
+        .and_then(crate::space::SpaceOrder::parse)
+        .unwrap_or(crate::space::SpaceOrder::Pubdate);
+    let keyword = keyword.unwrap_or_default();
+
+    let stored_cookies = state.auth.cookies()?;
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
+        .filter(|s| !s.is_empty());
+    let client = state.http_client.clone();
+
+    let primary = match state
+        .wbi_keys
+        .get_or_fetch(&client, cookie_header.as_deref())
+        .await
+    {
+        Ok(keys) => {
+            crate::space::fetch_arc_search(
+                &client,
+                &keys,
+                mid,
+                pn,
+                &keyword,
+                order,
+                cookie_header.as_deref(),
+            )
+            .await
+        }
+        Err(e) => Err(AppError::Message(format!("wbi keys 获取失败: {e}"))),
+    };
+
+    match primary {
+        Ok(page) => Ok(page),
+        Err(primary_err) => {
+            tracing::warn!(
+                target: "core",
+                "space: 主路径失败，尝试降级: {}",
+                primary_err
+            );
+            state.wbi_keys.invalidate();
+            if !crate::space::fallback_allowed(&keyword, order) {
+                return Err(crate::space::degraded_reject_error(&keyword));
+            }
+            // Only the yt-dlp fallback reads the cookies file; the primary
+            // path talks to the API with the header alone.
+            let cookies_path = state
+                .auth
+                .materialize_cookies_file_from(stored_cookies.as_deref())?;
+            let page = pn as u64;
+            let size = crate::space::SPACE_PAGE_SIZE as u64;
+            let start = (page - 1) * size + 1;
+            let end = page * size;
+            crate::space::fetch_via_ytdlp(
+                &state.ytdlp.yt_dlp_path,
+                mid,
+                start,
+                end,
+                cookies_path.as_deref(),
+            )
+            .await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<models::SpaceInfo> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(600);
+    if let Ok(cache) = state.space_info_cache.lock()
+        && let Some((name, at)) = cache.get(&mid)
+        && at.elapsed() < TTL
+    {
+        return Ok(models::SpaceInfo { name: name.clone() });
+    }
+
+    let stored_cookies = state.auth.cookies()?;
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
+        .filter(|s| !s.is_empty());
+    let client = state.http_client.clone();
+
+    let fetched = async {
+        let keys = state
+            .wbi_keys
+            .get_or_fetch(&client, cookie_header.as_deref())
+            .await?;
+        crate::space::fetch_acc_info(&client, &keys, mid, cookie_header.as_deref()).await
+    }
+    .await;
+
+    match fetched {
+        Ok(name) => {
+            // An empty name means an anomalous payload, not a real value; do
+            // not pin it in the cache where it would outlive the anomaly.
+            if !name.is_empty()
+                && let Ok(mut cache) = state.space_info_cache.lock()
+            {
+                cache.insert(mid, (name.clone(), std::time::Instant::now()));
+            }
+            Ok(models::SpaceInfo { name })
+        }
+        // Spec: an acc/info failure must not block the list; the UI falls back to the "N videos" header.
+        Err(e) => {
+            tracing::warn!(target: "core", "space: acc/info 失败（UI 缺省）: {e}");
+            Ok(models::SpaceInfo {
+                name: String::new(),
+            })
+        }
+    }
+}
+
+#[tauri::command]
 pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppResult<DownloadJob> {
     if args.page_indexes.is_empty() {
         return Err(AppError::Message("请至少选择一个分 P".into()));
@@ -630,6 +777,126 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
         page_count
     );
     last.ok_or_else(|| AppError::Message("未能创建下载任务".into()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpaceBatchArgs {
+    pub items: Vec<models::BatchEnqueueItem>,
+    pub format_id: String,
+    #[serde(default)]
+    pub audio_format: Option<String>,
+}
+
+fn record_batch_outcome(
+    result: &mut models::BatchEnqueueResult,
+    kind: crate::download::EnqueueKind,
+) {
+    match kind {
+        crate::download::EnqueueKind::Enqueued => result.enqueued += 1,
+        crate::download::EnqueueKind::AlreadyExists => result.skipped_existing += 1,
+        crate::download::EnqueueKind::DuplicateActive => result.skipped_active += 1,
+    }
+}
+
+/// Fixed tier set offered by the batch dialog (spec §4.4). Anything else is
+/// rejected instead of flowing an arbitrary selector string into yt-dlp -f.
+const BATCH_FORMAT_TIERS: &[&str] = &[
+    "bestvideo+bestaudio/best",
+    "vh1080",
+    "vh720",
+    "vh480",
+    "bestaudio",
+];
+
+/// Pure batch-argument guards, extracted for testability: known tier, non-empty
+/// items, audio mode carries an audio format, FLAC only on uncapped tiers.
+fn validate_space_batch_args(
+    items: &[models::BatchEnqueueItem],
+    format_id: &str,
+    audio_format: Option<&str>,
+) -> AppResult<()> {
+    if !BATCH_FORMAT_TIERS.contains(&format_id) {
+        return Err(AppError::Message(format!("不支持的批量档位: {format_id}")));
+    }
+    if items.is_empty() {
+        return Err(AppError::Message("请至少选择一个视频".into()));
+    }
+    if audio_format.is_none() && format_id.starts_with("bestaudio") {
+        return Err(AppError::Message("音频批量必须指定音频格式".into()));
+    }
+    if audio_format == Some("flac") && crate::ytdlp::audio_tier_cap(format_id).is_some() {
+        return Err(AppError::Message("FLAC 仅支持 Hi-Res 无损档位".into()));
+    }
+    Ok(())
+}
+
+/// Batch enqueue: no per-video resolve; the unified tier goes straight to yt-dlp (spec §4.4).
+/// Async so the per-item DB/disk loop never blocks the main thread on large batches.
+#[tauri::command]
+pub async fn space_enqueue_batch(
+    state: State<'_, AppState>,
+    args: SpaceBatchArgs,
+) -> AppResult<models::BatchEnqueueResult> {
+    let audio_format = normalize_audio_format(args.audio_format.clone())?;
+    validate_space_batch_args(&args.items, &args.format_id, audio_format.as_deref())?;
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::Message("settings lock poisoned".into()))?
+        .clone();
+    naming::validate_output_template(&settings.filename_template).map_err(AppError::Message)?;
+    let _ = rematerialize_cookies(&state)?;
+
+    let mut result = models::BatchEnqueueResult {
+        enqueued: 0,
+        skipped_existing: 0,
+        skipped_active: 0,
+        failed: Vec::new(),
+    };
+    for item in args.items {
+        if !crate::space::is_valid_bvid(&item.bvid) {
+            result.failed.push(models::BatchEnqueueFailed {
+                bvid: item.bvid,
+                error: "无效的视频 ID".into(),
+            });
+            continue;
+        }
+        let title = if item.title.is_empty() {
+            item.bvid.clone()
+        } else {
+            item.title.clone()
+        };
+        let mut job = DownloadJob {
+            id: String::new(),
+            url: format!("https://www.bilibili.com/video/{}", item.bvid),
+            video_id: item.bvid.clone(),
+            page_index: 1,
+            format_id: args.format_id.clone(),
+            audio_format: audio_format.clone(),
+            title,
+            output_template: settings.filename_template.clone(),
+            status: JobStatus::Pending,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+        };
+        match state.downloads.enqueue_classified(&mut job, false) {
+            Ok(kind) => record_batch_outcome(&mut result, kind),
+            Err(e) => result.failed.push(models::BatchEnqueueFailed {
+                bvid: item.bvid,
+                error: e.to_string(),
+            }),
+        }
+    }
+    tracing::info!(
+        target: "core",
+        "space: 批量入队 成功 {} / 已存在 {} / 队列重复 {} / 失败 {}",
+        result.enqueued,
+        result.skipped_existing,
+        result.skipped_active,
+        result.failed.len()
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1047,6 +1314,13 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         .collect();
     cleanup_orphan_work_dirs(&work_root, &active_ids);
 
+    let http_client = reqwest::Client::builder()
+        .user_agent(bilibili_view::USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
+
     Ok(AppState {
         app_dir,
         auth,
@@ -1054,6 +1328,8 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         settings: std::sync::Mutex::new(settings),
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
+        http_client,
+        space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
     })
@@ -1185,5 +1461,91 @@ mod tests {
         );
         let already = "%(title)s [P%(playlist_index)s].%(ext)s";
         assert_eq!(ensure_playlist_index_template(already, true), already);
+    }
+}
+
+#[cfg(test)]
+mod detect_url_tests {
+    use super::*;
+
+    #[test]
+    fn detect_url_classifies_three_kinds() {
+        assert_eq!(
+            detect_url("https://space.bilibili.com/470995011?spm_id_from=x".into()),
+            models::UrlKind::Space { mid: 470995011 }
+        );
+        assert_eq!(
+            detect_url("https://www.bilibili.com/video/BV1xx411c7mD".into()),
+            models::UrlKind::Video
+        );
+        assert_eq!(
+            detect_url("https://example.com/nope".into()),
+            models::UrlKind::Unknown
+        );
+    }
+
+    #[test]
+    fn detect_url_invalid_space_mid() {
+        assert_eq!(
+            detect_url("https://space.bilibili.com/abc".into()),
+            models::UrlKind::InvalidSpace
+        );
+        assert_eq!(
+            detect_url("https://space.bilibili.com/".into()),
+            models::UrlKind::InvalidSpace
+        );
+        assert_eq!(
+            detect_url("https://space.bilibili.com/470995011/video".into()),
+            models::UrlKind::Space { mid: 470995011 }
+        );
+    }
+}
+
+#[cfg(test)]
+mod space_batch_tests {
+    use super::*;
+    use crate::download::EnqueueKind;
+
+    #[test]
+    fn record_batch_outcome_counts_kinds() {
+        let mut r = models::BatchEnqueueResult {
+            enqueued: 0,
+            skipped_existing: 0,
+            skipped_active: 0,
+            failed: Vec::new(),
+        };
+        record_batch_outcome(&mut r, EnqueueKind::Enqueued);
+        record_batch_outcome(&mut r, EnqueueKind::AlreadyExists);
+        record_batch_outcome(&mut r, EnqueueKind::DuplicateActive);
+        record_batch_outcome(&mut r, EnqueueKind::Enqueued);
+        assert_eq!(r.enqueued, 2);
+        assert_eq!(r.skipped_existing, 1);
+        assert_eq!(r.skipped_active, 1);
+        assert!(r.failed.is_empty());
+    }
+
+    #[test]
+    fn space_batch_args_validation() {
+        let items = |n: usize| {
+            (0..n)
+                .map(|i| models::BatchEnqueueItem {
+                    bvid: format!("BV{i}"),
+                    title: "t".into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(validate_space_batch_args(&items(1), "vh1080", None).is_ok());
+        assert!(validate_space_batch_args(&items(1), "bestvideo+bestaudio/best", None).is_ok());
+        assert!(validate_space_batch_args(&items(1), "worstvideo", None).is_err());
+        assert!(validate_space_batch_args(&items(0), "vh1080", None).is_err());
+        assert!(validate_space_batch_args(&items(1), "bestaudio", None).is_err());
+        assert!(validate_space_batch_args(&items(1), "bestaudio", Some("flac")).is_ok());
+        assert!(validate_space_batch_args(&items(1), "bestaudio[abr<=192]", Some("flac")).is_err());
+    }
+
+    #[test]
+    fn batch_rejects_bad_audio_format_values() {
+        assert!(normalize_audio_format(Some("flac".into())).is_ok());
+        assert!(normalize_audio_format(Some("ogg".into())).is_err());
     }
 }

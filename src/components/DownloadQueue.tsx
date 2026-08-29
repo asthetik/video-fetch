@@ -8,6 +8,7 @@ import {
 import { api } from "../lib/tauri";
 import { logUi } from "../lib/activityLog";
 import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
+import { formatDuration } from "../lib/spaceFormat";
 import type { DownloadJob, JobStatus } from "../types";
 
 interface DownloadProgressPayload {
@@ -55,14 +56,7 @@ function formatEta(seconds?: number | null): string | null {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) {
     return null;
   }
-  const total = Math.round(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  }
-  return `${m}:${String(s).padStart(2, "0")}`;
+  return formatDuration(Math.round(seconds));
 }
 
 function progressMeta(job: DownloadJob): string | null {

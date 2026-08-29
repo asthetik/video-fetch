@@ -14,15 +14,16 @@ mod playurl;
 mod resolve_cache;
 mod settings;
 mod sidecar;
+mod space;
 mod wbi;
 mod ytdlp;
 
 use commands::{
     build_app_state, cancel_all_jobs, cancel_job, check_download_conflict, clear_auth,
-    clear_finished_jobs, clear_logs, delete_job, enqueue_download, get_auth_status, get_settings,
-    import_cookies_path, list_jobs, list_log_files, log_ui_events, open_path, pick_cookies_file,
-    pick_save_dir, preview_name, read_log_tail, resolve_url, retry_job, save_settings,
-    start_bilibili_login,
+    clear_finished_jobs, clear_logs, delete_job, detect_url, enqueue_download, get_auth_status,
+    get_settings, import_cookies_path, list_jobs, list_log_files, log_ui_events, open_path,
+    pick_cookies_file, pick_save_dir, preview_name, read_log_tail, resolve_url, retry_job,
+    save_settings, space_enqueue_batch, space_info, space_list_videos, start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -38,9 +39,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            detect_url,
             resolve_url,
+            space_list_videos,
+            space_info,
             check_download_conflict,
             enqueue_download,
+            space_enqueue_batch,
             list_jobs,
             cancel_job,
             cancel_all_jobs,

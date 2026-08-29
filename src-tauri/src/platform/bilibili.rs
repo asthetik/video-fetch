@@ -11,6 +11,20 @@ pub fn is_bilibili_url(raw: &str) -> bool {
     )
 }
 
+/// Extract the numeric mid from a space.bilibili.com URL, tolerating query
+/// strings (spm_id_from=…) and sub-paths (/video, /uploads/video, /search).
+pub fn parse_space_mid(url: &str) -> Option<u64> {
+    let parsed = Url::parse(url.trim()).ok()?;
+    if parsed.host_str()? != "space.bilibili.com" {
+        return None;
+    }
+    let first = parsed.path_segments()?.next()?;
+    if first.is_empty() {
+        return None;
+    }
+    first.parse::<u64>().ok()
+}
+
 /// Rewrite list/watchlater URLs that point at a specific BV id into `/video/{bvid}`.
 ///
 /// Bilibili "Watch Later" browser URLs look like
@@ -149,5 +163,37 @@ mod tests {
     fn leaves_watchlater_without_bvid_unchanged() {
         let url = "https://www.bilibili.com/list/watchlater";
         assert_eq!(canonicalize_video_url(url), url);
+    }
+}
+
+#[cfg(test)]
+mod space_url_tests {
+    use super::*;
+
+    #[test]
+    fn parse_space_mid_accepts_query_and_subpaths() {
+        assert_eq!(
+            parse_space_mid("https://space.bilibili.com/470995011?spm_id_from=333.337.0.0"),
+            Some(470995011)
+        );
+        assert_eq!(
+            parse_space_mid("https://space.bilibili.com/470995011/video"),
+            Some(470995011)
+        );
+        assert_eq!(
+            parse_space_mid("https://space.bilibili.com/470995011/uploads/video"),
+            Some(470995011)
+        );
+    }
+
+    #[test]
+    fn parse_space_mid_rejects_invalid() {
+        assert_eq!(parse_space_mid("https://space.bilibili.com/abc"), None);
+        assert_eq!(parse_space_mid("https://space.bilibili.com/"), None);
+        assert_eq!(
+            parse_space_mid("https://www.bilibili.com/video/BV1xx411c7mD"),
+            None
+        );
+        assert_eq!(parse_space_mid("not a url"), None);
     }
 }

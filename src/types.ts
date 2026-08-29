@@ -77,3 +77,41 @@ export interface LogFileInfo {
   size: number;
   modified_secs: number;
 }
+
+export type UrlKind =
+  | { kind: "video" }
+  | { kind: "space"; mid: number }
+  | { kind: "invalid_space" }
+  | { kind: "unknown" };
+
+export interface SpaceVideoItem {
+  bvid: string;
+  title: string;
+  duration_secs: number;
+  play: number | null;
+  pubdate: number;
+  cover: string | null;
+}
+
+export interface SpacePage {
+  items: SpaceVideoItem[];
+  total: number;
+  degraded: boolean;
+  has_more: boolean;
+}
+
+export interface SpaceInfo {
+  name: string;
+}
+
+export interface BatchEnqueueItem {
+  bvid: string;
+  title: string;
+}
+
+export interface BatchEnqueueResult {
+  enqueued: number;
+  skipped_existing: number;
+  skipped_active: number;
+  failed: { bvid: string; error: string }[];
+}

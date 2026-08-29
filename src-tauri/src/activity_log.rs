@@ -534,8 +534,8 @@ mod tests {
     fn read_tail_survives_utf8_cut_at_block_boundary() {
         let t = dir();
         let path = t.path().join("app.2026-08-15.log");
-        // 总长 65537，块边界落在字节 1——正好把开头的多字节字符“汉”（3 字节）
-        // 从中间切开，迫使读取器跳过不完整前缀。
+        // Total length 65537; the block boundary lands at byte 1, splitting the leading
+        // 3-byte multibyte character in half and forcing the reader to skip the incomplete prefix.
         let content = format!("汉{}x\n", "x".repeat(64 * 1024 - 4));
         std::fs::write(&path, &content).unwrap();
         let lines = read_log_tail(&path, 10, 1024 * 1024).unwrap();
