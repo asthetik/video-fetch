@@ -64,6 +64,28 @@ pub struct VideoMeta {
     pub platform: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceVideoItem {
+    pub bvid: String,
+    pub title: String,
+    pub duration_secs: u64,
+    pub play: Option<u64>,
+    pub pubdate: i64,
+    pub cover: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpacePage {
+    pub items: Vec<SpaceVideoItem>,
+    pub total: u64,
+    pub degraded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    pub name: String,
+}
+
 /// Classification of a user-pasted URL; drives the home page's video/space split.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]

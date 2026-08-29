@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +46,8 @@ pub struct AppState {
     pub settings: std::sync::Mutex<AppSettings>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
+    /// space_info 进程内缓存：mid -> (UP 主名, 写入时刻)，TTL 10 分钟。
+    pub space_info_cache: std::sync::Mutex<HashMap<u64, (String, std::time::Instant)>>,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
     pub active_resolve_id: AtomicU64,
     /// Local activity log writer (files under app_dir/logs).
@@ -559,6 +562,148 @@ pub async fn resolve_url(
     Ok(final_meta)
 }
 
+fn space_http_client() -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(bilibili_view::USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))
+}
+
+#[tauri::command]
+pub async fn space_list_videos(
+    state: State<'_, AppState>,
+    mid: u64,
+    pn: u32,
+    keyword: Option<String>,
+    order: Option<String>,
+) -> AppResult<models::SpacePage> {
+    let pn = pn.max(1);
+    let order = order
+        .as_deref()
+        .and_then(crate::space::SpaceOrder::parse)
+        .unwrap_or(crate::space::SpaceOrder::Pubdate);
+    let keyword = keyword.unwrap_or_default();
+
+    let stored_cookies = state.auth.cookies()?;
+    let cookies_path = state
+        .auth
+        .materialize_cookies_file_from(stored_cookies.as_deref())?;
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
+        .filter(|s| !s.is_empty());
+    let client = space_http_client()?;
+
+    let primary = match state
+        .wbi_keys
+        .get_or_fetch(&client, cookie_header.as_deref())
+        .await
+    {
+        Ok(keys) => {
+            crate::space::fetch_arc_search(
+                &client,
+                &keys,
+                mid,
+                pn,
+                &keyword,
+                order,
+                cookie_header.as_deref(),
+            )
+            .await
+        }
+        Err(e) => Err(AppError::Message(format!("wbi keys 获取失败: {e}"))),
+    };
+
+    match primary {
+        Ok(page) => Ok(page),
+        Err(primary_err) => {
+            tracing::warn!(
+                target: "core",
+                "space: 主路径失败，尝试降级: {}",
+                primary_err
+            );
+            state.wbi_keys.invalidate();
+            if !crate::space::fallback_allowed(&keyword, order) {
+                return Err(crate::space::degraded_reject_error());
+            }
+            let page = pn as u64;
+            let size = crate::space::SPACE_PAGE_SIZE as u64;
+            let start = (page - 1) * size + 1;
+            let end = page * size;
+            crate::space::fetch_via_ytdlp(
+                &state.ytdlp.yt_dlp_path,
+                mid,
+                start,
+                end,
+                cookies_path.as_deref(),
+            )
+            .await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<models::SpaceInfo> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(600);
+    if let Ok(cache) = state.space_info_cache.lock()
+        && let Some((name, at)) = cache.get(&mid)
+        && at.elapsed() < TTL
+    {
+        return Ok(models::SpaceInfo { name: name.clone() });
+    }
+
+    let stored_cookies = state.auth.cookies()?;
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
+        .filter(|s| !s.is_empty());
+    let client = space_http_client()?;
+
+    let fetched = async {
+        let keys = state
+            .wbi_keys
+            .get_or_fetch(&client, cookie_header.as_deref())
+            .await?;
+        let params = vec![("mid".to_string(), mid.to_string())];
+        let (wts, w_rid) = wbi::sign(&keys, &params);
+        let mut req = client
+            .get(crate::space::SPACE_ACC_INFO_URL)
+            .header("Referer", format!("https://space.bilibili.com/{mid}/"))
+            .query(&params)
+            .query(&[("wts", wts.as_str()), ("w_rid", w_rid.as_str())]);
+        if let Some(c) = cookie_header {
+            req = req.header("Cookie", c);
+        }
+        let body: serde_json::Value = req
+            .send()
+            .await
+            .map_err(|e| AppError::Message(format!("空间信息请求失败: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AppError::Message(format!("空间信息 JSON 解析失败: {e}")))?;
+        crate::space::parse_acc_info(&body)
+    }
+    .await;
+
+    match fetched {
+        Ok(name) => {
+            if let Ok(mut cache) = state.space_info_cache.lock() {
+                cache.insert(mid, (name.clone(), std::time::Instant::now()));
+            }
+            Ok(models::SpaceInfo { name })
+        }
+        // spec：acc/info 失败不阻塞列表，UI 以「共 N 个视频」缺省。
+        Err(e) => {
+            tracing::warn!(target: "core", "space: acc/info 失败（UI 缺省）: {e}");
+            Ok(models::SpaceInfo {
+                name: String::new(),
+            })
+        }
+    }
+}
+
 #[tauri::command]
 pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppResult<DownloadJob> {
     if args.page_indexes.is_empty() {
@@ -1069,6 +1214,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         settings: std::sync::Mutex::new(settings),
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
+        space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
     })

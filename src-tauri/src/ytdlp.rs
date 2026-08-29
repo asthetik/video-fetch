@@ -699,7 +699,7 @@ fn missing_yt_dlp_message() -> String {
 /// On Windows, spawn without a console window (CREATE_NO_WINDOW).
 /// Otherwise GUI launches of yt-dlp briefly show a black terminal window.
 #[cfg_attr(not(windows), allow(unused_variables))]
-fn hide_windows_console(cmd: &mut Command) {
+pub(crate) fn hide_windows_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
