@@ -93,7 +93,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
             {mode === "video" ? (
               <div>
                 <label className="field-label" htmlFor="batch-video-tier">
-                  清晰度（统一应用到全部选中视频）
+                  清晰度
                 </label>
                 <select
                   id="batch-video-tier"
