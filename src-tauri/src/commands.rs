@@ -328,6 +328,21 @@ fn tauri_cookie_to_app(c: &tauri::webview::Cookie<'_>) -> Cookie {
     }
 }
 
+/// Pure URL classification, no network. Space URLs enter the list view;
+/// everything else keeps the existing resolve flow (and its errors).
+#[tauri::command]
+pub fn detect_url(url: String) -> models::UrlKind {
+    if let Some(mid) = platform::parse_space_mid(&url) {
+        return models::UrlKind::Space { mid };
+    }
+    let canonical = platform::canonicalize_video_url(&url);
+    if platform::detect_platform(&canonical).is_some() {
+        models::UrlKind::Video
+    } else {
+        models::UrlKind::Unknown
+    }
+}
+
 #[tauri::command]
 pub async fn resolve_url(
     app: AppHandle,
@@ -1185,5 +1200,26 @@ mod tests {
         );
         let already = "%(title)s [P%(playlist_index)s].%(ext)s";
         assert_eq!(ensure_playlist_index_template(already, true), already);
+    }
+}
+
+#[cfg(test)]
+mod detect_url_tests {
+    use super::*;
+
+    #[test]
+    fn detect_url_classifies_three_kinds() {
+        assert_eq!(
+            detect_url("https://space.bilibili.com/470995011?spm_id_from=x".into()),
+            models::UrlKind::Space { mid: 470995011 }
+        );
+        assert_eq!(
+            detect_url("https://www.bilibili.com/video/BV1xx411c7mD".into()),
+            models::UrlKind::Video
+        );
+        assert_eq!(
+            detect_url("https://example.com/nope".into()),
+            models::UrlKind::Unknown
+        );
     }
 }

@@ -64,6 +64,15 @@ pub struct VideoMeta {
     pub platform: String,
 }
 
+/// Classification of a user-pasted URL; drives the home page's video/space split.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UrlKind {
+    Video,
+    Space { mid: u64 },
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadJob {
     pub id: String,
@@ -121,4 +130,24 @@ pub struct CancelAllResult {
 #[serde(rename_all = "camelCase")]
 pub struct ClearFinishedResult {
     pub cleared: u64,
+}
+
+#[cfg(test)]
+mod url_kind_tests {
+    use super::*;
+
+    #[test]
+    fn url_kind_serializes_tagged() {
+        let v = serde_json::to_value(UrlKind::Space { mid: 470995011 }).unwrap();
+        assert_eq!(v["kind"], "space");
+        assert_eq!(v["mid"], 470995011);
+        assert_eq!(
+            serde_json::to_value(UrlKind::Video).unwrap()["kind"],
+            "video"
+        );
+        assert_eq!(
+            serde_json::to_value(UrlKind::Unknown).unwrap()["kind"],
+            "unknown"
+        );
+    }
 }
