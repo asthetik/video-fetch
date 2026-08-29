@@ -792,6 +792,126 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     last.ok_or_else(|| AppError::Message("未能创建下载任务".into()))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SpaceBatchArgs {
+    pub items: Vec<models::BatchEnqueueItem>,
+    pub format_id: String,
+    #[serde(default)]
+    pub audio_format: Option<String>,
+}
+
+fn record_batch_outcome(
+    result: &mut models::BatchEnqueueResult,
+    kind: crate::download::EnqueueKind,
+) {
+    match kind {
+        crate::download::EnqueueKind::Enqueued => result.enqueued += 1,
+        crate::download::EnqueueKind::AlreadyExists => result.skipped_existing += 1,
+        crate::download::EnqueueKind::DuplicateActive => result.skipped_active += 1,
+    }
+}
+
+/// Fixed tier set offered by the batch dialog (spec §4.4). Anything else is
+/// rejected instead of flowing an arbitrary selector string into yt-dlp -f.
+const BATCH_FORMAT_TIERS: &[&str] = &[
+    "bestvideo+bestaudio/best",
+    "vh1080",
+    "vh720",
+    "vh480",
+    "bestaudio",
+];
+
+/// Pure batch-argument guards, extracted for testability: known tier, non-empty
+/// items, audio mode carries an audio format, FLAC only on uncapped tiers.
+fn validate_space_batch_args(
+    items: &[models::BatchEnqueueItem],
+    format_id: &str,
+    audio_format: Option<&str>,
+) -> AppResult<()> {
+    if !BATCH_FORMAT_TIERS.contains(&format_id) {
+        return Err(AppError::Message(format!("不支持的批量档位: {format_id}")));
+    }
+    if items.is_empty() {
+        return Err(AppError::Message("请至少选择一个视频".into()));
+    }
+    if audio_format.is_none() && format_id.starts_with("bestaudio") {
+        return Err(AppError::Message("音频批量必须指定音频格式".into()));
+    }
+    if audio_format == Some("flac") && crate::ytdlp::audio_tier_cap(format_id).is_some() {
+        return Err(AppError::Message("FLAC 仅支持 Hi-Res 无损档位".into()));
+    }
+    Ok(())
+}
+
+/// Batch enqueue: no per-video resolve; the unified tier goes straight to yt-dlp (spec §4.4).
+/// Async so the per-item DB/disk loop never blocks the main thread on large batches.
+#[tauri::command]
+pub async fn space_enqueue_batch(
+    state: State<'_, AppState>,
+    args: SpaceBatchArgs,
+) -> AppResult<models::BatchEnqueueResult> {
+    let audio_format = normalize_audio_format(args.audio_format.clone())?;
+    validate_space_batch_args(&args.items, &args.format_id, audio_format.as_deref())?;
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::Message("settings lock poisoned".into()))?
+        .clone();
+    naming::validate_output_template(&settings.filename_template).map_err(AppError::Message)?;
+    let _ = rematerialize_cookies(&state)?;
+
+    let mut result = models::BatchEnqueueResult {
+        enqueued: 0,
+        skipped_existing: 0,
+        skipped_active: 0,
+        failed: Vec::new(),
+    };
+    for item in args.items {
+        if !crate::space::is_valid_bvid(&item.bvid) {
+            result.failed.push(models::BatchEnqueueFailed {
+                bvid: item.bvid,
+                error: "无效的视频 ID".into(),
+            });
+            continue;
+        }
+        let title = if item.title.is_empty() {
+            item.bvid.clone()
+        } else {
+            item.title.clone()
+        };
+        let mut job = DownloadJob {
+            id: String::new(),
+            url: format!("https://www.bilibili.com/video/{}", item.bvid),
+            video_id: item.bvid.clone(),
+            page_index: 1,
+            format_id: args.format_id.clone(),
+            audio_format: audio_format.clone(),
+            title,
+            output_template: settings.filename_template.clone(),
+            status: JobStatus::Pending,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+        };
+        match state.downloads.enqueue_classified(&mut job, false) {
+            Ok(kind) => record_batch_outcome(&mut result, kind),
+            Err(e) => result.failed.push(models::BatchEnqueueFailed {
+                bvid: item.bvid,
+                error: e.to_string(),
+            }),
+        }
+    }
+    tracing::info!(
+        target: "core",
+        "space: 批量入队 成功 {} / 已存在 {} / 队列重复 {} / 失败 {}",
+        result.enqueued,
+        result.skipped_existing,
+        result.skipped_active,
+        result.failed.len()
+    );
+    Ok(result)
+}
+
 #[tauri::command]
 pub fn list_jobs(state: State<'_, AppState>) -> AppResult<Vec<DownloadJob>> {
     state.downloads.list()
@@ -1367,5 +1487,58 @@ mod detect_url_tests {
             detect_url("https://example.com/nope".into()),
             models::UrlKind::Unknown
         );
+    }
+}
+
+#[cfg(test)]
+mod space_batch_tests {
+    use super::*;
+    use crate::download::EnqueueKind;
+
+    #[test]
+    fn record_batch_outcome_counts_kinds() {
+        let mut r = models::BatchEnqueueResult {
+            enqueued: 0,
+            skipped_existing: 0,
+            skipped_active: 0,
+            failed: Vec::new(),
+        };
+        record_batch_outcome(&mut r, EnqueueKind::Enqueued);
+        record_batch_outcome(&mut r, EnqueueKind::AlreadyExists);
+        record_batch_outcome(&mut r, EnqueueKind::DuplicateActive);
+        record_batch_outcome(&mut r, EnqueueKind::Enqueued);
+        assert_eq!(r.enqueued, 2);
+        assert_eq!(r.skipped_existing, 1);
+        assert_eq!(r.skipped_active, 1);
+        assert!(r.failed.is_empty());
+    }
+
+    #[test]
+    fn space_batch_args_validation() {
+        let items = |n: usize| {
+            (0..n)
+                .map(|i| models::BatchEnqueueItem {
+                    bvid: format!("BV{i}"),
+                    title: "t".into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(validate_space_batch_args(&items(1), "vh1080", None).is_ok());
+        assert!(
+            validate_space_batch_args(&items(1), "bestvideo+bestaudio/best", None).is_ok()
+        );
+        assert!(validate_space_batch_args(&items(1), "worstvideo", None).is_err());
+        assert!(validate_space_batch_args(&items(0), "vh1080", None).is_err());
+        assert!(validate_space_batch_args(&items(1), "bestaudio", None).is_err());
+        assert!(validate_space_batch_args(&items(1), "bestaudio", Some("flac")).is_ok());
+        assert!(
+            validate_space_batch_args(&items(1), "bestaudio[abr<=192]", Some("flac")).is_err()
+        );
+    }
+
+    #[test]
+    fn batch_rejects_bad_audio_format_values() {
+        assert!(normalize_audio_format(Some("flac".into())).is_ok());
+        assert!(normalize_audio_format(Some("ogg".into())).is_err());
     }
 }

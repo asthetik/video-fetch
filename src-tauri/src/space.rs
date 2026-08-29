@@ -79,12 +79,14 @@ pub async fn fetch_arc_search(
 
 /// 非 0 code（含风控 -412）→ Err，由调用方做降级判定。
 pub fn parse_arc_search(v: &Value) -> AppResult<SpacePage> {
-    if v.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+    let code = v.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
         let msg = v
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        return Err(AppError::Message(format!("空间列表 code != 0: {msg}")));
+        // Keep the numeric code (e.g. -412 risk control) in the message for triage.
+        return Err(AppError::Message(format!("空间列表 code={code}: {msg}")));
     }
     let data = v
         .get("data")
@@ -132,12 +134,13 @@ pub fn parse_arc_search(v: &Value) -> AppResult<SpacePage> {
 
 /// acc/info 的 data.name；code != 0 → Err（命令层转为空 name 缺省）。
 pub fn parse_acc_info(v: &Value) -> AppResult<String> {
-    if v.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+    let code = v.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
         let msg = v
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        return Err(AppError::Message(format!("空间信息 code != 0: {msg}")));
+        return Err(AppError::Message(format!("空间信息 code={code}: {msg}")));
     }
     Ok(v.pointer("/data/name")
         .and_then(Value::as_str)
@@ -162,6 +165,15 @@ fn normalize_cover(pic: &str) -> String {
     } else {
         pic.to_string()
     }
+}
+
+/// Bvid shape: "BV" + 10 ASCII alphanumerics. Batch items cross the IPC
+/// boundary; an invalid bvid becomes a per-item failure instead of a garbage URL.
+pub fn is_valid_bvid(bvid: &str) -> bool {
+    let Some(rest) = bvid.strip_prefix("BV") else {
+        return false;
+    };
+    rest.len() == 10 && rest.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// yt-dlp flat-playlist fallback. `start`/`end` are 1-based inclusive bounds
@@ -317,10 +329,7 @@ mod tests {
     fn parse_arc_search_rejects_nonzero_code() {
         let body = json!({ "code": -412, "message": "请求被拦截" });
         let err = parse_arc_search(&body).unwrap_err().to_string();
-        assert!(
-            err.contains("-412") || err.contains("请求被拦截"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("-412"), "risk-control code must surface: {err}");
     }
 
     #[test]
@@ -352,6 +361,16 @@ mod tests {
         assert_eq!(page.items[1].duration_secs, 0);
         assert_eq!(page.items[1].pubdate, 0);
         assert_eq!(page.items[1].cover, None);
+    }
+
+    #[test]
+    fn is_valid_bvid_shape() {
+        assert!(is_valid_bvid("BV1xx411c7mD"));
+        assert!(!is_valid_bvid("BV1xx411c7m"));
+        assert!(!is_valid_bvid("BV1xx411c7mDX"));
+        assert!(!is_valid_bvid("av170001"));
+        assert!(!is_valid_bvid("BV../../evil"));
+        assert!(!is_valid_bvid(""));
     }
 
     #[test]

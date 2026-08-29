@@ -154,6 +154,26 @@ pub struct ClearFinishedResult {
     pub cleared: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchEnqueueItem {
+    pub bvid: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchEnqueueFailed {
+    pub bvid: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchEnqueueResult {
+    pub enqueued: u32,
+    pub skipped_existing: u32,
+    pub skipped_active: u32,
+    pub failed: Vec<BatchEnqueueFailed>,
+}
+
 #[cfg(test)]
 mod url_kind_tests {
     use super::*;
