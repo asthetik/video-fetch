@@ -21,7 +21,7 @@ const VIDEO_TIERS = [
 const AUDIO_TIERS = [
   { formatId: "bestaudio", audioFormat: "m4a", label: "m4a（AAC 最高音质）" },
   { formatId: "bestaudio", audioFormat: "mp3", label: "mp3" },
-  { formatId: "bestaudio", audioFormat: "flac", label: "FLAC（需 Hi-Res，无音源的视频将失败）" },
+  { formatId: "bestaudio", audioFormat: "flac", label: "FLAC（需 Hi-Res 无损音源）" },
 ];
 
 export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchFormatDialogProps) {
