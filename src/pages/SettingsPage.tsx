@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/tauri";
-import { logUi } from "../lib/activityLog";
 import { AuthStatus } from "../components/AuthStatus";
 import { NamingPreview } from "../components/NamingPreview";
 import type { AppSettings } from "../types";
@@ -32,7 +31,6 @@ export function SettingsPage() {
   const persist = useCallback(async (next: AppSettings) => {
     try {
       await api.saveSettings(next);
-      logUi("settings", "保存设置", "info");
       setMessage((prev) =>
         prev && prev.startsWith("无法保存设置") ? null : prev,
       );

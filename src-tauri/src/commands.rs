@@ -503,7 +503,6 @@ pub async fn resolve_url(
             None
         };
 
-    let used_playurl = playurl_formats.is_some();
     let final_meta = match (view_meta, playurl_formats) {
         (Some(mut view), Some((formats, audio_formats))) => {
             view.formats = formats;
@@ -546,14 +545,6 @@ pub async fn resolve_url(
     if !is_current() {
         return Err(AppError::Message("解析已取消（有更新的请求）".into()));
     }
-    let source = if used_playurl { "playurl" } else { "yt-dlp" };
-    tracing::info!(
-        target: "core",
-        "resolve: 成功 {}（{} P，{} 个清晰度，{source}）",
-        final_meta.id,
-        final_meta.pages.len(),
-        final_meta.formats.len()
-    );
     for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
         state
             .downloads

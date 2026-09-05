@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { logUi } from "../lib/activityLog";
 import { formatDate, formatDuration, formatPlayCount } from "../lib/spaceFormat";
 import { api } from "../lib/tauri";
 import type { SpacePage, SpaceVideoItem } from "../types";
@@ -29,7 +28,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
   const [failedItems, setFailedItems] = useState<{ bvid: string; error: string }[]>([]);
   const requestIdRef = useRef(0);
   const pageRef = useRef(1);
-  // The exact request that failed, so 重试 re-issues it: retrying a failed
+  // The exact request that failed, so retry re-issues it: retrying a failed
   // load-more must re-append, not replace the accumulated pages with one.
   const failedReqRef = useRef<{ pn: number; append: boolean }>({ pn: 1, append: false });
   const selectAllRef = useRef<HTMLInputElement>(null);
@@ -130,7 +129,6 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     setDialogOpen(false);
     setSummary(null);
     setFailedItems([]);
-    logUi("download", `空间批量下载 ${selected.size} 个`, "info");
     try {
       const result = await api.spaceEnqueueBatch({
         items: [...selected.values()].map((i) => ({ bvid: i.bvid, title: i.title })),

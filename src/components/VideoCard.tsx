@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/tauri";
-import { logUi } from "../lib/activityLog";
 import type { FormatOption, VideoMeta } from "../types";
 
 /** Highest resolution first, then highest bitrate within the same resolution. */
@@ -147,12 +146,6 @@ export function VideoCard({
     setInfo(null);
     try {
       const pageIndexes = [...selectedPages].sort((a, b) => a - b);
-      const chosen =
-        mode === "audio"
-          ? sortedAudioFormats.find((f) => f.format_id === selectedAudioId)?.label ??
-            selectedAudioId
-          : sortedFormats.find((f) => f.format_id === selectedFormatId)?.label ??
-            selectedFormatId;
       const container =
         mode === "audio"
           ? audioFormat === "flac" && !audioIsHires
@@ -160,11 +153,6 @@ export function VideoCard({
             : audioFormat
           : null;
       const mediaLabel = mode === "audio" ? "音频" : "视频";
-      logUi(
-        "download",
-        `点击下载（${mode === "audio" ? "音频" : "视频"}，${chosen}，${pageIndexes.length} P）`,
-        "info",
-      );
       const settings = await api.getSettings();
       const conflict = await api.checkDownloadConflict({
         video_id: meta.id,

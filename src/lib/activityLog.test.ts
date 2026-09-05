@@ -2,14 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createActivityLogger,
-  describeClickTarget,
   type UiLogEvent,
 } from "./activityLog.ts";
 
-test("describeClickTarget prefers aria-label then text then tag#id", () => {
-  assert.equal(describeClickTarget({ tagName: "BUTTON", ariaLabel: "下载" }), "下载");
-  assert.equal(describeClickTarget({ tagName: "BUTTON", text: "  立即\n下载  " }), "立即 下载");
-  assert.equal(describeClickTarget({ tagName: "BUTTON", id: "go", text: "" }), "button#go");
+test("logUi defaults to error level (whitelist-safe default)", async () => {
+  const seen: UiLogEvent[] = [];
+  const logger = createActivityLogger({
+    flushFn: async (events) => {
+      seen.push(...events);
+    },
+  });
+  logger.logUi("cat", "no level passed");
+  await logger.flushNow();
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].level, "error");
 });
 
 test("flushes when batch size is reached", async () => {

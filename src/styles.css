@@ -1032,11 +1032,6 @@ body {
   line-height: 1.5;
 }
 
-.log-badge-debug {
-  color: var(--muted);
-  border-color: var(--border);
-}
-
 .log-badge-info {
   color: var(--accent);
   border-color: var(--accent);
