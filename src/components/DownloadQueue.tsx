@@ -58,31 +58,6 @@ function formatEta(seconds?: number | null): string | null {
   return formatDuration(Math.round(seconds));
 }
 
-function progressMeta(job: DownloadJob): string | null {
-  if (job.status !== "running") {
-    return null;
-  }
-  const parts: string[] = [];
-  const speed = formatSpeed(job.speed);
-  if (speed) {
-    parts.push(speed);
-  }
-  const eta = formatEta(job.eta);
-  if (eta) {
-    parts.push(`剩余 ${eta}`);
-  }
-  if (
-    job.downloaded_bytes != null &&
-    job.total_bytes != null &&
-    job.total_bytes > 0
-  ) {
-    parts.push(
-      `${formatBytes(job.downloaded_bytes)} / ${formatBytes(job.total_bytes)}`,
-    );
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
-}
-
 function mergeJob(existing: DownloadJob, patch: DownloadProgressPayload): DownloadJob {
   const terminal = patch.status === "done" || patch.status === "failed";
   return {
@@ -235,32 +210,40 @@ export function DownloadQueue({
   const cancellableCount = active.length;
 
   function renderJobItem(job: DownloadJob) {
-    const meta = progressMeta(job);
+    const speed = job.status === "running" ? formatSpeed(job.speed) : null;
+    const eta = job.status === "running" ? formatEta(job.eta) : null;
+    const bytes =
+      job.status === "running" &&
+      job.downloaded_bytes != null &&
+      job.total_bytes != null &&
+      job.total_bytes > 0
+        ? `${formatBytes(job.downloaded_bytes)} / ${formatBytes(job.total_bytes)}`
+        : null;
+    const hasData = Boolean(speed || eta || bytes);
     return (
       <li key={job.id} className="queue-item">
-        <div className="queue-item-header">
-          <p className="queue-title">
-            {job.title}
-            {job.page_index > 1 ? ` · P${job.page_index}` : ""}
-          </p>
-          <span className={`queue-status ${job.status}`}>
-            {STATUS_LABEL[job.status]}
-            {job.status === "running" && ` ${Math.round(job.progress * 100)}%`}
-          </span>
-        </div>
-
-        {(job.status === "running" || job.status === "pending") && (
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{ width: `${Math.round(job.progress * 100)}%` }}
-            />
+        <div className="queue-main">
+          <div className="queue-item-header">
+            <p className="queue-title">
+              {job.title}
+              {job.page_index > 1 ? ` · P${job.page_index}` : ""}
+            </p>
+            <span className={`queue-status ${job.status}`}>
+              {STATUS_LABEL[job.status]}
+              {job.status === "running" && ` ${Math.round(job.progress * 100)}%`}
+            </span>
           </div>
-        )}
 
-        {meta && <p className="queue-progress-meta">{meta}</p>}
+          {(job.status === "running" || job.status === "pending") && (
+            <div className="progress-bar">
+              <div
+                className="progress-fill"
+                style={{ width: `${Math.round(job.progress * 100)}%` }}
+              />
+            </div>
+          )}
 
-        {job.error && <p className="queue-error">{job.error}</p>}
+          {job.error && <p className="queue-error">{job.error}</p>}
 
         <div className="queue-actions">
           {(job.status === "pending" || job.status === "running") && (
@@ -303,6 +286,14 @@ export function DownloadQueue({
             删除
           </button>
         </div>
+        </div>
+        {hasData && (
+          <div className="queue-data">
+            {speed && <b>{speed}</b>}
+            {bytes && <span>{bytes}</span>}
+            {eta && <span>剩余 {eta}</span>}
+          </div>
+        )}
       </li>
     );
   }
