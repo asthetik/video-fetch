@@ -8,8 +8,13 @@ use std::sync::Mutex;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// Current-generation log file names (size-only rotation, at most 2 files):
+/// `app.log` is the active file; once full it is rotated over `app.old.log`.
+pub const ACTIVE_LOG_NAME: &str = "app.log";
+pub const OLD_LOG_NAME: &str = "app.old.log";
+/// Prefix of legacy date-named files (`app.YYYY-MM-DD[.seq].log`).
 pub const LOG_PREFIX: &str = "app.";
-pub const DEFAULT_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const TAIL_MAX_LINES: usize = 1000;
 pub const TAIL_MAX_BYTES: u64 = 256 * 1024;
@@ -66,7 +71,7 @@ pub fn install(
     let today = chrono::Local::now().date_naive();
     cleanup_old_logs(&logs_dir, retention_days, today)?;
 
-    let rotator = Rotator::open(logs_dir.clone(), today, max_file_size)?;
+    let rotator = Rotator::open(logs_dir.clone(), max_file_size)?;
     let (non_blocking, guard) = tracing_appender::non_blocking(rotator);
 
     let file_layer = tracing_subscriber::fmt::layer()
@@ -74,8 +79,13 @@ pub fn install(
         .with_ansi(false)
         .with_target(false)
         .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+    // Release builds pin the filter to info (no verbose mode); debug builds
+    // keep RUST_LOG as a developer escape hatch.
+    #[cfg(debug_assertions)]
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    #[cfg(not(debug_assertions))]
+    let filter = tracing_subscriber::EnvFilter::new("info");
 
     #[cfg(debug_assertions)]
     {
@@ -145,14 +155,9 @@ pub fn clean_log_message(input: &str) -> String {
     }
 }
 
-fn file_name(date: NaiveDate, seq: u32) -> String {
-    if seq == 0 {
-        format!("{LOG_PREFIX}{date}.log")
-    } else {
-        format!("{LOG_PREFIX}{date}.{seq}.log")
-    }
-}
-
+/// Parse a legacy date-named log file. The fixed current-generation names
+/// (`app.log`/`app.old.log`) are not handled here; callers compare them
+/// explicitly. Used only for legacy cleanup/listing/clearing.
 fn parse_file_name(name: &str) -> Option<(NaiveDate, u32)> {
     let rest = name.strip_prefix(LOG_PREFIX)?.strip_suffix(".log")?;
     let (date_str, seq_str) = match rest.rsplit_once('.') {
@@ -174,87 +179,70 @@ fn open_append(path: &Path) -> AppResult<File> {
     Ok(file)
 }
 
-fn scan_max_seq(dir: &Path, date: NaiveDate) -> AppResult<u32> {
-    let mut max_seq: Option<u32> = None;
-    for entry in
-        fs::read_dir(dir).map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?
-    {
-        let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((d, seq)) = parse_file_name(&name)
-            && d == date
-        {
-            max_seq = Some(max_seq.map_or(seq, |m| m.max(seq)));
-        }
-    }
-    Ok(max_seq.unwrap_or(0))
-}
-
+/// Size-only rotating log writer:
+///
+/// ```text
+/// app.log ──reaches max_size──►  1. remove app.old.log (best effort; Windows
+///                                    rename does not guarantee overwriting)
+///                                 2. close the current handle (Windows cannot
+///                                    rename an open file)
+///                                 3. rename app.log → app.old.log
+///                                 4. open_append app.log (fresh, starts empty)
+/// ```
+///
+/// Overwriting `app.old.log` intentionally discards the previous generation
+/// (disk usage stays bounded at ≤ 2 × max_size).
 pub(crate) struct Rotator {
     dir: PathBuf,
-    date: NaiveDate,
-    seq: u32,
     max_size: u64,
-    file: File,
-    now: Box<dyn Fn() -> NaiveDate + Send>,
+    file: Option<File>,
 }
 
 impl Rotator {
-    pub(crate) fn open(dir: PathBuf, date: NaiveDate, max_size: u64) -> AppResult<Self> {
-        Self::open_with_now(
-            dir,
-            date,
-            max_size,
-            Box::new(|| chrono::Local::now().date_naive()),
-        )
-    }
-
-    fn open_with_now(
-        dir: PathBuf,
-        date: NaiveDate,
-        max_size: u64,
-        now: Box<dyn Fn() -> NaiveDate + Send>,
-    ) -> AppResult<Self> {
-        let seq = scan_max_seq(&dir, date)?;
-        let path = dir.join(file_name(date, seq));
-        let file = open_append(&path)?;
+    pub(crate) fn open(dir: PathBuf, max_size: u64) -> AppResult<Self> {
+        let file = open_append(&dir.join(ACTIVE_LOG_NAME))?;
         Ok(Self {
             dir,
-            date,
-            seq,
             max_size,
-            file,
-            now,
+            file: Some(file),
         })
     }
 
     fn rotate(&mut self) -> AppResult<()> {
-        let seq = scan_max_seq(&self.dir, self.date)?.max(self.seq) + 1;
-        let path = self.dir.join(file_name(self.date, seq));
-        self.file = open_append(&path)?;
-        self.seq = seq;
+        let old = self.dir.join(OLD_LOG_NAME);
+        let active = self.dir.join(ACTIVE_LOG_NAME);
+        // 1. Remove the previous generation first (ignore NotFound).
+        let _ = fs::remove_file(&old);
+        // 2. Close the handle before renaming. If the rename fails, reopen the
+        //    active file and fall back to append mode: only this rotation is
+        //    lost, later writes will trigger it again.
+        self.file = None;
+        if let Err(e) = fs::rename(&active, &old) {
+            self.file = Some(open_append(&active)?);
+            return Err(AppError::Message(format!("滚动日志文件失败: {e}")));
+        }
+        // 4. Open the fresh active file.
+        self.file = Some(open_append(&active)?);
         Ok(())
     }
 
     fn write_chunk(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let today = (self.now)();
-        if today != self.date {
-            // A long-running session crossed midnight: start the new day's file
-            // instead of appending to yesterday's filename (which cleanup would
-            // later delete based on its stale name).
-            self.date = today;
-            self.seq = 0;
-            self.file =
-                open_append(&self.dir.join(file_name(today, 0))).map_err(std::io::Error::other)?;
-        }
         // Trust the on-disk length rather than a manual counter: external
-        // truncation (clear_all_logs) cannot desynchronize it, and one stat per
-        // event batch is negligible.
-        let size = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+        // truncation (clear_all_logs) cannot desynchronize it, and one stat
+        // per event batch is negligible.
+        let size = self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
         if self.max_size > 0 && size + buf.len() as u64 > self.max_size {
             self.rotate().map_err(std::io::Error::other)?;
         }
-        self.file.write_all(buf)?;
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other("日志文件句柄不可用"));
+        };
+        file.write_all(buf)?;
         Ok(buf.len())
     }
 }
@@ -265,7 +253,10 @@ impl Write for Rotator {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -288,9 +279,20 @@ pub fn cleanup_old_logs(dir: &Path, retention_days: u32, today: NaiveDate) -> Ap
     Ok(removed)
 }
 
-/// Delete every log file except the active day, whose files are truncated in
-/// place instead — the active writer keeps an open handle (Windows cannot
-/// delete an open file), and truncating leaves that handle valid.
+fn truncate_file(path: &Path) -> AppResult<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| AppError::Message(format!("打开日志失败: {e}")))?;
+    file.set_len(0)
+        .map_err(|e| AppError::Message(format!("清空日志失败: {e}")))?;
+    Ok(())
+}
+
+/// Three file kinds, three treatments: the active `app.log` is truncated in
+/// place (the writer keeps an open handle, and Windows cannot delete an open
+/// file, so truncation is the safe option); `app.old.log` is removed; legacy
+/// date-named files are truncated when from today, removed otherwise.
 pub fn clear_all_logs(dir: &Path, today: NaiveDate) -> AppResult<usize> {
     let mut cleared = 0;
     for entry in
@@ -298,16 +300,22 @@ pub fn clear_all_logs(dir: &Path, today: NaiveDate) -> AppResult<usize> {
     {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ACTIVE_LOG_NAME {
+            truncate_file(&entry.path())?;
+            cleared += 1;
+            continue;
+        }
+        if name == OLD_LOG_NAME {
+            fs::remove_file(entry.path())
+                .map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
+            cleared += 1;
+            continue;
+        }
         let Some((date, _)) = parse_file_name(&name) else {
             continue;
         };
         if date == today {
-            let file = OpenOptions::new()
-                .write(true)
-                .open(entry.path())
-                .map_err(|e| AppError::Message(format!("打开日志失败: {e}")))?;
-            file.set_len(0)
-                .map_err(|e| AppError::Message(format!("清空日志失败: {e}")))?;
+            truncate_file(&entry.path())?;
         } else {
             fs::remove_file(entry.path())
                 .map_err(|e| AppError::Message(format!("删除日志失败: {e}")))?;
@@ -317,6 +325,10 @@ pub fn clear_all_logs(dir: &Path, today: NaiveDate) -> AppResult<usize> {
     Ok(cleared)
 }
 
+/// List the log directory: fixed current-generation names (explicit
+/// whitelist) plus legacy date-named files. Sorted by modification time,
+/// newest first: one rule covers both the old/new coexistence window and the
+/// new-files-only steady state.
 pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
     let mut files = Vec::new();
     for entry in
@@ -324,7 +336,7 @@ pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
     {
         let entry = entry.map_err(|e| AppError::Message(format!("读取日志目录失败: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if parse_file_name(&name).is_none() {
+        if parse_file_name(&name).is_none() && name != ACTIVE_LOG_NAME && name != OLD_LOG_NAME {
             continue;
         }
         let meta = entry
@@ -342,7 +354,7 @@ pub fn list_log_files(dir: &Path) -> AppResult<Vec<LogFileInfo>> {
             modified_secs,
         });
     }
-    files.sort_by_key(|f| std::cmp::Reverse(parse_file_name(&f.name)));
+    files.sort_by_key(|f| std::cmp::Reverse(f.modified_secs));
     Ok(files)
 }
 
@@ -403,51 +415,36 @@ mod tests {
     }
 
     #[test]
-    fn rotator_opens_next_numbered_file_without_rename() {
+    fn rotator_rotates_app_log_into_app_old_log_on_size() {
         let t = dir();
-        let d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
-        let mut rotator =
-            Rotator::open_with_now(t.path().to_path_buf(), d, 10, Box::new(move || d)).unwrap();
+        let mut rotator = Rotator::open(t.path().to_path_buf(), 10).unwrap();
         rotator.write_chunk(b"123456").unwrap();
-        assert_eq!(rotator.seq, 0);
-        rotator.write_chunk(b"67890").unwrap(); // 6 + 5 > 10 -> rotate
-        assert_eq!(rotator.seq, 1);
-        assert!(t.path().join("app.2026-08-15.log").exists());
-        assert!(t.path().join("app.2026-08-15.1.log").exists());
-    }
-
-    #[test]
-    fn rotator_resumes_from_highest_existing_sequence() {
-        let t = dir();
-        let d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
-        std::fs::write(t.path().join("app.2026-08-15.3.log"), b"old").unwrap();
-        let mut rotator =
-            Rotator::open_with_now(t.path().to_path_buf(), d, 10_000, Box::new(move || d)).unwrap();
-        assert_eq!(rotator.seq, 3);
-        rotator.write_chunk(b"x").unwrap();
+        rotator.write_chunk(b"67890").unwrap(); // 6 + 5 > 10 → rotate
         assert_eq!(
-            std::fs::read_to_string(t.path().join("app.2026-08-15.3.log")).unwrap(),
-            "oldx"
+            std::fs::read_to_string(t.path().join("app.old.log")).unwrap(),
+            "123456"
+        );
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("app.log")).unwrap(),
+            "67890"
         );
     }
 
     #[test]
-    fn rotator_rolls_to_new_day_at_midnight() {
+    fn rotate_overwrites_existing_app_old_log() {
         let t = dir();
-        let day1 = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
-        let day2 = NaiveDate::from_ymd_opt(2026, 8, 16).unwrap();
-        let current = std::sync::Arc::new(std::sync::Mutex::new(day1));
-        let now_ref = std::sync::Arc::clone(&current);
-        let now: Box<dyn Fn() -> NaiveDate + Send> = Box::new(move || *now_ref.lock().unwrap());
-        let mut rotator =
-            Rotator::open_with_now(t.path().to_path_buf(), day1, 10_000, now).unwrap();
-        rotator.write_chunk(b"day one").unwrap();
-        *current.lock().unwrap() = day2;
-        rotator.write_chunk(b"day two").unwrap();
-        assert!(t.path().join("app.2026-08-16.log").exists());
+        std::fs::write(t.path().join("app.old.log"), b"stale generation").unwrap();
+        std::fs::write(t.path().join("app.log"), b"first gen").unwrap();
+        // open() appends to the existing app.log (9 bytes); this write triggers rotation.
+        let mut rotator = Rotator::open(t.path().to_path_buf(), 10).unwrap();
+        rotator.write_chunk(b"second gen").unwrap(); // 9 + 10 > 10 → rotate over the old generation
         assert_eq!(
-            std::fs::read_to_string(t.path().join("app.2026-08-16.log")).unwrap(),
-            "day two"
+            std::fs::read_to_string(t.path().join("app.old.log")).unwrap(),
+            "first gen"
+        );
+        assert_eq!(
+            std::fs::read_to_string(t.path().join("app.log")).unwrap(),
+            "second gen"
         );
     }
 
@@ -473,43 +470,82 @@ mod tests {
 
     #[test]
     fn clear_all_logs_deletes_old_and_truncates_today() {
+        // Legacy behavior regression: today's file truncated, older files removed.
         let t = dir();
         let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
         std::fs::write(t.path().join("app.2026-08-15.log"), b"today content").unwrap();
-        std::fs::write(t.path().join("app.2026-08-15.1.log"), b"today archive").unwrap();
-        std::fs::write(t.path().join("app.2026-08-14.log"), b"old").unwrap();
         std::fs::write(t.path().join("app.2026-08-10.log"), b"old").unwrap();
         let cleared = clear_all_logs(t.path(), today).unwrap();
-        assert_eq!(cleared, 4);
-        assert!(t.path().join("app.2026-08-15.log").exists());
-        assert!(t.path().join("app.2026-08-15.1.log").exists());
+        assert_eq!(cleared, 2);
         assert_eq!(
             std::fs::read(t.path().join("app.2026-08-15.log")).unwrap(),
             Vec::<u8>::new()
         );
-        assert!(!t.path().join("app.2026-08-14.log").exists());
         assert!(!t.path().join("app.2026-08-10.log").exists());
     }
 
     #[test]
-    fn list_returns_names_sorted_desc() {
+    fn list_recognizes_new_names_and_legacy_sorted_by_mtime() {
         let t = dir();
-        std::fs::write(t.path().join("app.2026-08-15.log"), b"a").unwrap();
-        std::fs::write(t.path().join("app.2026-08-14.log"), b"bb").unwrap();
+        // Three files with increasing mtimes: legacy < app.old.log < app.log.
+        // Order must be by modification time, newest first, regardless of
+        // name format (old/new coexistence window).
+        for (name, mtime) in [
+            ("app.2026-08-20.log", 1000u64),
+            ("app.old.log", 2000),
+            ("app.log", 3000),
+            ("not-a-log.txt", 4000),
+        ] {
+            let path = t.path().join(name);
+            std::fs::write(&path, b"x").unwrap();
+            let f = OpenOptions::new().write(true).open(&path).unwrap();
+            let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
+            f.set_times(std::fs::FileTimes::new().set_modified(at))
+                .unwrap();
+        }
         let files = list_log_files(t.path()).unwrap();
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].name, "app.2026-08-15.log");
-        assert_eq!(files[0].size, 1);
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["app.log", "app.old.log", "app.2026-08-20.log"]);
     }
 
     #[test]
-    fn list_sorts_numbered_files_numerically() {
+    fn clear_all_logs_truncates_app_log_removes_app_old_and_legacy() {
         let t = dir();
-        std::fs::write(t.path().join("app.2026-08-15.10.log"), b"x").unwrap();
-        std::fs::write(t.path().join("app.2026-08-15.2.log"), b"x").unwrap();
-        let files = list_log_files(t.path()).unwrap();
-        assert_eq!(files[0].name, "app.2026-08-15.10.log");
-        assert_eq!(files[1].name, "app.2026-08-15.2.log");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        std::fs::write(t.path().join("app.log"), b"active").unwrap();
+        std::fs::write(t.path().join("app.old.log"), b"old gen").unwrap();
+        std::fs::write(t.path().join("app.2026-08-15.log"), b"today legacy").unwrap();
+        std::fs::write(t.path().join("app.2026-08-10.log"), b"older legacy").unwrap();
+        let cleared = clear_all_logs(t.path(), today).unwrap();
+        assert_eq!(cleared, 4);
+        // Active file is truncated, not removed (keeps the writer's handle valid; Windows-safe).
+        assert!(t.path().join("app.log").exists());
+        assert_eq!(
+            std::fs::read(t.path().join("app.log")).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert!(!t.path().join("app.old.log").exists());
+        // Legacy behavior regression assertions: today truncated, older removed.
+        assert_eq!(
+            std::fs::read(t.path().join("app.2026-08-15.log")).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert!(!t.path().join("app.2026-08-10.log").exists());
+    }
+
+    /// Regression pin: the fixed new names are not date files; the date-based
+    /// cleaner must skip them.
+    #[test]
+    fn cleanup_skips_new_names() {
+        let t = dir();
+        let today = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        std::fs::write(t.path().join("app.log"), b"x").unwrap();
+        std::fs::write(t.path().join("app.old.log"), b"x").unwrap();
+        std::fs::write(t.path().join("app.2025-01-01.log"), b"x").unwrap();
+        let removed = cleanup_old_logs(t.path(), 30, today).unwrap();
+        assert_eq!(removed, 1);
+        assert!(t.path().join("app.log").exists());
+        assert!(t.path().join("app.old.log").exists());
     }
 
     #[test]

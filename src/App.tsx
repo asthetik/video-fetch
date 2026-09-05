@@ -8,7 +8,6 @@ import { HomePage } from "./pages/HomePage";
 import { AboutPage } from "./pages/AboutPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { logUi } from "./lib/activityLog";
 import "./styles.css";
 
 type Page = AppPage;
@@ -46,7 +45,6 @@ function App() {
               className={`nav-btn${page === item.id ? " active" : ""}`}
               data-action={`nav-${item.id}`}
               onClick={() => {
-                logUi("nav", `进入${item.label}`, "info");
                 setPage(item.id);
               }}
               aria-current={page === item.id ? "page" : undefined}

@@ -8,26 +8,6 @@ export interface UiLogEvent {
   message: string;
 }
 
-export interface ClickDescriptor {
-  tagName: string;
-  id?: string;
-  ariaLabel?: string | null;
-  title?: string | null;
-  text?: string | null;
-}
-
-export function describeClickTarget(d: ClickDescriptor): string {
-  const aria = d.ariaLabel || d.title;
-  if (aria && aria.trim()) {
-    return aria.trim();
-  }
-  const text = d.text?.replace(/\s+/g, " ").trim() ?? "";
-  if (text) {
-    return text.slice(0, 40);
-  }
-  return `${d.tagName.toLowerCase()}${d.id ? `#${d.id}` : ""}`;
-}
-
 export interface LogLineParts {
   timestamp: string;
   level: "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -95,7 +75,9 @@ export function createActivityLogger(options: ActivityLoggerOptions = {}) {
     }
   }
 
-  function logUi(category: string, message: string, level: UiLogLevel = "info") {
+  // Whitelist-safe default: UI-originated logs should be errors only; other
+  // levels must be declared explicitly.
+  function logUi(category: string, message: string, level: UiLogLevel = "error") {
     // Best-effort logging: when the queue is saturated (e.g. the IPC call is
     // hanging), drop new events instead of growing without bound.
     if (queue.length >= MAX_QUEUE) {
@@ -154,34 +136,6 @@ export const logUi = logger.logUi;
 export const reportJsError = logger.reportJsError;
 
 export function initActivityLog() {
-  document.addEventListener(
-    "click",
-    (event) => {
-      const el = event.target instanceof Element ? event.target : null;
-      if (!el) return;
-      if (el.closest("[data-action]")) {
-        // Explicit logUi() in the handler owns these; avoid double-logging.
-        return;
-      }
-      if (el.tagName === "SELECT") {
-        // A select's textContent concatenates every option; skip it to avoid
-        // logging the whole option list as one noisy click.
-        return;
-      }
-      logUi(
-        "click",
-        describeClickTarget({
-          tagName: el.tagName,
-          id: el.id || undefined,
-          ariaLabel: el.getAttribute("aria-label"),
-          title: el.getAttribute("title"),
-          text: el.textContent,
-        }),
-        "debug",
-      );
-    },
-    true,
-  );
   window.addEventListener("error", (e) => {
     reportJsError("error", e.message || "未知错误");
   });
