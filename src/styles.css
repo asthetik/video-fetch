@@ -1,6 +1,17 @@
+/* ---- Design system fonts ---- */
+@font-face {
+  font-family: "Smiley Sans";
+  src: url("./assets/fonts/SmileySans-Oblique.ttf") format("truetype");
+  font-display: swap;
+}
+
 :root {
   color-scheme: light dark;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Three-layer type: display (brand moments) / UI (system stack) / data (mono). */
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Smiley Sans", system-ui, -apple-system, "PingFang SC", sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-ui);
   line-height: 1.5;
   --bg: #f5f5f7;
   --surface: #ffffff;
@@ -15,11 +26,11 @@
   --page-enter-ms: 200ms;
   --page-exit-ms: 150ms;
   --nav-transition-ms: 150ms;
-  /* Space view (visual spec: appendix A). Pink selection identity, higher
-     alpha in dark mode so selection stays distinct from hover tint. */
-  --space-accent: #fb7299;
+  /* Space view. Selection accent is the neutral action color — source
+     colors never carry interaction semantics. */
+  --space-accent: var(--accent);
   --space-hover: rgba(127, 127, 127, 0.08);
-  --space-selected: rgba(251, 114, 153, 0.1);
+  --space-selected: rgba(0, 113, 227, 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -34,9 +45,9 @@
     --danger: #ff453a;
     --success: #32d74b;
     --warn: #ffd60a;
-    --space-accent: #fb7299;
+    --space-accent: var(--accent);
     --space-hover: rgba(127, 127, 127, 0.12);
-    --space-selected: rgba(251, 114, 153, 0.18);
+    --space-selected: rgba(10, 132, 255, 0.16);
   }
 }
 
@@ -193,12 +204,12 @@ body {
 
 .url-input {
   flex: 1;
-  padding: 0.55rem 0.75rem;
+  padding: 0.7rem 0.9rem;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
   color: var(--text);
-  font-size: 0.95rem;
+  font-size: 1rem;
 }
 
 .url-input:focus {
@@ -514,7 +525,8 @@ body {
 
 .queue-empty {
   margin: 0;
-  font-size: 0.85rem;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
   color: var(--muted);
 }
 
@@ -528,9 +540,36 @@ body {
 }
 
 .queue-item {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0.65rem 0.75rem;
+  background: var(--surface);
+  padding: 0.75rem 0.9rem;
+}
+
+.queue-main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Right-aligned mono data block (speed / bytes / eta) — data layer. */
+.queue-data {
+  display: grid;
+  gap: 0.1rem;
+  justify-items: end;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.queue-data b {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .queue-item-header {
@@ -543,7 +582,8 @@ body {
 
 .queue-title {
   margin: 0;
-  font-size: 0.88rem;
+  font-size: 0.95rem;
+  font-weight: 600;
   line-height: 1.35;
 }
 
@@ -578,12 +618,6 @@ body {
   background: var(--accent);
   border-radius: 999px;
   transition: width 0.2s ease;
-}
-
-.queue-progress-meta {
-  margin: 0 0 0.45rem;
-  font-size: 0.75rem;
-  color: var(--muted);
 }
 
 .queue-error {
@@ -678,6 +712,13 @@ body {
   font-size: 0.95rem;
 }
 
+/* Brand wordmark (display layer = Smiley Sans). */
+.brand-title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 400;
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;
@@ -758,7 +799,7 @@ body {
   border-radius: 8px;
   background: var(--surface);
   color: var(--text);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-data);
   font-size: 0.85rem;
   resize: vertical;
 }
@@ -995,7 +1036,8 @@ body {
 
 .logs-viewer-empty {
   margin: 0;
-  font-size: 0.85rem;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
   color: var(--muted);
 }
 
@@ -1003,7 +1045,8 @@ body {
   display: flex;
   gap: 0.5rem;
   align-items: baseline;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
   font-size: 0.78rem;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -1114,9 +1157,10 @@ body {
   margin: 0.15rem 0 0;
   display: flex;
   gap: 0.75rem;
-  font-size: 0.85em;
-  opacity: 0.7;
+  font-family: var(--font-data);
   font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  opacity: 0.7;
 }
 .space-more { display: flex; justify-content: center; padding: 0.5rem 0; }
 /* Height matches .space-batch-bar so the last rows clear the sticky bar. */
