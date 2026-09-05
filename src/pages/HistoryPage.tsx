@@ -133,53 +133,55 @@ export function HistoryPage({ onJobsChanged }: HistoryPageProps) {
         <ul className="queue-list">
           {jobs.map((job) => (
             <li key={job.id} className="queue-item">
-              <div className="queue-item-header">
-                <p className="queue-title">
-                  {job.title}
-                  {job.page_index > 1 ? ` · P${job.page_index}` : ""}
-                </p>
-                <span className={`queue-status ${job.status}`}>
-                  {STATUS_LABEL[job.status]}
-                </span>
-              </div>
+              <div className="queue-main">
+                <div className="queue-item-header">
+                  <p className="queue-title">
+                    {job.title}
+                    {job.page_index > 1 ? ` · P${job.page_index}` : ""}
+                  </p>
+                  <span className={`queue-status ${job.status}`}>
+                    {STATUS_LABEL[job.status]}
+                  </span>
+                </div>
 
-              {job.output_path && (
-                <p className="history-path">{job.output_path}</p>
-              )}
-              {job.error && <p className="queue-error">{job.error}</p>}
-
-              <div className="queue-actions">
-                {job.status === "done" && job.output_path && (
-                  <>
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      data-action="open-file"
-                      onClick={() => void handleOpenFile(job)}
-                    >
-                      打开文件
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      data-action="open-folder"
-                      onClick={() => void handleOpenFolder(job)}
-                    >
-                      打开文件夹
-                    </button>
-                  </>
+                {job.output_path && (
+                  <p className="history-path">{job.output_path}</p>
                 )}
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  data-action="delete-job"
-                  onClick={() => {
-                    setActionError(null);
-                    setPendingDelete(job);
-                  }}
-                >
-                  删除
-                </button>
+                {job.error && <p className="queue-error">{job.error}</p>}
+
+                <div className="queue-actions">
+                  {job.status === "done" && job.output_path && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        data-action="open-file"
+                        onClick={() => void handleOpenFile(job)}
+                      >
+                        打开文件
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        data-action="open-folder"
+                        onClick={() => void handleOpenFolder(job)}
+                      >
+                        打开文件夹
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    data-action="delete-job"
+                    onClick={() => {
+                      setActionError(null);
+                      setPendingDelete(job);
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
             </li>
           ))}
