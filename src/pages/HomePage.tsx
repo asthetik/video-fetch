@@ -182,7 +182,8 @@ export function HomePage({
     };
   }, [handleResolve]);
 
-  function handleEnqueued() {
+  // Count arrives from VideoCard/SpaceListView; toast wiring lands in Task 8.
+  function handleEnqueued(_count: number) {
     onQueueRefresh();
   }
 

@@ -77,12 +77,12 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
             onClick={(e) => e.stopPropagation()}
           >
             <h3 id={titleId}>批量下载 {count} 个视频</h3>
-            <div className="mode-toggle" role="group" aria-label="下载类型">
+            <div className="segmented" role="group" aria-label="下载类型">
               {(["video", "audio"] as const).map((value) => (
                 <button
                   key={value}
                   type="button"
-                  className={mode === value ? "mode-segment active" : "mode-segment"}
+                  className={mode === value ? "segment-item on" : "segment-item"}
                   aria-pressed={mode === value}
                   onClick={() => setMode(value)}
                 >
