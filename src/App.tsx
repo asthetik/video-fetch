@@ -1,9 +1,7 @@
 import { useCallback, useState } from "react";
 import { House, History, Settings2, FileText, Info } from "lucide-react";
 import { AuthChip } from "./components/AuthChip";
-import { PageShell } from "./components/PageShell";
-import { usePageTransition } from "./hooks/usePageTransition";
-import type { AppPage } from "./lib/pageTransition";
+import { PageTransition, type AppPage } from "./components/PageTransition";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
 import { AboutPage } from "./pages/AboutPage";
@@ -27,13 +25,6 @@ const NAV_ITEMS: {
 
 function App() {
   const [page, setPage] = useState<Page>("home");
-  const {
-    displayedPage,
-    phase,
-    reducedMotion,
-    onExitComplete,
-    onEnterComplete,
-  } = usePageTransition(page);
   const [queueRefresh, setQueueRefresh] = useState(0);
   const bumpQueueRefresh = useCallback(() => {
     setQueueRefresh((n) => n + 1);
@@ -65,33 +56,29 @@ function App() {
       </header>
 
       <main className="app-main">
-        <PageShell
-          phase={phase}
-          reducedMotion={reducedMotion}
-          onExitComplete={onExitComplete}
-          onEnterComplete={onEnterComplete}
-        >
-          {/* Keep home mounted so pasted URL and resolved video survive tab switches. */}
-          <div
-            className={displayedPage === "home" ? undefined : "page-hidden"}
-            aria-hidden={displayedPage !== "home" ? true : undefined}
-            {...(displayedPage !== "home" ? { inert: true } : {})}
-          >
+        <PageTransition
+          page={page}
+          home={(homeActive) => (
             <HomePage
               queueRefresh={queueRefresh}
               onQueueRefresh={bumpQueueRefresh}
               onOpenHistory={() => setPage("history")}
-              active={displayedPage === "home"}
+              active={homeActive}
             />
-          </div>
-
-          {displayedPage === "history" && (
-            <HistoryPage onJobsChanged={bumpQueueRefresh} />
           )}
-          {displayedPage === "settings" && <SettingsPage />}
-          {displayedPage === "logs" && <LogsPage />}
-          {displayedPage === "about" && <AboutPage />}
-        </PageShell>
+        >
+          {(p) =>
+            p === "history" ? (
+              <HistoryPage onJobsChanged={bumpQueueRefresh} />
+            ) : p === "settings" ? (
+              <SettingsPage />
+            ) : p === "logs" ? (
+              <LogsPage />
+            ) : (
+              <AboutPage />
+            )
+          }
+        </PageTransition>
       </main>
     </div>
   );
