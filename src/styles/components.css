@@ -126,6 +126,44 @@
   font-size: 0.78rem;
 }
 
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-ctl);
+  background: var(--space-hover);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background-color var(--micro-ms) ease, color var(--micro-ms) ease,
+    transform 100ms ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--space-selected);
+}
+
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.icon-btn.danger {
+  color: var(--danger);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background: rgba(215, 0, 21, 0.1);
+  color: var(--danger);
+}
+
 .mode-toggle {
   display: inline-flex;
   padding: 0.2rem;
