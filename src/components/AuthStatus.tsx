@@ -4,6 +4,26 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { api } from "../lib/tauri";
 import type { AuthStatus as AuthStatusType } from "../types";
 
+/** Shared auth status source: initial fetch + auth://status event stream. */
+export function useAuthStatus(): AuthStatusType {
+  const [status, setStatus] = useState<AuthStatusType>("logged_out");
+
+  useEffect(() => {
+    void api.getAuthStatus().then(setStatus);
+    let unlisten: (() => void) | undefined;
+    void listen<AuthStatusType>("auth://status", (event) => {
+      setStatus(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  return status;
+}
+
 const STATUS_LABEL: Record<AuthStatusType, string> = {
   logged_out: "未登录",
   logged_in: "已登录",

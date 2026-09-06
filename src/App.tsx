@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
-import { AuthStatus } from "./components/AuthStatus";
+import { House, History, Settings2, FileText, Info } from "lucide-react";
+import { AuthChip } from "./components/AuthChip";
 import { PageShell } from "./components/PageShell";
 import { usePageTransition } from "./hooks/usePageTransition";
 import type { AppPage } from "./lib/pageTransition";
@@ -12,12 +13,16 @@ import "./styles.css";
 
 type Page = AppPage;
 
-const NAV_ITEMS: { id: Page; label: string }[] = [
-  { id: "home", label: "主页" },
-  { id: "history", label: "历史" },
-  { id: "settings", label: "设置" },
-  { id: "logs", label: "日志" },
-  { id: "about", label: "关于" },
+const NAV_ITEMS: {
+  id: Page;
+  label: string;
+  icon: typeof House;
+}[] = [
+  { id: "home", label: "主页", icon: House },
+  { id: "history", label: "历史", icon: History },
+  { id: "settings", label: "设置", icon: Settings2 },
+  { id: "logs", label: "日志", icon: FileText },
+  { id: "about", label: "关于", icon: Info },
 ];
 
 function App() {
@@ -49,12 +54,13 @@ function App() {
               }}
               aria-current={page === item.id ? "page" : undefined}
             >
+              <item.icon strokeWidth={2} />
               {item.label}
             </button>
           ))}
         </nav>
         <div className="app-header-end">
-          <AuthStatus />
+          <AuthChip onOpenSettings={() => setPage("settings")} />
         </div>
       </header>
 

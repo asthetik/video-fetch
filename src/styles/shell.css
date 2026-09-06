@@ -60,6 +60,47 @@
   font-weight: 600;
 }
 
+.auth-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-chip);
+  background: var(--ctl-bg);
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.auth-chip:hover {
+  color: var(--text);
+}
+
+.auth-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.auth-chip.logged_in {
+  color: var(--success);
+}
+
+.auth-chip.logged_in .auth-chip-dot {
+  background: var(--success);
+}
+
+.auth-chip.possibly_expired {
+  color: var(--warn);
+}
+
+.auth-chip.possibly_expired .auth-chip-dot {
+  background: var(--warn);
+}
+
 .app-main {
   flex: 1;
   max-width: 980px;
