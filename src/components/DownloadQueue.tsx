@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   DeleteConfirmDialog,
@@ -108,7 +109,6 @@ export function DownloadQueue({
 }: DownloadQueueProps) {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actionError, setActionError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -147,22 +147,20 @@ export function DownloadQueue({
   }, [loadJobs]);
 
   async function handleCancel(id: string) {
-    setActionError(null);
     try {
       const updated = await api.cancelJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function handleRetry(id: string) {
-    setActionError(null);
     try {
       const updated = await api.retryJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -172,13 +170,12 @@ export function DownloadQueue({
       return;
     }
 
-    setActionError(null);
     try {
       await api.deleteJob(job.id, choice === "record_and_file");
       setJobs((prev) => prev.filter((j) => j.id !== job.id));
       await loadJobs();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
       await loadJobs();
     }
   }
@@ -196,18 +193,17 @@ export function DownloadQueue({
     }
     bulkBusyRef.current = true;
     setBulkBusy(true);
-    setActionError(null);
     try {
       const result = await api.cancelAllJobs();
       if (result.errors && result.errors.length > 0) {
-        setActionError(
+        toast.warning(
           `已取消 ${result.cancelled} 个任务，部分失败：${result.errors[0]}`,
         );
       }
       setConfirmCancelAll(false);
       await loadJobs();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
       setConfirmCancelAll(false);
     } finally {
       bulkBusyRef.current = false;
@@ -289,7 +285,6 @@ export function DownloadQueue({
               label="删除"
               danger
               onClick={() => {
-                setActionError(null);
                 setPendingDelete(job);
               }}
             />
@@ -324,7 +319,6 @@ export function DownloadQueue({
               data-action="cancel-all"
               disabled={bulkBusy}
               onClick={() => {
-                setActionError(null);
                 setConfirmCancelAll(true);
               }}
             >
@@ -339,7 +333,6 @@ export function DownloadQueue({
         </div>
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
-      {actionError && <p className="url-hint error">{actionError}</p>}
       {!loading &&
         active.length === 0 &&
         recentFailed.length === 0 &&

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import {
   api,
   type ResolveFormatsFailedEvent,
@@ -182,9 +183,9 @@ export function HomePage({
     };
   }, [handleResolve]);
 
-  // Count arrives from VideoCard/SpaceListView; toast wiring lands in Task 8.
-  function handleEnqueued(_count: number) {
+  function handleEnqueued(count: number) {
     onQueueRefresh();
+    toast.success(count > 1 ? `已加入下载队列 · ${count} 项` : "已加入下载队列");
   }
 
   return (

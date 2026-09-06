@@ -1,7 +1,10 @@
 import { useCallback, useState } from "react";
 import { House, History, Settings2, FileText, Info } from "lucide-react";
+import { MotionConfig } from "motion/react";
+import { Toaster } from "sonner";
 import { AuthChip } from "./components/AuthChip";
 import { PageTransition, type AppPage } from "./components/PageTransition";
+import { useTheme } from "./hooks/useTheme";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
 import { AboutPage } from "./pages/AboutPage";
@@ -24,6 +27,7 @@ const NAV_ITEMS: {
 ];
 
 function App() {
+  const { resolved } = useTheme();
   const [page, setPage] = useState<Page>("home");
   const [queueRefresh, setQueueRefresh] = useState(0);
   const bumpQueueRefresh = useCallback(() => {
@@ -31,56 +35,64 @@ function App() {
   }, []);
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <nav className="app-nav" aria-label="主导航">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`nav-btn${page === item.id ? " active" : ""}`}
-              data-action={`nav-${item.id}`}
-              onClick={() => {
-                setPage(item.id);
-              }}
-              aria-current={page === item.id ? "page" : undefined}
-            >
-              <item.icon strokeWidth={2} />
-              {item.label}
-            </button>
-          ))}
-        </nav>
-        <div className="app-header-end">
-          <AuthChip onOpenSettings={() => setPage("settings")} />
-        </div>
-      </header>
+    <MotionConfig reducedMotion="user">
+      <div className="app">
+        <header className="app-header">
+          <nav className="app-nav" aria-label="主导航">
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`nav-btn${page === item.id ? " active" : ""}`}
+                data-action={`nav-${item.id}`}
+                onClick={() => {
+                  setPage(item.id);
+                }}
+                aria-current={page === item.id ? "page" : undefined}
+              >
+                <item.icon strokeWidth={2} />
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          <div className="app-header-end">
+            <AuthChip onOpenSettings={() => setPage("settings")} />
+          </div>
+        </header>
 
-      <main className="app-main">
-        <PageTransition
-          page={page}
-          home={(homeActive) => (
-            <HomePage
-              queueRefresh={queueRefresh}
-              onQueueRefresh={bumpQueueRefresh}
-              onOpenHistory={() => setPage("history")}
-              active={homeActive}
-            />
-          )}
-        >
-          {(p) =>
-            p === "history" ? (
-              <HistoryPage onJobsChanged={bumpQueueRefresh} />
-            ) : p === "settings" ? (
-              <SettingsPage />
-            ) : p === "logs" ? (
-              <LogsPage />
-            ) : (
-              <AboutPage />
-            )
-          }
-        </PageTransition>
-      </main>
-    </div>
+        <main className="app-main">
+          <PageTransition
+            page={page}
+            home={(homeActive) => (
+              <HomePage
+                queueRefresh={queueRefresh}
+                onQueueRefresh={bumpQueueRefresh}
+                onOpenHistory={() => setPage("history")}
+                active={homeActive}
+              />
+            )}
+          >
+            {(p) =>
+              p === "history" ? (
+                <HistoryPage onJobsChanged={bumpQueueRefresh} />
+              ) : p === "settings" ? (
+                <SettingsPage />
+              ) : p === "logs" ? (
+                <LogsPage />
+              ) : (
+                <AboutPage />
+              )
+            }
+          </PageTransition>
+        </main>
+
+        <Toaster
+          position="bottom-right"
+          theme={resolved}
+          toastOptions={{ className: "glass-toast" }}
+        />
+      </div>
+    </MotionConfig>
   );
 }
 

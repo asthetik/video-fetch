@@ -390,3 +390,27 @@ html[data-theme="dark"] .progress-fill {
   width: 100%;
   justify-content: center;
 }
+
+/* sonner toasts */
+.glass-toast {
+  background: var(--surface) !important;
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--surface-shadow), 0 0 0 1px var(--hairline);
+  color: var(--text);
+  font-weight: 600;
+}
+
+html[data-theme="dark"] .glass-toast {
+  /* sonner dark theme sets its own bg; keep our glass surface readable */
+  background: rgba(36, 38, 44, 0.9) !important;
+  color: #f5f5f7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-sonner-toast] {
+    animation: none !important;
+    transition: none !important;
+  }
+}

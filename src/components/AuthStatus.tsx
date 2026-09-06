@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { api } from "../lib/tauri";
 import type { AuthStatus as AuthStatusType } from "../types";
@@ -100,6 +101,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
     try {
       await api.clearAuth();
       applyStatus(await api.getAuthStatus());
+      toast.success("已退出登录");
     } catch (err) {
       setHint(err instanceof Error ? err.message : String(err));
     } finally {
