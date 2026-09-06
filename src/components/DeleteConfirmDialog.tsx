@@ -1,3 +1,5 @@
+import { createPortal } from "react-dom";
+
 export type DeleteChoice = "cancel" | "record" | "record_and_file";
 
 interface DeleteConfirmDialogProps {
@@ -20,7 +22,9 @@ export function DeleteConfirmDialog({
 
   const canDeleteFile = Boolean(filePath);
 
-  return (
+  // Portal to document.body: a backdrop-filter ancestor (glass card) becomes
+  // the containing block for position:fixed, which would misposition the modal.
+  return createPortal(
     <div
       className="modal-backdrop"
       role="presentation"
@@ -93,6 +97,7 @@ export function DeleteConfirmDialog({
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

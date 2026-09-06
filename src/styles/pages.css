@@ -415,7 +415,7 @@ html[data-theme="dark"] .queue-badge.done {
 /* Brand wordmark (display layer = Smiley Sans). */
 .brand-title {
   font-family: var(--font-display);
-  font-size: 1.5rem;
+  font-size: 1.8rem;
   font-weight: 400;
 }
 
@@ -614,7 +614,7 @@ html[data-theme="dark"] .queue-badge.done {
   flex-wrap: wrap;
   gap: 0.75rem;
   padding: 0.55rem 0.75rem;
-  background: var(--bg);
+  background: transparent;
   border-bottom: 1px solid var(--border);
 }
 
@@ -651,6 +651,8 @@ html[data-theme="dark"] .queue-badge.done {
   overflow: auto;
   flex: 1;
   min-height: 240px;
+  background: var(--ctl-bg);
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
 }
 
 .logs-viewer-empty {
@@ -686,27 +688,37 @@ html[data-theme="dark"] .queue-badge.done {
   flex-shrink: 0;
   align-self: flex-start;
   margin-top: 0.25em;
-  padding: 0 0.35rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  padding: 0 0.4rem;
+  border: none;
+  border-radius: 5px;
   font-size: 0.66rem;
   font-weight: 600;
   line-height: 1.5;
 }
 
 .log-badge-info {
+  background: rgba(10, 132, 255, 0.12);
   color: var(--accent);
-  border-color: var(--accent);
 }
 
 .log-badge-warn {
+  background: rgba(255, 204, 0, 0.2);
   color: var(--warn);
-  border-color: var(--warn);
+}
+
+html[data-theme="dark"] .log-badge-warn {
+  background: rgba(255, 214, 10, 0.15);
+  color: #ffd60a;
 }
 
 .log-badge-error {
+  background: rgba(215, 0, 21, 0.1);
   color: var(--danger);
-  border-color: var(--danger);
+}
+
+html[data-theme="dark"] .log-badge-error {
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff453a;
 }
 
 .log-msg {

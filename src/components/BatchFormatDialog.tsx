@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useModalFocus } from "../lib/useModalFocus";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -54,9 +55,11 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
     onSubmit(formatId, audioFormat);
   }
 
+  // Portal to document.body: a backdrop-filter ancestor (glass card) becomes
+  // the containing block for position:fixed, which would misposition the modal.
   return (
     <>
-      {open && (
+      {open && createPortal(
         <div
           className="modal-backdrop"
           onClick={onCancel}
@@ -136,7 +139,8 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       <ConfirmDialog
