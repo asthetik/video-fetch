@@ -24,6 +24,7 @@
   --surface-border: rgba(255, 255, 255, 0.75);
   --hairline: rgba(0, 0, 0, 0.06);
   --surface-shadow: 0 6px 24px rgba(30, 40, 80, 0.1);
+  --surface-shadow-hover: 0 10px 30px rgba(30, 40, 80, 0.14);
   --header-bg: rgba(255, 255, 255, 0.72);
   --header-blur: 14px;
 
@@ -47,8 +48,7 @@
   --radius-ctl: 8px;
   --radius-chip: 999px;
 
-  --page-enter-ms: 200ms;
-  --page-exit-ms: 150ms;
+  /* Page enter/exit durations live in PageTransition.tsx (motion/react). */
   --nav-transition-ms: 150ms;
   --micro-ms: 150ms;
 
@@ -73,6 +73,7 @@ html[data-theme="dark"] {
   --surface-border: rgba(255, 255, 255, 0.08);
   --hairline: rgba(255, 255, 255, 0.05);
   --surface-shadow: 0 8px 32px rgba(0, 0, 0, 0.37);
+  --surface-shadow-hover: 0 10px 32px rgba(0, 0, 0, 0.5);
   --header-bg: rgba(24, 26, 31, 0.72);
 
   --text: #f5f5f7;

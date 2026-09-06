@@ -170,11 +170,6 @@
   margin: 0;
 }
 
-.download-queue h3 {
-  margin: 0;
-  font-size: 0.95rem;
-}
-
 .queue-heading {
   display: flex;
   align-items: center;
@@ -304,24 +299,6 @@ html[data-theme="dark"] .queue-badge.done {
   line-height: 1.35;
 }
 
-.queue-status {
-  font-size: 0.75rem;
-  white-space: nowrap;
-  color: var(--muted);
-}
-
-.queue-status.running {
-  color: var(--accent);
-}
-
-.queue-status.done {
-  color: var(--success);
-}
-
-.queue-status.failed {
-  color: var(--muted);
-}
-
 .queue-error {
   margin: 0 0 0.45rem;
   font-size: 0.78rem;
@@ -369,12 +346,6 @@ html[data-theme="dark"] .queue-badge.done {
   font-size: 1.15rem;
 }
 
-.page-desc {
-  margin: 0 0 1rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
 .history-page,
 .settings-page {
   display: flex;
@@ -393,11 +364,6 @@ html[data-theme="dark"] .queue-badge.done {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-}
-
-.settings-section h3 {
-  margin: 0;
-  font-size: 0.95rem;
 }
 
 .settings-section-title {
@@ -995,6 +961,13 @@ html[data-theme="dark"] .log-badge-error {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .history-row-actions {
+    opacity: 1;
+  }
+}
+
+/* Touch devices never hover: keep row actions permanently visible. */
+@media (hover: none) {
   .history-row-actions {
     opacity: 1;
   }

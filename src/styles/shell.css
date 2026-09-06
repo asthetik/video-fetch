@@ -117,26 +117,7 @@
   height: 100%;
 }
 
-.page-shell--enter {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
-.page-shell--enter-active {
-  opacity: 1;
-  transform: translateY(0);
-  transition:
-    opacity var(--page-enter-ms) ease-out,
-    transform var(--page-enter-ms) ease-out;
-}
-
-.page-shell--exit {
-  opacity: 0;
-  transform: translateY(4px);
-  transition:
-    opacity var(--page-exit-ms) ease-in,
-    transform var(--page-exit-ms) ease-in;
-}
+/* Page transitions are handled by PageTransition (motion/react); no CSS phase classes. */
 
 @media (prefers-reduced-motion: reduce) {
   .nav-btn,
@@ -144,20 +125,11 @@
     transition: none;
   }
 
-  .page-shell,
-  .page-shell--enter,
-  .page-shell--enter-active,
-  .page-shell--exit {
+  .page-shell {
     transition: none !important;
     transform: none !important;
     opacity: 1 !important;
   }
-}
-
-.page-placeholder {
-  padding: 2rem 1rem;
-  text-align: center;
-  color: var(--muted);
 }
 
 :focus-visible {

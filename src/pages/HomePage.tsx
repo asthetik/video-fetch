@@ -185,7 +185,10 @@ export function HomePage({
 
   function handleEnqueued(count: number) {
     onQueueRefresh();
-    toast.success(count > 1 ? `已加入下载队列 · ${count} 项` : "已加入下载队列");
+    // All-skipped batch: queue refresh is still needed, but a "queued" toast would lie.
+    if (count > 0) {
+      toast.success(count > 1 ? `已加入下载队列 · ${count} 项` : "已加入下载队列");
+    }
   }
 
   return (
