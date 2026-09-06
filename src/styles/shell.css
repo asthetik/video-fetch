@@ -1,0 +1,111 @@
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header-end {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.app-nav {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.nav-btn {
+  padding: 0.4rem 0.85rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition:
+    color var(--nav-transition-ms) ease,
+    background-color var(--nav-transition-ms) ease,
+    border-color var(--nav-transition-ms) ease;
+}
+
+.nav-btn:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.nav-btn.active {
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--bg);
+  font-weight: 600;
+}
+
+.app-main {
+  flex: 1;
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.page-hidden {
+  display: none;
+}
+
+.page-shell {
+  height: 100%;
+}
+
+.page-shell--enter {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.page-shell--enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--page-enter-ms) ease-out,
+    transform var(--page-enter-ms) ease-out;
+}
+
+.page-shell--exit {
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--page-exit-ms) ease-in,
+    transform var(--page-exit-ms) ease-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-btn,
+  .space-row {
+    transition: none;
+  }
+
+  .page-shell,
+  .page-shell--enter,
+  .page-shell--enter-active,
+  .page-shell--exit {
+    transition: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+}
+
+.page-placeholder {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--muted);
+}

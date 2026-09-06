@@ -1,0 +1,52 @@
+/* ---- Design system fonts ---- */
+@font-face {
+  font-family: "Smiley Sans";
+  src: url("../assets/fonts/SmileySans-Oblique.ttf") format("truetype");
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light dark;
+  /* Three-layer type: display (brand moments) / UI (system stack) / data (mono). */
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Smiley Sans", system-ui, -apple-system, "PingFang SC", sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-ui);
+  line-height: 1.5;
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --border: #d8d8de;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --danger: #d70015;
+  --success: #248a3d;
+  --warn: #a16207;
+  --page-enter-ms: 200ms;
+  --page-exit-ms: 150ms;
+  --nav-transition-ms: 150ms;
+  /* Space view. Selection accent is the neutral action color — source
+     colors never carry interaction semantics. */
+  --space-accent: var(--accent);
+  --space-hover: rgba(127, 127, 127, 0.08);
+  --space-selected: rgba(0, 113, 227, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --surface: #2c2c2e;
+    --border: #48484a;
+    --text: #f5f5f7;
+    --muted: #98989d;
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --danger: #ff453a;
+    --success: #32d74b;
+    --warn: #ffd60a;
+    --space-accent: var(--accent);
+    --space-hover: rgba(127, 127, 127, 0.12);
+    --space-selected: rgba(10, 132, 255, 0.16);
+  }
+}

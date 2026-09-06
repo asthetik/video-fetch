@@ -1,0 +1,295 @@
+.url-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex: 1;
+}
+
+.url-bar label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.url-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.url-input {
+  flex: 1;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.url-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.url-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.url-hint.error {
+  color: var(--danger);
+}
+
+.auth-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.auth-status-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+  max-width: 18rem;
+}
+
+.auth-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--danger);
+  text-align: right;
+  line-height: 1.3;
+}
+
+.auth-label {
+  font-size: 0.8rem;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.auth-label.ok {
+  color: var(--success);
+}
+
+.auth-label.warn {
+  color: #b8860b;
+}
+
+.auth-label.muted {
+  color: var(--muted);
+}
+
+.btn {
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible,
+.mode-segment:focus-visible,
+.format-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+.btn-sm {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  padding: 0.2rem;
+  gap: 0.2rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.mode-segment {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: center;
+}
+
+.mode-segment:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.mode-segment.active {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mode-segment:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.format-select {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.btn-text {
+  border: none;
+  background: transparent;
+  padding: 0.15rem 0;
+  font-size: 0.9rem;
+  font-weight: 400;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.btn-text:hover:not(:disabled) {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.btn-text:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-text.btn-danger {
+  color: var(--danger);
+  border: none;
+}
+
+.btn-text.btn-danger:hover:not(:disabled) {
+  background: transparent;
+  color: var(--danger);
+  text-decoration: underline;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 0.45rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.modal {
+  width: min(100%, 26rem);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.15rem 1.2rem 1.2rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.modal h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.modal-desc {
+  margin: 0 0 0.65rem;
+  font-size: 0.9rem;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.modal-path {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: var(--bg);
+  border-radius: 8px;
+  word-break: break-all;
+}
+
+.modal-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.modal-actions .btn {
+  width: 100%;
+  justify-content: center;
+}
