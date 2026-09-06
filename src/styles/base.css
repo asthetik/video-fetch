@@ -4,6 +4,10 @@
 
 body {
   margin: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(120% 60% at 20% -10%, var(--bg-ambient-a) 0%, transparent 60%),
+    radial-gradient(100% 50% at 90% 0%, var(--bg-ambient-b) 0%, transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
 }

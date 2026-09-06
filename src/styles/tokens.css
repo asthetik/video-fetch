@@ -1,4 +1,4 @@
-/* ---- Design system fonts ---- */
+/* src/styles/tokens.css */
 @font-face {
   font-family: "Smiley Sans";
   src: url("../assets/fonts/SmileySans-Oblique.ttf") format("truetype");
@@ -6,47 +6,86 @@
 }
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   /* Three-layer type: display (brand moments) / UI (system stack) / data (mono). */
   --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Smiley Sans", system-ui, -apple-system, "PingFang SC", sans-serif;
   --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-ui);
   line-height: 1.5;
-  --bg: #f5f5f7;
-  --surface: #ffffff;
-  --border: #d8d8de;
+
+  /* Ambient page background + glass surfaces (light). */
+  --bg: #eef1f6;
+  --bg-ambient-a: rgba(219, 228, 246, 0.8);
+  --bg-ambient-b: rgba(228, 222, 246, 0.7);
+  --surface: rgba(255, 255, 255, 0.68);
+  --surface-blur: 18px;
+  --surface-saturate: 1.2;
+  --surface-border: rgba(255, 255, 255, 0.75);
+  --hairline: rgba(0, 0, 0, 0.06);
+  --surface-shadow: 0 6px 24px rgba(30, 40, 80, 0.1);
+  --header-bg: rgba(255, 255, 255, 0.72);
+  --header-blur: 14px;
+
   --text: #1d1d1f;
   --muted: #6e6e73;
-  --accent: #0071e3;
-  --accent-hover: #0077ed;
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
   --danger: #d70015;
   --success: #248a3d;
   --warn: #a16207;
+
+  /* Legacy border token: still referenced by classes not yet restyled; kept
+     so every task in this plan compiles to a coherent look. */
+  --border: rgba(0, 0, 0, 0.1);
+
+  /* Inner control surface: more opaque than cards and shadow-free so stacked
+     inputs on a glass card do not go muddy. */
+  --ctl-bg: rgba(255, 255, 255, 0.75);
+
+  --radius-card: 12px;
+  --radius-ctl: 8px;
+  --radius-chip: 999px;
+
   --page-enter-ms: 200ms;
   --page-exit-ms: 150ms;
   --nav-transition-ms: 150ms;
+  --micro-ms: 150ms;
+
   /* Space view. Selection accent is the neutral action color — source
      colors never carry interaction semantics. */
   --space-accent: var(--accent);
   --space-hover: rgba(127, 127, 127, 0.08);
-  --space-selected: rgba(0, 113, 227, 0.1);
+  --space-selected: rgba(10, 132, 255, 0.1);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1c1c1e;
-    --surface: #2c2c2e;
-    --border: #48484a;
-    --text: #f5f5f7;
-    --muted: #98989d;
-    --accent: #0a84ff;
-    --accent-hover: #409cff;
-    --danger: #ff453a;
-    --success: #32d74b;
-    --warn: #ffd60a;
-    --space-accent: var(--accent);
-    --space-hover: rgba(127, 127, 127, 0.12);
-    --space-selected: rgba(10, 132, 255, 0.16);
-  }
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #17181c;
+  --bg-ambient-a: rgba(56, 78, 140, 0.38);
+  --bg-ambient-b: rgba(94, 64, 130, 0.3);
+  /* Gradient surface in dark: components use `background: var(--surface)`. */
+  --surface: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.06) 0%,
+    rgba(255, 255, 255, 0.015) 100%
+  );
+  --surface-border: rgba(255, 255, 255, 0.08);
+  --hairline: rgba(255, 255, 255, 0.05);
+  --surface-shadow: 0 8px 32px rgba(0, 0, 0, 0.37);
+  --header-bg: rgba(24, 26, 31, 0.72);
+
+  --text: #f5f5f7;
+  --muted: #98989d;
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
+  --danger: #ff453a;
+  --success: #32d74b;
+  --warn: #ffd60a;
+
+  --border: rgba(255, 255, 255, 0.12);
+  --ctl-bg: rgba(255, 255, 255, 0.06);
+
+  --space-hover: rgba(127, 127, 127, 0.12);
+  --space-selected: rgba(10, 132, 255, 0.16);
 }

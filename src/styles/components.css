@@ -18,9 +18,9 @@
 .url-input {
   flex: 1;
   padding: 0.7rem 0.9rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-ctl);
+  background: var(--ctl-bg);
   color: var(--text);
   font-size: 1rem;
 }
@@ -172,9 +172,9 @@
 .format-select {
   width: 100%;
   padding: 0.45rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-ctl);
+  background: var(--ctl-bg);
   color: var(--text);
   font-size: 0.9rem;
 }
@@ -225,6 +225,10 @@
   transition: width 0.2s ease;
 }
 
+html[data-theme="dark"] .progress-fill {
+  background: linear-gradient(90deg, #0a84ff, #409cff);
+}
+
 .btn-danger {
   color: var(--danger);
   border-color: var(--danger);
@@ -243,16 +247,20 @@
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .modal {
   width: min(100%, 26rem);
   background: var(--surface);
-  border: 1px solid var(--border);
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--surface-shadow), 0 0 0 1px var(--hairline);
   border-radius: 14px;
   padding: 1.15rem 1.2rem 1.2rem;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
 }
 
 .modal h3 {
