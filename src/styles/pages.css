@@ -400,6 +400,18 @@ html[data-theme="dark"] .queue-badge.done {
   font-size: 0.95rem;
 }
 
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.settings-section-title svg {
+  color: var(--accent);
+}
+
 /* Brand wordmark (display layer = Smiley Sans). */
 .brand-title {
   font-family: var(--font-display);
@@ -418,6 +430,25 @@ html[data-theme="dark"] .queue-badge.done {
   gap: 0.5rem;
 }
 
+.settings-row-block {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0;
+}
+
+.settings-row-block + .settings-row-block,
+.settings-field + .settings-field {
+  border-top: 1px solid var(--hairline);
+}
+
+.settings-row-label {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
 .settings-input {
   flex: 1;
   padding: 0.45rem 0.6rem;
@@ -428,33 +459,8 @@ html[data-theme="dark"] .queue-badge.done {
   font-size: 0.9rem;
 }
 
-.settings-input-narrow {
-  max-width: 5rem;
-}
-
-.settings-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  font-size: 0.88rem;
-  cursor: pointer;
-}
-
-.settings-check input {
-  margin-top: 0.2rem;
-}
-
-.settings-check-hint {
-  display: block;
-  margin-top: 0.25rem;
-  font-size: 0.78rem;
-  color: var(--muted);
-  line-height: 1.4;
-  font-weight: 400;
-}
-
 .settings-hint {
-  margin: 0;
+  margin: 0.15rem 0 0;
   font-size: 0.78rem;
   color: var(--muted);
 }
@@ -463,12 +469,6 @@ html[data-theme="dark"] .queue-badge.done {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
-}
-
-.preset-active {
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 600;
 }
 
 .custom-template summary,
@@ -504,6 +504,7 @@ html[data-theme="dark"] .queue-badge.done {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-ctl);
   background: var(--ctl-bg);
+  font-family: var(--font-data);
   font-size: 0.82rem;
   word-break: break-all;
 }
@@ -526,20 +527,6 @@ html[data-theme="dark"] .queue-badge.done {
   flex-direction: column;
   gap: 0.5rem;
   align-items: flex-start;
-}
-
-.settings-footer {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 1rem;
-  padding-top: 0.25rem;
-}
-
-.settings-message {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--success);
 }
 
 .about-page {

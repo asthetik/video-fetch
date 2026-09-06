@@ -164,6 +164,11 @@
   font-size: 0.78rem;
 }
 
+/* Inline lucide icons inside text buttons default to baseline alignment. */
+.btn svg {
+  vertical-align: -0.15em;
+}
+
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -247,6 +252,43 @@ html[data-theme="dark"] .segment-item.on {
 }
 
 .segment-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.switch {
+  flex-shrink: 0;
+  width: 36px;
+  height: 21px;
+  border: none;
+  border-radius: var(--radius-chip);
+  background: rgba(120, 120, 128, 0.32);
+  cursor: pointer;
+  position: relative;
+  transition: background-color var(--micro-ms) ease;
+}
+
+.switch.on {
+  background: #34c759;
+}
+
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform var(--micro-ms) ease;
+}
+
+.switch.on .switch-knob {
+  transform: translateX(15px);
+}
+
+.switch:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
