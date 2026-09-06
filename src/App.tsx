@@ -74,7 +74,10 @@ function App() {
           >
             {(p) =>
               p === "history" ? (
-                <HistoryPage onJobsChanged={bumpQueueRefresh} />
+                <HistoryPage
+                  onJobsChanged={bumpQueueRefresh}
+                  onGoHome={() => setPage("home")}
+                />
               ) : p === "settings" ? (
                 <SettingsPage />
               ) : p === "logs" ? (
