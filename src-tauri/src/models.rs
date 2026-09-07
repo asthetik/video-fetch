@@ -117,6 +117,18 @@ pub struct DownloadJob {
     pub progress: f64,
     pub error: Option<String>,
     pub output_path: Option<String>,
+    /// Cover image URL captured at enqueue time (None for legacy rows).
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    /// Source duration in seconds captured at enqueue time.
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
+    /// Output file size in bytes, filled when the job finishes.
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    /// Row creation time (SQLite UTC datetime), exposed for history grouping.
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +176,12 @@ pub struct ClearFinishedResult {
 pub struct BatchEnqueueItem {
     pub bvid: String,
     pub title: String,
+    /// Cover image URL stored with the job for the history page.
+    #[serde(default)]
+    pub cover: Option<String>,
+    /// Source duration in seconds stored with the job for the history page.
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

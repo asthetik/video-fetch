@@ -169,6 +169,12 @@ pub struct EnqueueArgs {
     pub save_as_copy: bool,
     #[serde(default)]
     pub uploader: String,
+    /// Cover image URL stored with the job for the history page.
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    /// Source duration in seconds stored with the job for the history page.
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
 }
 
 fn normalize_audio_format(value: Option<String>) -> AppResult<Option<String>> {
@@ -756,6 +762,10 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
             progress: 0.0,
             error: None,
             output_path: None,
+            thumbnail_url: args.thumbnail_url.clone(),
+            duration_secs: args.duration_secs,
+            file_size: None,
+            created_at: None,
         };
         last = Some(state.downloads.enqueue(job, save_as_copy)?);
     }
@@ -870,6 +880,10 @@ pub async fn space_enqueue_batch(
             progress: 0.0,
             error: None,
             output_path: None,
+            thumbnail_url: item.cover.clone(),
+            duration_secs: item.duration_secs,
+            file_size: None,
+            created_at: None,
         };
         match state.downloads.enqueue_classified(&mut job, false) {
             Ok(kind) => record_batch_outcome(&mut result, kind),
@@ -1522,6 +1536,8 @@ mod space_batch_tests {
                 .map(|i| models::BatchEnqueueItem {
                     bvid: format!("BV{i}"),
                     title: "t".into(),
+                    cover: None,
+                    duration_secs: None,
                 })
                 .collect::<Vec<_>>()
         };
