@@ -192,6 +192,7 @@ export function VideoCard({
         audio_format: container,
         save_as_copy: saveAsCopy,
         uploader: meta.uploader ?? "",
+        thumbnail_url: meta.thumbnail ?? null,
       });
       onEnqueued(pageIndexes.length);
     } catch (err) {

@@ -48,6 +48,13 @@ export interface DownloadJob {
   progress: number;
   error?: string | null;
   output_path?: string | null;
+  /** Cover URL captured at enqueue time; absent for legacy rows. */
+  thumbnail_url?: string | null;
+  duration_secs?: number | null;
+  /** Filled when the job finishes. */
+  file_size?: number | null;
+  /** SQLite UTC datetime "YYYY-MM-DD HH:MM:SS". */
+  created_at?: string | null;
   /** Bytes/sec; live from progress events only. */
   speed?: number | null;
   /** Seconds remaining; live from progress events only. */

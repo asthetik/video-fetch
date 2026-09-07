@@ -17,6 +17,7 @@ import {
 } from "./DeleteConfirmDialog";
 import { IconButton } from "./IconButton";
 import { api } from "../lib/tauri";
+import { formatBytes } from "../lib/format";
 import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
 import { formatDuration } from "../lib/spaceFormat";
 import type { DownloadJob, JobStatus } from "../types";
@@ -39,21 +40,6 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   done: "完成",
   failed: "失败",
 };
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const digits = unit === 0 ? 0 : value >= 10 ? 1 : 2;
-  return `${value.toFixed(digits)} ${units[unit]}`;
-}
 
 function formatSpeed(bps?: number | null): string | null {
   if (bps == null || !Number.isFinite(bps) || bps <= 0) {

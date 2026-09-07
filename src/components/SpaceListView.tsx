@@ -132,7 +132,12 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     setFailedItems([]);
     try {
       const result = await api.spaceEnqueueBatch({
-        items: [...selected.values()].map((i) => ({ bvid: i.bvid, title: i.title })),
+        items: [...selected.values()].map((i) => ({
+          bvid: i.bvid,
+          title: i.title,
+          cover: i.cover,
+          duration_secs: i.duration_secs,
+        })),
         format_id: formatId,
         audio_format: audioFormat,
       });
