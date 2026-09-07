@@ -14,8 +14,6 @@
   gap: 1rem;
   padding: 0.6rem 1.25rem;
   background: var(--header-bg);
-  backdrop-filter: blur(var(--header-blur)) saturate(var(--surface-saturate));
-  -webkit-backdrop-filter: blur(var(--header-blur)) saturate(var(--surface-saturate));
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -55,8 +53,8 @@
 }
 
 .nav-btn.active {
-  color: var(--accent);
-  background: rgba(10, 132, 255, 0.12);
+  color: #fff;
+  background: var(--accent);
   font-weight: 600;
 }
 
@@ -103,7 +101,7 @@
 
 .app-main {
   flex: 1;
-  max-width: 980px;
+  max-width: 640px;
   width: 100%;
   margin: 0 auto;
   padding: 1.25rem;

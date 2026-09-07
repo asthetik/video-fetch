@@ -92,7 +92,7 @@ function App() {
         <Toaster
           position="bottom-right"
           theme={resolved}
-          toastOptions={{ className: "glass-toast" }}
+          toastOptions={{ className: "app-toast" }}
         />
       </div>
     </MotionConfig>

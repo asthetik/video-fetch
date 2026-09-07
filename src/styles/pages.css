@@ -38,10 +38,8 @@
 
 .video-card {
   background: var(--surface);
-  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
-  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
   border: 1px solid var(--surface-border);
-  box-shadow: var(--surface-shadow), 0 0 0 1px var(--hairline);
+  box-shadow: var(--surface-shadow);
   border-radius: var(--radius-card);
   padding: 1rem;
   display: flex;
@@ -149,10 +147,8 @@
 
 .download-queue {
   background: var(--surface);
-  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
-  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
   border: 1px solid var(--surface-border);
-  box-shadow: var(--surface-shadow), 0 0 0 1px var(--hairline);
+  box-shadow: var(--surface-shadow);
   border-radius: var(--radius-card);
   padding: 1rem;
 }
@@ -355,10 +351,8 @@ html[data-theme="dark"] .queue-badge.done {
 
 .settings-section {
   background: var(--surface);
-  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
-  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
   border: 1px solid var(--surface-border);
-  box-shadow: var(--surface-shadow), 0 0 0 1px var(--hairline);
+  box-shadow: var(--surface-shadow);
   border-radius: var(--radius-card);
   padding: 1rem;
   display: flex;
@@ -567,10 +561,8 @@ html[data-theme="dark"] .queue-badge.done {
   min-height: 0;
   flex: 1;
   background: var(--surface);
-  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
-  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate));
   border: 1px solid var(--surface-border);
-  box-shadow: var(--surface-shadow), 0 0 0 1px var(--hairline);
+  box-shadow: var(--surface-shadow);
   border-radius: var(--radius-card);
   overflow: hidden;
 }
@@ -582,7 +574,7 @@ html[data-theme="dark"] .queue-badge.done {
   gap: 0.75rem;
   padding: 0.55rem 0.75rem;
   background: transparent;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .logs-file-label {
@@ -791,8 +783,6 @@ html[data-theme="dark"] .log-badge-error {
   justify-content: space-between;
   padding: 0.5rem 0.75rem;
   background: var(--surface);
-  backdrop-filter: blur(var(--surface-blur));
-  -webkit-backdrop-filter: blur(var(--surface-blur));
   border: 1px solid var(--surface-border);
   border-radius: 12px 12px 0 0;
 }
