@@ -150,6 +150,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
           <Search size={14} strokeWidth={2} />
           <input
             type="search"
+            aria-label="搜索历史"
             placeholder="搜索标题或文件名…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}

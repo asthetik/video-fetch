@@ -98,7 +98,7 @@
 }
 
 .auth-label.warn {
-  color: #b8860b;
+  color: var(--warn);
 }
 
 .auth-label.muted {
@@ -471,7 +471,9 @@ html[data-theme="dark"] .glass-toast {
   .btn,
   .icon-btn,
   .chip,
-  .nav-btn {
+  .nav-btn,
+  .switch,
+  .segment-item {
     transition: none;
   }
 

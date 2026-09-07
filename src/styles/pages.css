@@ -405,7 +405,8 @@ html[data-theme="dark"] .queue-badge.done {
 }
 
 .settings-row-block + .settings-row-block,
-.settings-field + .settings-field {
+.settings-field + .settings-field,
+.settings-field + .settings-row-block {
   border-top: 1px solid var(--hairline);
 }
 
@@ -882,6 +883,10 @@ html[data-theme="dark"] .log-badge-error {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    background-color var(--micro-ms) ease,
+    color var(--micro-ms) ease,
+    border-color var(--micro-ms) ease;
 }
 
 .chip:hover {
