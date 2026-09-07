@@ -439,3 +439,63 @@ html[data-theme="dark"] .segment-item.on {
     transition: none;
   }
 }
+
+/* history thumbnail tile */
+.thumb-tile {
+  position: relative;
+  display: inline-flex;
+  width: 72px;
+  height: 42px;
+  border-radius: 5px;
+  overflow: hidden;
+  flex: none;
+  background: var(--seg-track);
+}
+
+.thumb-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb-tile.audio {
+  width: 42px;
+  height: 42px;
+  border-radius: 5px;
+}
+
+.thumb-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.thumb-note {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.66);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb-dur {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 8px;
+  padding: 0 4px;
+  font-weight: 600;
+  font-family: var(--font-data);
+}
