@@ -429,22 +429,7 @@ html[data-theme="dark"] .segment-item.on {
   }
 }
 
-/* Card hover lift (interactive main cards only). Reuses the base card shadow
-   so the lift stays subtle in the opaque system. */
-.video-card,
-.download-queue {
-  transition: box-shadow var(--micro-ms) ease, transform var(--micro-ms) ease;
-}
-
-.video-card:hover,
-.download-queue:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--surface-shadow);
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .video-card,
-  .download-queue,
   .btn,
   .icon-btn,
   .chip,
@@ -452,10 +437,5 @@ html[data-theme="dark"] .segment-item.on {
   .switch,
   .segment-item {
     transition: none;
-  }
-
-  .video-card:hover,
-  .download-queue:hover {
-    transform: none;
   }
 }

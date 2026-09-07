@@ -193,45 +193,39 @@ export function HomePage({
 
   return (
     <div className="home-page">
-      <div className="home-main">
-        <div className="home-toolbar">
-          <UrlBar
-            url={url}
-            loading={loading}
-            error={error}
-            onUrlChange={setUrl}
-            onResolve={(next) => void handleResolve(next)}
-          />
-        </div>
+      <UrlBar
+        url={url}
+        loading={loading}
+        error={error}
+        onUrlChange={setUrl}
+        onResolve={(next) => void handleResolve(next)}
+      />
 
-        {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
+      {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
 
-        {space ? (
-          <SpaceListView
-            key={space.mid}
-            mid={space.mid}
+      {space ? (
+        <SpaceListView
+          key={space.mid}
+          mid={space.mid}
+          active={active}
+          onEnqueued={handleEnqueued}
+        />
+      ) : (
+        meta && (
+          <VideoCard
+            meta={meta}
+            url={url.trim()}
             active={active}
+            refreshing={loading}
+            formatsLoading={formatsLoading}
+            formatsError={formatsError}
             onEnqueued={handleEnqueued}
+            onRefresh={() => void handleResolve(url.trim(), true)}
           />
-        ) : (
-          meta && (
-            <VideoCard
-              meta={meta}
-              url={url.trim()}
-              active={active}
-              refreshing={loading}
-              formatsLoading={formatsLoading}
-              formatsError={formatsError}
-              onEnqueued={handleEnqueued}
-              onRefresh={() => void handleResolve(url.trim(), true)}
-            />
-          )
-        )}
-      </div>
+        )
+      )}
 
-      <aside className="home-queue">
-        <DownloadQueue refreshToken={queueRefresh} onOpenHistory={onOpenHistory} />
-      </aside>
+      <DownloadQueue refreshToken={queueRefresh} onOpenHistory={onOpenHistory} />
     </div>
   );
 }
