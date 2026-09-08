@@ -235,7 +235,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         <span className="history-count">
           {allJobs.length > 0 ? `${allJobs.length} 条记录` : ""}
         </span>
-        {allJobs.length > 0 && (
+        {finishedTotal > 0 && (
           <button
             type="button"
             className="btn btn-sm btn-danger history-clear"

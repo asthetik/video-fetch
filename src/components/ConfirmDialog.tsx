@@ -35,8 +35,8 @@ export function ConfirmDialog({
     return null;
   }
 
-  // Portal to document.body: a backdrop-filter ancestor (glass card) becomes
-  // the containing block for position:fixed, which would misposition the modal.
+  // Portal to document.body: keeps dialogs out of any transformed/filtered
+  // ancestor stacking context.
   return createPortal(
     <div
       className="modal-backdrop"

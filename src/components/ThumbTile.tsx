@@ -9,6 +9,8 @@ const FALLBACK_GRADIENTS = [
   "linear-gradient(135deg, #5e6ad2, #2f8f6b)",
 ];
 
+// Deterministic gradient pick: the multiply-accumulate is exact in double
+// precision below 2^53, then the int32 OR-wrap keeps it bounded before mod.
 function hashIndex(id: string, mod: number): number {
   let h = 0;
   for (const ch of id) {
@@ -37,7 +39,11 @@ export function ThumbTile({ job }: { job: DownloadJob }) {
         <img src={job.thumbnail_url} alt="" loading="lazy" />
       ) : (
         <span className="thumb-fallback" style={{ background: gradient }}>
-          {audio ? <Music size={16} strokeWidth={2} /> : <Play size={16} strokeWidth={2} />}
+          {audio ? (
+            <Music size={16} strokeWidth={2} aria-hidden="true" />
+          ) : (
+            <Play size={16} strokeWidth={2} aria-hidden="true" />
+          )}
         </span>
       )}
       {audio ? (

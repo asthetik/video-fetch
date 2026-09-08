@@ -55,8 +55,8 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
     onSubmit(formatId, audioFormat);
   }
 
-  // Portal to document.body: a backdrop-filter ancestor (glass card) becomes
-  // the containing block for position:fixed, which would misposition the modal.
+  // Portal to document.body: keeps dialogs out of any transformed/filtered
+  // ancestor stacking context.
   return (
     <>
       {open && createPortal(
