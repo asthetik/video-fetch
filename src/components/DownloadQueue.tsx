@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  Download,
+  FolderOpen,
+  History as HistoryIcon,
+  RotateCcw,
+  Trash2,
+  X,
+} from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   DeleteConfirmDialog,
   type DeleteChoice,
 } from "./DeleteConfirmDialog";
+import { IconButton } from "./IconButton";
 import { api } from "../lib/tauri";
+import { formatBytes } from "../lib/format";
 import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
 import { formatDuration } from "../lib/spaceFormat";
 import type { DownloadJob, JobStatus } from "../types";
@@ -28,21 +40,6 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   done: "完成",
   failed: "失败",
 };
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const digits = unit === 0 ? 0 : value >= 10 ? 1 : 2;
-  return `${value.toFixed(digits)} ${units[unit]}`;
-}
 
 function formatSpeed(bps?: number | null): string | null {
   if (bps == null || !Number.isFinite(bps) || bps <= 0) {
@@ -98,7 +95,6 @@ export function DownloadQueue({
 }: DownloadQueueProps) {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actionError, setActionError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -137,22 +133,20 @@ export function DownloadQueue({
   }, [loadJobs]);
 
   async function handleCancel(id: string) {
-    setActionError(null);
     try {
       const updated = await api.cancelJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function handleRetry(id: string) {
-    setActionError(null);
     try {
       const updated = await api.retryJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -162,13 +156,12 @@ export function DownloadQueue({
       return;
     }
 
-    setActionError(null);
     try {
       await api.deleteJob(job.id, choice === "record_and_file");
       setJobs((prev) => prev.filter((j) => j.id !== job.id));
       await loadJobs();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
       await loadJobs();
     }
   }
@@ -186,18 +179,17 @@ export function DownloadQueue({
     }
     bulkBusyRef.current = true;
     setBulkBusy(true);
-    setActionError(null);
     try {
       const result = await api.cancelAllJobs();
       if (result.errors && result.errors.length > 0) {
-        setActionError(
+        toast.warning(
           `已取消 ${result.cancelled} 个任务，部分失败：${result.errors[0]}`,
         );
       }
       setConfirmCancelAll(false);
       await loadJobs();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
       setConfirmCancelAll(false);
     } finally {
       bulkBusyRef.current = false;
@@ -219,106 +211,114 @@ export function DownloadQueue({
       job.total_bytes > 0
         ? `${formatBytes(job.downloaded_bytes)} / ${formatBytes(job.total_bytes)}`
         : null;
-    const hasData = Boolean(speed || eta || bytes);
+    const pct = Math.round(job.progress * 100);
     return (
-      <li key={job.id} className="queue-item">
+      <motion.li
+        key={job.id}
+        layout
+        initial={{ opacity: 0, y: -6 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -6 }}
+        transition={{ duration: 0.15 }}
+        className="queue-item"
+      >
         <div className="queue-main">
           <div className="queue-item-header">
             <p className="queue-title">
               {job.title}
               {job.page_index > 1 ? ` · P${job.page_index}` : ""}
             </p>
-            <span className={`queue-status ${job.status}`}>
+            <span className={`queue-badge ${job.status}`}>
               {STATUS_LABEL[job.status]}
-              {job.status === "running" && ` ${Math.round(job.progress * 100)}%`}
+              {job.status === "running" && ` ${pct}%`}
             </span>
           </div>
 
           {(job.status === "running" || job.status === "pending") && (
             <div className="progress-bar">
-              <div
-                className="progress-fill"
-                style={{ width: `${Math.round(job.progress * 100)}%` }}
-              />
+              <div className="progress-fill" style={{ width: `${pct}%` }} />
             </div>
           )}
 
           {job.error && <p className="queue-error">{job.error}</p>}
 
-        <div className="queue-actions">
-          {(job.status === "pending" || job.status === "running") && (
-            <button
-              type="button"
-              className="btn btn-sm"
-              data-action="cancel-job"
-              onClick={() => void handleCancel(job.id)}
-            >
-              取消
-            </button>
-          )}
-          {job.status === "failed" && (
-            <button
-              type="button"
-              className="btn btn-sm"
-              data-action="retry-job"
-              onClick={() => void handleRetry(job.id)}
-            >
-              重试
-            </button>
-          )}
-          {job.status === "done" && job.output_path && (
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={() => void handleOpenFolder(job)}
-            >
-              打开文件夹
-            </button>
-          )}
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => {
-              setActionError(null);
-              setPendingDelete(job);
-            }}
-          >
-            删除
-          </button>
+          <div className="queue-actions">
+            {(job.status === "pending" || job.status === "running") && (
+              <IconButton
+                icon={X}
+                label="取消"
+                action="cancel-job"
+                onClick={() => void handleCancel(job.id)}
+              />
+            )}
+            {job.status === "failed" && (
+              <IconButton
+                icon={RotateCcw}
+                label="重试"
+                action="retry-job"
+                onClick={() => void handleRetry(job.id)}
+              />
+            )}
+            {job.status === "done" && job.output_path && (
+              <IconButton
+                icon={FolderOpen}
+                label="打开文件夹"
+                onClick={() => void handleOpenFolder(job)}
+              />
+            )}
+            <IconButton
+              icon={Trash2}
+              label="删除"
+              danger
+              onClick={() => {
+                setPendingDelete(job);
+              }}
+            />
+          </div>
         </div>
-        </div>
-        {hasData && (
+        {(speed || eta || bytes) && (
           <div className="queue-data">
             {speed && <b>{speed}</b>}
             {bytes && <span>{bytes}</span>}
             {eta && <span>剩余 {eta}</span>}
           </div>
         )}
-      </li>
+      </motion.li>
     );
   }
 
   return (
     <section className="download-queue">
       <div className="section-heading">
-        <h3>下载队列</h3>
-        {cancellableCount > 0 && (
-          <button
-            type="button"
-            className="btn btn-sm"
-            data-action="cancel-all"
-            disabled={bulkBusy}
-            onClick={() => {
-              setActionError(null);
-              setConfirmCancelAll(true);
-            }}
-          >
-            全部取消
-          </button>
-        )}
+        <h3 className="queue-heading">
+          <Download size={14} strokeWidth={2} />
+          下载队列
+          {cancellableCount > 0 && (
+            <span className="queue-count">{cancellableCount}</span>
+          )}
+        </h3>
+        <div className="queue-heading-actions">
+          {cancellableCount > 0 && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              data-action="cancel-all"
+              disabled={bulkBusy}
+              onClick={() => {
+                setConfirmCancelAll(true);
+              }}
+            >
+              全部取消
+            </button>
+          )}
+          <IconButton
+            icon={HistoryIcon}
+            label="查看历史"
+            onClick={onOpenHistory}
+          />
+        </div>
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
-      {actionError && <p className="url-hint error">{actionError}</p>}
       {!loading &&
         active.length === 0 &&
         recentFailed.length === 0 &&
@@ -326,7 +326,9 @@ export function DownloadQueue({
           <p className="queue-empty">暂无下载任务</p>
         )}
       {active.length > 0 && (
-        <ul className="queue-list">{active.map(renderJobItem)}</ul>
+        <ul className="queue-list">
+          <AnimatePresence initial={false}>{active.map(renderJobItem)}</AnimatePresence>
+        </ul>
       )}
       {recentFailed.length > 0 && (
         <>
@@ -337,18 +339,20 @@ export function DownloadQueue({
               className="btn-text queue-section-link"
               onClick={onOpenHistory}
             >
-              共 {failedTotal} 条失败 · 在历史查看
+              共 {failedTotal} 条 · 在历史查看
             </button>
           </div>
-          <ul className="queue-list">{recentFailed.map(renderJobItem)}</ul>
+          <ul className="queue-list">
+            <AnimatePresence initial={false}>{recentFailed.map(renderJobItem)}</AnimatePresence>
+          </ul>
         </>
       )}
       {doneFallback && doneFallback.length > 0 && (
         <>
-          {recentFailed.length > 0 && (
-            <p className="queue-section-label">最近完成</p>
-          )}
-          <ul className="queue-list">{doneFallback.map(renderJobItem)}</ul>
+          {recentFailed.length > 0 && <p className="queue-section-label">最近完成</p>}
+          <ul className="queue-list">
+            <AnimatePresence initial={false}>{doneFallback.map(renderJobItem)}</AnimatePresence>
+          </ul>
         </>
       )}
 

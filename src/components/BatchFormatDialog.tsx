@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useModalFocus } from "../lib/useModalFocus";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -54,9 +55,11 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
     onSubmit(formatId, audioFormat);
   }
 
+  // Portal to document.body: keeps dialogs out of any transformed/filtered
+  // ancestor stacking context.
   return (
     <>
-      {open && (
+      {open && createPortal(
         <div
           className="modal-backdrop"
           onClick={onCancel}
@@ -77,12 +80,12 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
             onClick={(e) => e.stopPropagation()}
           >
             <h3 id={titleId}>批量下载 {count} 个视频</h3>
-            <div className="mode-toggle" role="group" aria-label="下载类型">
+            <div className="segmented" role="group" aria-label="下载类型">
               {(["video", "audio"] as const).map((value) => (
                 <button
                   key={value}
                   type="button"
-                  className={mode === value ? "mode-segment active" : "mode-segment"}
+                  className={mode === value ? "segment-item on" : "segment-item"}
                   aria-pressed={mode === value}
                   onClick={() => setMode(value)}
                 >
@@ -136,7 +139,8 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       <ConfirmDialog

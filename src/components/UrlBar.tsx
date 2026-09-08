@@ -1,3 +1,4 @@
+import { Link2, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
 
 interface UrlBarProps {
@@ -45,13 +46,20 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
 
   return (
     <div className="url-bar">
-      <label htmlFor="video-url">视频链接</label>
-      <div className="url-input-row">
+      <label htmlFor="video-url" className="field-label">
+        视频链接
+      </label>
+      <div className={`url-input-row${loading ? " resolving" : ""}`}>
+        {loading ? (
+          <Loader2 className="url-status-icon" size={16} strokeWidth={2} />
+        ) : (
+          <Link2 className="url-status-icon" size={16} strokeWidth={2} />
+        )}
         <input
           id="video-url"
           className="url-input"
           type="url"
-          placeholder="粘贴 B 站视频或 UP 主空间链接…"
+          placeholder="粘贴 B 站视频或 UP 主空间链接，自动解析"
           value={url}
           onChange={(e) => handleChange(e.target.value)}
           onFocus={(e) => {
@@ -66,7 +74,6 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
           }}
         />
       </div>
-      {loading && <p className="url-hint">正在解析…</p>}
       {error && !loading && <p className="url-hint error">{error}</p>}
       {!loading && !error && url.trim() && (
         <p className="url-hint">粘贴或修改链接后自动解析</p>

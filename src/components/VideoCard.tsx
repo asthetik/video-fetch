@@ -1,6 +1,8 @@
+import { Download as DownloadIcon, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/tauri";
 import type { FormatOption, VideoMeta } from "../types";
+import { IconButton } from "./IconButton";
 
 /** Highest resolution first, then highest bitrate within the same resolution. */
 function sortFormats(formats: FormatOption[]): FormatOption[] {
@@ -21,7 +23,7 @@ function pickDefaultFormat(formats: FormatOption[]): FormatOption | null {
 interface VideoCardProps {
   meta: VideoMeta;
   url: string;
-  onEnqueued: () => void;
+  onEnqueued: (count: number) => void;
   onRefresh: () => void;
   active?: boolean;
   refreshing?: boolean;
@@ -190,8 +192,9 @@ export function VideoCard({
         audio_format: container,
         save_as_copy: saveAsCopy,
         uploader: meta.uploader ?? "",
+        thumbnail_url: meta.thumbnail ?? null,
       });
-      onEnqueued();
+      onEnqueued(pageIndexes.length);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -209,12 +212,18 @@ export function VideoCard({
           <h2>{meta.title}</h2>
           {meta.uploader && <p>{meta.uploader}</p>}
         </div>
+        <IconButton
+          icon={RefreshCw}
+          label="刷新"
+          disabled={refreshing || downloading}
+          onClick={handleRefresh}
+        />
       </div>
 
-      <div className="mode-toggle" role="group" aria-label="下载类型">
+      <div className="segmented" role="group" aria-label="下载类型">
         <button
           type="button"
-          className={mode === "video" ? "mode-segment active" : "mode-segment"}
+          className={mode === "video" ? "segment-item on" : "segment-item"}
           aria-pressed={mode === "video"}
           onClick={() => switchMode("video")}
         >
@@ -222,7 +231,7 @@ export function VideoCard({
         </button>
         <button
           type="button"
-          className={mode === "audio" ? "mode-segment active" : "mode-segment"}
+          className={mode === "audio" ? "segment-item on" : "segment-item"}
           aria-pressed={mode === "audio"}
           onClick={() => switchMode("audio")}
         >
@@ -382,16 +391,8 @@ export function VideoCard({
       <div className="video-card-actions">
         <button
           type="button"
-          className="btn"
-          onClick={handleRefresh}
-          disabled={refreshing || downloading}
-        >
-          {refreshing ? "刷新中…" : "刷新"}
-        </button>
-        <button
-          type="button"
           data-action="download"
-          className="btn btn-primary"
+          className="btn btn-primary btn-download"
           onClick={() => void handleDownload()}
           disabled={
             refreshing ||
@@ -406,13 +407,16 @@ export function VideoCard({
             noneSelected
           }
         >
+          <DownloadIcon size={15} strokeWidth={2.2} />
           {downloading
             ? "加入队列…"
             : formatsLoading
               ? mode === "audio"
                 ? "等待音质…"
                 : "等待清晰度…"
-              : "下载"}
+              : selectedPages.size > 1
+                ? `下载 ${selectedPages.size} 项`
+                : "下载"}
         </button>
       </div>
     </div>

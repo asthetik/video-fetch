@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import {
   api,
   type ResolveFormatsFailedEvent,
@@ -182,21 +183,23 @@ export function HomePage({
     };
   }, [handleResolve]);
 
-  function handleEnqueued() {
+  function handleEnqueued(count: number) {
     onQueueRefresh();
+    // All-skipped batch: queue refresh is still needed, but a "queued" toast would lie.
+    if (count > 0) {
+      toast.success(count > 1 ? `已加入下载队列 · ${count} 项` : "已加入下载队列");
+    }
   }
 
   return (
     <div className="home-page">
-      <div className="home-toolbar">
-        <UrlBar
-          url={url}
-          loading={loading}
-          error={error}
-          onUrlChange={setUrl}
-          onResolve={(next) => void handleResolve(next)}
-        />
-      </div>
+      <UrlBar
+        url={url}
+        loading={loading}
+        error={error}
+        onUrlChange={setUrl}
+        onResolve={(next) => void handleResolve(next)}
+      />
 
       {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
 
@@ -222,10 +225,7 @@ export function HomePage({
         )
       )}
 
-      <DownloadQueue
-        refreshToken={queueRefresh}
-        onOpenHistory={onOpenHistory}
-      />
+      <DownloadQueue refreshToken={queueRefresh} onOpenHistory={onOpenHistory} />
     </div>
   );
 }

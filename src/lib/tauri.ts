@@ -25,6 +25,10 @@ export interface EnqueueArgs {
   /** Save another copy with (n) suffix; never overwrite. */
   save_as_copy?: boolean;
   uploader?: string;
+  /** Cover URL stored with the job for the history page. */
+  thumbnail_url?: string | null;
+  /** Source duration in seconds stored with the job for the history page. */
+  duration_secs?: number | null;
 }
 
 export interface CheckConflictArgs {
@@ -103,7 +107,12 @@ export const api = {
   spaceListVideos: (mid: number, pn: number, keyword: string, order: string) =>
     invoke<SpacePage>("space_list_videos", { mid, pn, keyword, order }),
   spaceEnqueueBatch: (args: {
-    items: { bvid: string; title: string }[];
+    items: {
+      bvid: string;
+      title: string;
+      cover?: string | null;
+      duration_secs?: number | null;
+    }[];
     format_id: string;
     audio_format?: string | null;
   }) => invoke<BatchEnqueueResult>("space_enqueue_batch", { args }),

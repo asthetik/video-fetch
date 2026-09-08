@@ -1,3 +1,7 @@
+import { createPortal } from "react-dom";
+import { useRef } from "react";
+import { useModalFocus } from "../lib/useModalFocus";
+
 export type DeleteChoice = "cancel" | "record" | "record_and_file";
 
 interface DeleteConfirmDialogProps {
@@ -14,23 +18,37 @@ export function DeleteConfirmDialog({
   filePath,
   onChoose,
 }: DeleteConfirmDialogProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalFocus(open, panelRef);
+
   if (!open) {
     return null;
   }
 
   const canDeleteFile = Boolean(filePath);
 
-  return (
+  // Portal to document.body: keeps dialogs out of any transformed/filtered
+  // ancestor stacking context.
+  return createPortal(
     <div
       className="modal-backdrop"
       role="presentation"
       onClick={() => onChoose("cancel")}
+      onKeyDown={(e) => {
+        // Same Escape contract as ConfirmDialog.
+        e.stopPropagation();
+        if (e.key === "Escape") {
+          onChoose("cancel");
+        }
+      }}
     >
       <div
         className="modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="delete-dialog-title"
+        tabIndex={-1}
+        ref={panelRef}
         onClick={(e) => e.stopPropagation()}
       >
         <h3 id="delete-dialog-title">删除任务</h3>
@@ -93,6 +111,7 @@ export function DeleteConfirmDialog({
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

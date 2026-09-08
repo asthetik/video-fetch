@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
+import { FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "../lib/tauri";
 import { parseLogLine } from "../lib/activityLog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { IconButton } from "../components/IconButton";
 import type { LogFileInfo } from "../types";
 
 function formatBytes(n: number): string {
@@ -97,25 +99,27 @@ export function LogsPage() {
             )}
           </select>
           <div className="logs-toolbar">
-            <button type="button" className="btn btn-sm" onClick={() => void refresh()}>
-              刷新
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm"
+            <IconButton
+              icon={RefreshCw}
+              label="刷新"
+              action="refresh-logs"
+              onClick={() => void refresh()}
+            />
+            <IconButton
+              icon={FolderOpen}
+              label="打开日志目录"
+              action="open-log-dir"
               disabled={!dir}
               onClick={() => void api.openPath(dir)}
-            >
-              打开日志目录
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-danger"
+            />
+            <IconButton
+              icon={Trash2}
+              label="清空日志"
+              action="clear-logs"
+              danger
               disabled={files.length === 0}
               onClick={() => setConfirmOpen(true)}
-            >
-              清空日志
-            </button>
+            />
           </div>
         </div>
         <div className="log-view">

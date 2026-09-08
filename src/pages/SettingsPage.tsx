@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Download, FileCode2, FolderOpen, Palette, UserRound } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "../lib/tauri";
 import { AuthStatus } from "../components/AuthStatus";
 import { NamingPreview } from "../components/NamingPreview";
+import { Segmented } from "../components/Segmented";
+import { useTheme } from "../hooks/useTheme";
 import type { AppSettings } from "../types";
 
 const NAMING_PRESETS: { label: string; template: string }[] = [
@@ -17,13 +21,15 @@ const NAMING_PRESETS: { label: string; template: string }[] = [
   },
 ];
 
+const CONCURRENCY_PRESETS = [1, 2, 3, 4, 8];
+
 const AUTOSAVE_DEBOUNCE_MS = 400;
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [importing, setImporting] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
+  const { mode, setMode } = useTheme();
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSettingsRef = useRef<AppSettings | null>(null);
@@ -31,12 +37,9 @@ export function SettingsPage() {
   const persist = useCallback(async (next: AppSettings) => {
     try {
       await api.saveSettings(next);
-      setMessage((prev) =>
-        prev && prev.startsWith("无法保存设置") ? null : prev,
-      );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      setMessage(`无法保存设置：${detail}`);
+      toast.error(`无法保存设置：${detail}`);
     }
   }, []);
 
@@ -100,17 +103,27 @@ export function SettingsPage() {
     }
   }
 
+  async function handleOpenSaveDir() {
+    if (!settings) {
+      return;
+    }
+    try {
+      await api.openPath(settings.save_dir);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function handleImportCookies() {
     setImporting(true);
-    setMessage(null);
     try {
       const path = await api.pickCookiesFile();
       await api.importCookiesPath(path);
-      setMessage("Cookies 已导入");
+      toast.success("Cookies 已导入");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes("取消")) {
-        setMessage(msg);
+        toast.error(msg);
       }
     } finally {
       setImporting(false);
@@ -122,13 +135,42 @@ export function SettingsPage() {
   }
 
   const activePreset = NAMING_PRESETS.find((p) => p.template === settings.filename_template);
+  const concurrencyOptions = CONCURRENCY_PRESETS.includes(settings.concurrency)
+    ? CONCURRENCY_PRESETS
+    : [...CONCURRENCY_PRESETS, settings.concurrency].sort((a, b) => a - b);
 
   return (
     <div className="settings-page">
       <h2 className="page-title">设置</h2>
 
       <section className="settings-section">
-        <h3>下载</h3>
+        <h3 className="settings-section-title">
+          <Palette size={14} strokeWidth={2} />
+          外观
+        </h3>
+        <div className="settings-row-block">
+          <div>
+            <p className="settings-row-label">主题</p>
+            <p className="settings-hint">深浅色跟随系统或手动固定</p>
+          </div>
+          <Segmented
+            options={[
+              { value: "system", label: "跟随系统" },
+              { value: "light", label: "浅色" },
+              { value: "dark", label: "深色" },
+            ]}
+            value={mode}
+            ariaLabel="主题"
+            onChange={setMode}
+          />
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <h3 className="settings-section-title">
+          <Download size={14} strokeWidth={2} />
+          下载
+        </h3>
 
         <label className="settings-field">
           <span className="field-label">保存目录</span>
@@ -140,43 +182,50 @@ export function SettingsPage() {
               readOnly
             />
             <button type="button" className="btn" onClick={() => void handlePickDir()}>
-              选择…
+              更改…
+            </button>
+            <button type="button" className="btn" onClick={() => void handleOpenSaveDir()}>
+              <FolderOpen size={14} strokeWidth={2} />
+              打开
             </button>
           </div>
         </label>
 
-        <label className="settings-field">
-          <span className="field-label">并发下载数</span>
-          <input
-            type="number"
-            className="settings-input settings-input-narrow"
-            min={1}
-            max={8}
+        <div className="settings-row-block">
+          <p className="settings-row-label">并发下载数</p>
+          <Segmented
+            options={concurrencyOptions.map((n) => ({ value: n, label: String(n) }))}
             value={settings.concurrency}
-            onChange={(e) =>
-              patch({ concurrency: Math.max(1, Math.min(8, Number(e.target.value))) })
-            }
+            ariaLabel="并发下载数"
+            onChange={(n) => patch({ concurrency: n })}
           />
-        </label>
+        </div>
 
-        <label className="settings-check">
-          <input
-            type="checkbox"
-            checked={settings.skip_existing}
-            onChange={(e) => patch({ skip_existing: e.target.checked })}
-          />
-          <span>
-            本地已有文件时默认跳过
-            <span className="settings-check-hint">
+        <div className="settings-row-block">
+          <div>
+            <p className="settings-row-label">跳过本地已有文件</p>
+            <p className="settings-hint">
               开启后，主页点下载若检测到本地文件则直接跳过；关闭后，检测到本地文件会自动另存一份（不覆盖原文件）。
-            </span>
-          </span>
-        </label>
-
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.skip_existing}
+            aria-label="跳过本地已有文件"
+            className={`switch${settings.skip_existing ? " on" : ""}`}
+            onClick={() => patch({ skip_existing: !settings.skip_existing })}
+          >
+            <span className="switch-knob" />
+          </button>
+        </div>
       </section>
 
       <section className="settings-section">
-        <h3>文件命名</h3>
+        <h3 className="settings-section-title">
+          <FileCode2 size={14} strokeWidth={2} />
+          文件命名
+        </h3>
         <p className="settings-hint">
           选择预设或自定义模板；变量：title、id、uploader、timestamp / upload_date（本地时区）、ext
         </p>
@@ -186,7 +235,7 @@ export function SettingsPage() {
             <button
               key={preset.template}
               type="button"
-              className={`btn btn-sm${activePreset?.template === preset.template ? " preset-active" : ""}`}
+              className={`chip${activePreset?.template === preset.template ? " on" : ""}`}
               onClick={() => patch({ filename_template: preset.template })}
             >
               {preset.label}
@@ -215,7 +264,10 @@ export function SettingsPage() {
       </section>
 
       <section className="settings-section">
-        <h3>B 站登录</h3>
+        <h3 className="settings-section-title">
+          <UserRound size={14} strokeWidth={2} />
+          B 站登录
+        </h3>
         <div className="auth-settings">
           <AuthStatus />
         </div>
@@ -237,18 +289,6 @@ export function SettingsPage() {
           </div>
         </details>
       </section>
-
-      {message && (
-        <div className="settings-footer">
-          <p
-            className={`settings-message${
-              message.includes("失败") || message.includes("无法") ? " error" : ""
-            }`}
-          >
-            {message}
-          </p>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,0 +1,136 @@
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 1.25rem;
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.app-header-end {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.app-nav {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.8rem;
+  border: none;
+  border-radius: var(--radius-ctl);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: color var(--nav-transition-ms) ease, background-color var(--nav-transition-ms) ease;
+}
+
+.nav-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.nav-btn:hover {
+  color: var(--text);
+  background: var(--space-hover);
+}
+
+.nav-btn.active {
+  color: #fff;
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.auth-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-chip);
+  background: var(--ctl-bg);
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.auth-chip:hover {
+  color: var(--text);
+}
+
+.auth-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.auth-chip.logged_in {
+  color: var(--success);
+}
+
+.auth-chip.logged_in .auth-chip-dot {
+  background: var(--success);
+}
+
+.auth-chip.possibly_expired {
+  color: var(--warn);
+}
+
+.auth-chip.possibly_expired .auth-chip-dot {
+  background: var(--warn);
+}
+
+.app-main {
+  flex: 1;
+  max-width: 640px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.page-hidden {
+  display: none;
+}
+
+.page-shell {
+  height: 100%;
+}
+
+/* Page transitions are handled by PageTransition (motion/react); no CSS phase classes. */
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-btn,
+  .space-row {
+    transition: none;
+  }
+
+  .page-shell {
+    transition: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

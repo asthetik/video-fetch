@@ -1,8 +1,29 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { api } from "../lib/tauri";
 import type { AuthStatus as AuthStatusType } from "../types";
+
+/** Shared auth status source: initial fetch + auth://status event stream. */
+export function useAuthStatus(): AuthStatusType {
+  const [status, setStatus] = useState<AuthStatusType>("logged_out");
+
+  useEffect(() => {
+    void api.getAuthStatus().then(setStatus);
+    let unlisten: (() => void) | undefined;
+    void listen<AuthStatusType>("auth://status", (event) => {
+      setStatus(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  return status;
+}
 
 const STATUS_LABEL: Record<AuthStatusType, string> = {
   logged_out: "未登录",
@@ -80,6 +101,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
     try {
       await api.clearAuth();
       applyStatus(await api.getAuthStatus());
+      toast.success("已退出登录");
     } catch (err) {
       setHint(err instanceof Error ? err.message : String(err));
     } finally {
