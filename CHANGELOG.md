@@ -2,6 +2,12 @@
 
 本项目的版本说明集中记录于此，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- 发布打包的 yt-dlp / ffmpeg sidecar 由「取构建时最新」改为固定版本：yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot pip 生态每月自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`（当前 9.0.1，手动升级；Linux/Windows 用 BtbN 对应 release 分支构建，macOS 用 evermeet 版本直链）。CI sidecar 缓存 key 纳入版本文件，版本变更自动失效重下。
+
 ## [0.3.3] - 2026-09-05
 
 ### Changed
