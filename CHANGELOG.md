@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- 「关于」页第三方组件区块显示 yt-dlp 与 ffmpeg 的 release 固定版本：编译期从版本固定文件（`requirements-sidecars.txt` / `FFMPEG_VERSION`）注入，与发版包实际捆绑的二进制同源一致，展示零子进程、零等待。
+
 ### Changed
 
 - 发布打包的 yt-dlp / ffmpeg sidecar 由「取构建时最新」改为固定版本：yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot pip 生态每月自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`（当前 9.0.1，手动升级；Linux/Windows 用 BtbN 对应 release 分支构建，macOS 用 evermeet 版本直链）。CI sidecar 缓存 key 纳入版本文件，版本变更自动失效重下。

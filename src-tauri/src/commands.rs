@@ -1326,6 +1326,104 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     })
 }
 
+/// Versions of the engine sidecars, fixed at build time from the pin files
+/// that fetch_sidecars.py downloads from (single source of truth).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineVersions {
+    pub yt_dlp: String,
+    pub ffmpeg: String,
+}
+
+#[tauri::command]
+pub fn get_engine_versions() -> EngineVersions {
+    EngineVersions {
+        yt_dlp: env!("SIDECAR_YTDLP_VERSION").to_string(),
+        ffmpeg: env!("SIDECAR_FFMPEG_VERSION").to_string(),
+    }
+}
+
+#[cfg(test)]
+mod engine_version_tests {
+    use super::*;
+
+    /// Independent re-implementation of the build.rs extraction: re-reads the
+    /// pin files and recomputes the expected values, so any drift between the
+    /// injected env values and the pin files turns these tests red.
+    fn ytdlp_tag_from_disk() -> String {
+        let text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/requirements-sidecars.txt"),
+        )
+        .expect("scripts/requirements-sidecars.txt must exist next to the crate");
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            // Same tolerance envelope as build.rs (whitespace around `==`,
+            // trailing comments) so a legitimate pin reformat stays green.
+            let Some((name, rest)) = line.split_once("==") else {
+                continue;
+            };
+            if name.trim() != "yt-dlp" {
+                continue;
+            }
+            let raw = rest.split('#').next().unwrap_or("").trim();
+            let parts: Vec<&str> = raw.split('.').collect();
+            assert_eq!(parts.len(), 3, "unexpected yt-dlp pin {raw:?}");
+            assert_eq!(parts[0].len(), 4, "unexpected yt-dlp pin {raw:?}");
+            return format!("{}.{:0>2}.{:0>2}", parts[0], parts[1], parts[2]);
+        }
+        panic!("no yt-dlp pin found in scripts/requirements-sidecars.txt");
+    }
+
+    fn ffmpeg_version_from_disk() -> String {
+        let text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/fetch_sidecars.py"),
+        )
+        .expect("scripts/fetch_sidecars.py must exist next to the crate");
+        for line in text.lines() {
+            let Some((_, rest)) = line.split_once("FFMPEG_VERSION = \"") else {
+                continue;
+            };
+            let end = rest.find('"').expect("unterminated FFMPEG_VERSION value");
+            return rest[..end].to_string();
+        }
+        panic!("no FFMPEG_VERSION assignment found in scripts/fetch_sidecars.py");
+    }
+
+    #[test]
+    fn injected_ytdlp_version_matches_pin_file() {
+        assert_eq!(env!("SIDECAR_YTDLP_VERSION"), ytdlp_tag_from_disk());
+    }
+
+    #[test]
+    fn injected_ffmpeg_version_matches_fetch_script() {
+        assert_eq!(env!("SIDECAR_FFMPEG_VERSION"), ffmpeg_version_from_disk());
+    }
+
+    #[test]
+    fn injected_versions_have_expected_shapes() {
+        let ytdlp = env!("SIDECAR_YTDLP_VERSION");
+        let parts: Vec<&str> = ytdlp.split('.').collect();
+        assert_eq!(parts.len(), 3, "yt-dlp tag {ytdlp:?}");
+        assert_eq!(parts[0].len(), 4, "yt-dlp tag {ytdlp:?}");
+        assert_eq!(parts[1].len(), 2, "yt-dlp tag {ytdlp:?}");
+        assert_eq!(parts[2].len(), 2, "yt-dlp tag {ytdlp:?}");
+        assert!(parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())));
+
+        let ffmpeg = env!("SIDECAR_FFMPEG_VERSION");
+        let parts: Vec<&str> = ffmpeg.split('.').collect();
+        assert_eq!(parts.len(), 3, "ffmpeg version {ffmpeg:?}");
+        assert!(
+            parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+            "ffmpeg version {ffmpeg:?}"
+        );
+    }
+}
+
 #[tauri::command]
 pub fn list_log_files(
     state: State<'_, AppState>,

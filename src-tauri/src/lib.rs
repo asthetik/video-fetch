@@ -21,9 +21,10 @@ mod ytdlp;
 use commands::{
     build_app_state, cancel_all_jobs, cancel_job, check_download_conflict, clear_auth,
     clear_finished_jobs, clear_logs, delete_job, detect_url, enqueue_download, get_auth_status,
-    get_settings, import_cookies_path, list_jobs, list_log_files, log_ui_events, open_path,
-    pick_cookies_file, pick_save_dir, preview_name, read_log_tail, resolve_url, retry_job,
-    save_settings, space_enqueue_batch, space_info, space_list_videos, start_bilibili_login,
+    get_engine_versions, get_settings, import_cookies_path, list_jobs, list_log_files,
+    log_ui_events, open_path, pick_cookies_file, pick_save_dir, preview_name, read_log_tail,
+    resolve_url, retry_job, save_settings, space_enqueue_batch, space_info, space_list_videos,
+    start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -57,6 +58,7 @@ pub fn run() {
             read_log_tail,
             log_ui_events,
             get_settings,
+            get_engine_versions,
             save_settings,
             get_auth_status,
             import_cookies_path,

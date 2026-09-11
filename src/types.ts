@@ -115,3 +115,8 @@ export interface BatchEnqueueResult {
   skipped_active: number;
   failed: { bvid: string; error: string }[];
 }
+
+export interface EngineVersions {
+  ytDlp: string;
+  ffmpeg: string;
+}

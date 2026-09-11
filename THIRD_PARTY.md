@@ -2,7 +2,7 @@
 
 Video Fetch（影取）在发版包中捆绑以下独立可执行文件，供下载与音视频合并使用。本应用源码采用 Apache-2.0 许可证；下列组件各有独立许可证，使用者须一并遵守。
 
-上述二进制由 `scripts/fetch_sidecars.py` 在构建前下载，不入库；版本固定——yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot 自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`（手动升级）。
+上述二进制由 `scripts/fetch_sidecars.py` 在构建前下载，不入库；版本固定——yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot 自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`（手动升级）。实际随包版本以应用「关于」页显示为准。
 
 ---
 
