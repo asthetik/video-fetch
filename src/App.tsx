@@ -56,7 +56,7 @@ function App() {
             ))}
           </nav>
           <div className="app-header-end">
-            <AuthChip onOpenSettings={() => setPage("settings")} />
+            <AuthChip />
           </div>
         </header>
 

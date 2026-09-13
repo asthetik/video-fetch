@@ -72,8 +72,13 @@
   white-space: nowrap;
 }
 
-.auth-chip:hover {
+.auth-chip:hover:not(:disabled) {
   color: var(--text);
+}
+
+.auth-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .auth-chip-dot {
