@@ -3,7 +3,20 @@ import assert from "node:assert/strict";
 import { groupHistoryByDate } from "./historyGroup.ts";
 import type { DownloadJob } from "../types.ts";
 
+// No timezone suffix: parsed as local wall time, so NOW is noon on 2026-09-08
+// in every timezone and hour offsets around it never cross a day boundary.
 const NOW = new Date("2026-09-08T12:00:00");
+
+/** UTC "YYYY-MM-DD HH:MM:SS" stamp at NOW + offsetMs, derived per timezone. */
+function utcStamp(offsetMs: number): string {
+  return new Date(NOW.getTime() + offsetMs)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
+}
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 
 function job(id: string, createdAt: string | null): DownloadJob {
   return {
@@ -21,12 +34,13 @@ function job(id: string, createdAt: string | null): DownloadJob {
 }
 
 test("groups by local date: today / yesterday / recent week", () => {
-  // Local timezone is CST (UTC+8) on this machine; created_at strings are UTC.
+  // Stamps are derived from NOW so the local-day buckets hold in any timezone
+  // (CI runs in UTC; hardcoded CST-assuming strings broke there).
   const jobs = [
-    job("a", "2026-09-08 03:00:00"), // UTC 03:00 -> 11:00 CST, same day = 今天
-    job("b", "2026-09-07 18:00:00"), // UTC 18:00 -> 09-08 02:00 CST = 今天
-    job("c", "2026-09-06 20:00:00"), // UTC 20:00 -> 09-07 04:00 CST = 昨天
-    job("d", "2026-09-04 00:00:00"), // -> 09-04 08:00 CST = 近 7 天
+    job("a", utcStamp(-1 * HOUR)), // 11:00 local -> 今天
+    job("b", utcStamp(-3 * HOUR)), // 09:00 local -> 今天
+    job("c", utcStamp(-20 * HOUR)), // 16:00 previous day -> 昨天
+    job("d", utcStamp(-4 * DAY)), // -> 近 7 天
   ];
   const groups = groupHistoryByDate(jobs, NOW);
   assert.deepEqual(
@@ -40,9 +54,9 @@ test("groups by local date: today / yesterday / recent week", () => {
 
 test("older jobs group by month, newest month first", () => {
   const jobs = [
-    job("x", "2026-08-15 00:00:00"),
-    job("y", "2026-07-01 00:00:00"),
-    job("z", "2026-08-02 00:00:00"),
+    job("x", utcStamp(-20 * DAY)), // 08-19 local -> 2026-08
+    job("y", utcStamp(-60 * DAY)), // -> 2026-07
+    job("z", utcStamp(-10 * DAY)), // 08-29 local -> 2026-08
   ];
   const groups = groupHistoryByDate(jobs, NOW);
   assert.deepEqual(
@@ -53,7 +67,7 @@ test("older jobs group by month, newest month first", () => {
 });
 
 test("missing created_at falls into a trailing earlier bucket; input order kept", () => {
-  const jobs = [job("a", "2026-09-08 00:00:00"), job("old", null)];
+  const jobs = [job("a", utcStamp(-2 * HOUR)), job("old", null)];
   const groups = groupHistoryByDate(jobs, NOW);
   assert.deepEqual(
     groups.map((g) => g.label),
