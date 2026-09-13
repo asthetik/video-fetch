@@ -1,10 +1,10 @@
-// src/components/AuthChip.tsx
 import { useEffect } from "react";
 import { toast } from "sonner";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { useAuthActions } from "../hooks/useAuthActions";
+import { LogoutConfirmDialog } from "./LogoutConfirmDialog";
+import type { AuthStatus as AuthStatusType } from "../types";
 
-const TITLE: Record<string, string> = {
+const TITLE: Record<AuthStatusType, string> = {
   logged_in: "已登录 · 点击退出登录",
   logged_out: "未登录 · 点击登录 B 站",
   possibly_expired: "登录可能过期 · 点击退出登录",
@@ -55,13 +55,8 @@ export function AuthChip() {
             : "登录"}
       </button>
 
-      <ConfirmDialog
+      <LogoutConfirmDialog
         open={confirmLogout}
-        title="退出登录"
-        message="确定退出登录？退出后将按未登录状态解析与下载。"
-        confirmLabel="退出登录"
-        cancelLabel="关闭"
-        danger
         busy={loggingOut}
         onCancel={() => {
           if (!loggingOut) cancelLogout();
