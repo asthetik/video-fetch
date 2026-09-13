@@ -81,7 +81,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: src-tauri/binaries
-          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch_sidecars.py') }}
+          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/requirements-sidecars.txt', 'scripts/fetch_sidecars.py') }}
 
       - name: Fetch sidecar binaries
         run: python scripts/fetch_sidecars.py

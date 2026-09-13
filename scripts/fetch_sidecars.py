@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Download yt-dlp + ffmpeg into src-tauri/binaries/ for Tauri externalBin.
 
+Versions are pinned, not floating:
+  yt-dlp  — scripts/requirements-sidecars.txt (`yt-dlp==<PyPI version>`,
+            auto-upgraded by Dependabot; zero-padded back to the GitHub
+            release tag here)
+  ffmpeg  — FFMPEG_VERSION below: BtbN release-branch builds (n<x.y>) for
+            Linux/Windows, evermeet x.y.z build for macOS; no package
+            registry exists for Dependabot to track, so bump it manually
+
 Naming:
   binaries/yt-dlp-{TARGET_TRIPLE}[.exe]
   binaries/ffmpeg-{TARGET_TRIPLE}[.exe]
@@ -12,6 +20,7 @@ Run before `npm run tauri build` (CI release) or local bundling.
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -22,8 +31,16 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-YTDLP_LATEST = "https://github.com/yt-dlp/yt-dlp/releases/latest/download"
-FFMPEG_LATEST = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+YTDLP_DOWNLOAD_BASE = "https://github.com/yt-dlp/yt-dlp/releases/download"
+FFMPEG_BTBN_LATEST = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+FFMPEG_EVERMEET = "https://evermeet.cx/ffmpeg"
+
+# FFmpeg release to ship (x.y.z). Linux/Windows use BtbN builds of the
+# matching release branch (n<x.y>), macOS uses evermeet's x.y.z build.
+# Bumped manually — see requirements-sidecars.txt header for why.
+FFMPEG_VERSION = "9.0.1"
+
+REQUIREMENTS_FILE = Path(__file__).resolve().parent / "requirements-sidecars.txt"
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -65,27 +82,82 @@ def make_executable(path: Path) -> None:
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def ytdlp_download_url(system: str, machine: str) -> str:
+def normalize_ytdlp_version(raw: str, source: str = "requirements-sidecars.txt") -> str:
+    """Convert a PyPI-normalized yt-dlp version to the GitHub release tag.
+
+    PyPI strips leading zeros (2026.08.19 -> 2026.8.19); GitHub release
+    tags zero-pad month and day, so pad them back.
+    """
+    parts = raw.split(".")
+    valid = (
+        len(parts) == 3
+        and all(p.isascii() and p.isdigit() for p in parts)
+        and len(parts[0]) == 4
+        and 1 <= int(parts[1]) <= 12
+        and 1 <= int(parts[2]) <= 31
+    )
+    if not valid:
+        die(
+            f"unsupported yt-dlp version {raw!r} in {source}; "
+            "expected a stable release like 2026.8.19"
+        )
+    year, month, day = parts
+    return f"{year}.{int(month):02d}.{int(day):02d}"
+
+
+def load_ytdlp_version(path: Path | None = None) -> str:
+    """Return the pinned yt-dlp GitHub tag from requirements-sidecars.txt."""
+    file = path or REQUIREMENTS_FILE
+    try:
+        text = file.read_text(encoding="utf-8")
+    except OSError as e:
+        die(f"cannot read sidecar version pin file {file}: {e}")
+    pin: str | None = None
+    for line in text.splitlines():
+        m = re.match(r"^\s*yt-dlp\s*==\s*([\w.]+)(?:\s+#.*)?\s*$", line)
+        if m:
+            if pin is not None:
+                die(
+                    f"multiple yt-dlp pins found in {file}: "
+                    f"{pin!r} and {m.group(1)!r}"
+                )
+            pin = m.group(1)
+    if pin is None:
+        die(f"no 'yt-dlp==<version>' pin found in {file}")
+    return normalize_ytdlp_version(pin, str(file))
+
+
+def ytdlp_download_url(system: str, machine: str, version: str) -> str:
+    base = f"{YTDLP_DOWNLOAD_BASE}/{version}"
     m = machine.lower()
     if system == "Darwin":
-        return f"{YTDLP_LATEST}/yt-dlp_macos"
+        return f"{base}/yt-dlp_macos"
     if system == "Linux":
         if m in {"x86_64", "amd64"}:
-            return f"{YTDLP_LATEST}/yt-dlp_linux"
+            return f"{base}/yt-dlp_linux"
         if m in {"aarch64", "arm64"}:
-            return f"{YTDLP_LATEST}/yt-dlp_linux_aarch64"
+            return f"{base}/yt-dlp_linux_aarch64"
         raise ValueError(f"Unsupported Linux arch for yt-dlp: {machine}")
     if system == "Windows":
         if m in {"aarch64", "arm64"}:
-            return f"{YTDLP_LATEST}/yt-dlp_arm64.exe"
+            return f"{base}/yt-dlp_arm64.exe"
         if m in {"x86_64", "amd64", "x64"}:
-            return f"{YTDLP_LATEST}/yt-dlp.exe"
+            return f"{base}/yt-dlp.exe"
         raise ValueError(f"Unsupported Windows arch for yt-dlp: {machine}")
     raise ValueError(f"Unsupported OS for yt-dlp: {system}")
 
 
+def ffmpeg_branch(version: str = FFMPEG_VERSION) -> str:
+    """Release branch of an x.y.z version (9.0.1 -> 9.0), as used by BtbN."""
+    parts = version.split(".")
+    if len(parts) != 3 or any(not p.isdigit() for p in parts):
+        die(f"FFMPEG_VERSION {version!r} must be a full x.y.z release like 9.0.1")
+    return ".".join(parts[:2])
+
+
 def ffmpeg_download_url(system: str, machine: str) -> str | None:
     """Return archive URL, or None for Darwin (evermeet handled separately)."""
+    branch = ffmpeg_branch()
     m = machine.lower()
     if system == "Darwin":
         return None
@@ -96,7 +168,7 @@ def ffmpeg_download_url(system: str, machine: str) -> str | None:
             arch = "linuxarm64"
         else:
             raise ValueError(f"Unsupported Linux arch for ffmpeg: {machine}")
-        return f"{FFMPEG_LATEST}/ffmpeg-master-latest-{arch}-gpl.tar.xz"
+        return f"{FFMPEG_BTBN_LATEST}/ffmpeg-n{branch}-latest-{arch}-gpl-{branch}.tar.xz"
     if system == "Windows":
         if m in {"aarch64", "arm64"}:
             tag = "winarm64"
@@ -104,14 +176,14 @@ def ffmpeg_download_url(system: str, machine: str) -> str | None:
             tag = "win64"
         else:
             raise ValueError(f"Unsupported Windows arch for ffmpeg: {machine}")
-        return f"{FFMPEG_LATEST}/ffmpeg-master-latest-{tag}-gpl.zip"
+        return f"{FFMPEG_BTBN_LATEST}/ffmpeg-n{branch}-latest-{tag}-gpl-{branch}.zip"
     raise ValueError(f"Unsupported OS for ffmpeg: {system}")
 
 
-def fetch_ytdlp(system: str, machine: str, out: Path) -> None:
-    print("Downloading yt-dlp...")
+def fetch_ytdlp(system: str, machine: str, out: Path, version: str) -> None:
+    print(f"Downloading yt-dlp {version}...")
     try:
-        url = ytdlp_download_url(system, machine)
+        url = ytdlp_download_url(system, machine, version)
     except ValueError as e:
         die(str(e))
     download(url, out)
@@ -127,10 +199,10 @@ def find_one(root: Path, pattern: str) -> Path:
 
 
 def fetch_ffmpeg(system: str, machine: str, out: Path, tmp: Path) -> None:
-    print("Downloading ffmpeg...")
+    print(f"Downloading ffmpeg {FFMPEG_VERSION}...")
     if system == "Darwin":
         zip_path = tmp / "ffmpeg.zip"
-        download("https://evermeet.cx/ffmpeg/getrelease/zip", zip_path)
+        download(f"{FFMPEG_EVERMEET}/ffmpeg-{FFMPEG_VERSION}.zip", zip_path)
         extract_dir = tmp / "ffmpeg-macos"
         extract_dir.mkdir()
         with zipfile.ZipFile(zip_path) as zf:
@@ -186,6 +258,10 @@ def main() -> None:
     bin_dir = root / "src-tauri" / "binaries"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
+    ytdlp_version = load_ytdlp_version()
+    print(f"yt-dlp version: {ytdlp_version} (pinned in requirements-sidecars.txt)")
+    print(f"ffmpeg version: {FFMPEG_VERSION} (pinned as FFMPEG_VERSION)")
+
     triple = host_triple()
     system = detect_system()
     machine = detect_machine()
@@ -208,7 +284,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="videofetch-sidecars-") as tmp_s:
         tmp = Path(tmp_s)
         if need_ytdlp:
-            fetch_ytdlp(system, machine, ytdlp_out)
+            fetch_ytdlp(system, machine, ytdlp_out, ytdlp_version)
         else:
             print(f"Keeping cached yt-dlp: {ytdlp_out}")
         if need_ffmpeg:

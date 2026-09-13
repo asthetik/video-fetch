@@ -16,3 +16,10 @@ updates:
     directory: "/src-tauri"
     schedule:
       interval: "monthly"
+
+  # yt-dlp version pin in scripts/requirements-sidecars.txt (consumed by
+  # scripts/fetch_sidecars.py to build the release download URLs).
+  - package-ecosystem: "pip"
+    directory: "/scripts"
+    schedule:
+      interval: "monthly"

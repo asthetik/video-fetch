@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import packageJson from "../../package.json";
+import { api } from "../lib/tauri";
+import type { EngineVersions } from "../types";
 
 const REPO_URL = "https://github.com/asthetik/video-fetch";
 const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
@@ -19,11 +21,27 @@ async function openExternal(url: string) {
 
 export function AboutPage() {
   const [version, setVersion] = useState(PKG_VERSION);
+  const [engineVersions, setEngineVersions] = useState<EngineVersions>();
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
       .catch(() => setVersion(PKG_VERSION));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getEngineVersions()
+      .then((v) => {
+        if (!cancelled) setEngineVersions(v);
+      })
+      .catch((err) => {
+        console.error(err);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -78,6 +96,16 @@ export function AboutPage() {
         <p className="about-copy">
           发版包捆绑 yt-dlp 与 ffmpeg，各有独立许可证。详见仓库说明。
         </p>
+        <dl className="about-meta">
+          <div>
+            <dt>yt-dlp</dt>
+            <dd>{engineVersions?.ytDlp}</dd>
+          </div>
+          <div>
+            <dt>ffmpeg</dt>
+            <dd>{engineVersions?.ffmpeg}</dd>
+          </div>
+        </dl>
         <button
           type="button"
           className="btn btn-sm"

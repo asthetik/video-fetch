@@ -11,6 +11,7 @@ import type {
   SpacePage,
   SpaceInfo,
   BatchEnqueueResult,
+  EngineVersions,
 } from "../types";
 
 export interface EnqueueArgs {
@@ -77,6 +78,7 @@ export const api = {
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),
   getSettings: () => invoke<AppSettings>("get_settings"),
+  getEngineVersions: () => invoke<EngineVersions>("get_engine_versions"),
   saveSettings: (settings: AppSettings) => invoke<void>("save_settings", { settings }),
   getAuthStatus: () => invoke<AuthStatus>("get_auth_status"),
   importCookiesPath: (path: string) =>
