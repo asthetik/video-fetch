@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import {
   FolderOpen,
@@ -18,6 +19,10 @@ import { EmptyState } from "../components/EmptyState";
 import { IconButton } from "../components/IconButton";
 import { Segmented } from "../components/Segmented";
 import { ThumbTile } from "../components/ThumbTile";
+import {
+  type DownloadProgressPayload,
+  mergeJob,
+} from "../lib/downloadProgress";
 import { formatBytes } from "../lib/format";
 import {
   filterHistoryJobs,
@@ -69,6 +74,33 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
 
   useEffect(() => {
     void loadJobs();
+  }, [loadJobs]);
+
+  // Live progress keeps the pinned 进行中 group current while the page is
+  // open; terminal events also trigger a reload so completed rows pick up
+  // persisted metadata (file size) that the event payload doesn't carry.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void listen<DownloadProgressPayload>("download://progress", (event) => {
+      const patch = event.payload;
+      setAllJobs((prev) => {
+        if (!prev.some((j) => j.id === patch.id)) {
+          void loadJobs();
+          return prev;
+        }
+        return prev.map((j) => (j.id === patch.id ? mergeJob(j, patch) : j));
+      });
+      if (patch.status === "done" || patch.status === "failed") {
+        void loadJobs();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
   }, [loadJobs]);
 
   const doneCount = allJobs.filter((j) => j.status === "done").length;
