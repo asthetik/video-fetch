@@ -60,9 +60,15 @@ impl Db {
             conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", [])?;
         }
         // History metadata columns (same idempotent pattern as audio_format).
-        for col in ["thumbnail_url", "duration_secs", "file_size"] {
+        // Declared types must mirror SCHEMA so migrated DBs stay byte-compatible
+        // with fresh ones; bare ALTER columns would carry no type affinity.
+        for (col, kind) in [
+            ("thumbnail_url", "TEXT"),
+            ("duration_secs", "INTEGER"),
+            ("file_size", "INTEGER"),
+        ] {
             if !column_exists(&conn, "jobs", col)? {
-                conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col}"), [])?;
+                conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {kind}"), [])?;
             }
         }
         Self::purge_legacy_resolve_cache(&conn)?;
@@ -751,5 +757,52 @@ mod tests {
         job.thumbnail_url = None;
         db.insert_job(&job).unwrap();
         assert!(db.get_job("legacy-meta-job").is_ok());
+    }
+
+    fn column_decl_type(conn: &Connection, column: &str) -> Option<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(jobs)").unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows.into_iter()
+            .find(|(name, _)| name == column)
+            .and_then(|(_, decl)| decl)
+    }
+
+    #[test]
+    fn migrated_metadata_columns_carry_declared_types() {
+        // A migrated DB must expose the same declared types as a fresh SCHEMA
+        // install; bare ALTER TABLE ADD COLUMN would leave them untyped.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("jobs.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY, url TEXT NOT NULL, video_id TEXT NOT NULL,
+                    page_index INTEGER NOT NULL, format_id TEXT NOT NULL,
+                    audio_format TEXT, title TEXT NOT NULL, output_template TEXT NOT NULL,
+                    status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
+                    error TEXT, output_path TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&db_path).unwrap();
+
+        for (col, kind) in [
+            ("thumbnail_url", "TEXT"),
+            ("duration_secs", "INTEGER"),
+            ("file_size", "INTEGER"),
+        ] {
+            assert_eq!(
+                column_decl_type(&db.conn, col).as_deref(),
+                Some(kind),
+                "migrated column {col} must declare {kind}"
+            );
+        }
     }
 }
