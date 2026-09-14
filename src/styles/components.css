@@ -432,7 +432,6 @@ html[data-theme="dark"] .segment-item.on {
 @media (prefers-reduced-motion: reduce) {
   .btn,
   .icon-btn,
-  .chip,
   .nav-btn,
   .switch,
   .segment-item {

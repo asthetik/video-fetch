@@ -66,6 +66,20 @@ test("older jobs group by month, newest month first", () => {
   assert.deepEqual(groups[0].jobs.map((j) => j.id), ["x", "z"]);
 });
 
+test("month groups self-sort newest first even with oldest-first input", () => {
+  const jobs = [
+    job("old", utcStamp(-60 * DAY)), // 2026-07
+    job("mid", utcStamp(-31 * DAY)), // 2026-08
+    job("new", utcStamp(-20 * DAY)), // 2026-08
+  ];
+  const groups = groupHistoryByDate(jobs, NOW);
+  assert.deepEqual(
+    groups.map((g) => g.label),
+    ["2026-08", "2026-07"],
+  );
+  assert.deepEqual(groups[0].jobs.map((j) => j.id), ["mid", "new"]);
+});
+
 test("missing created_at falls into a trailing earlier bucket; input order kept", () => {
   const jobs = [job("a", utcStamp(-2 * HOUR)), job("old", null)];
   const groups = groupHistoryByDate(jobs, NOW);

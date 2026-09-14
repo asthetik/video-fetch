@@ -22,7 +22,8 @@ function monthKey(d: Date): string {
 /**
  * Group finished jobs by local date: today / yesterday / within 7 days /
  * by month (newest first). Jobs without created_at land in a trailing
- * unlabeled "更早" bucket. Input order is preserved within groups.
+ * unlabeled "更早" bucket. Input order is preserved within groups; group
+ * order does not depend on input order.
  */
 export function groupHistoryByDate(
   jobs: DownloadJob[],
@@ -50,8 +51,12 @@ export function groupHistoryByDate(
   }
 
   const groups = order.map((label) => ({ label, jobs: buckets.get(label)! }));
-  // "近 7 天" must precede month groups even if a month bucket appeared first.
-  groups.sort((a, b) => rank(a.label) - rank(b.label));
+  // "近 7 天" must precede month groups even if a month bucket appeared first,
+  // and month labels ("YYYY-MM") sort newest-first regardless of input order.
+  groups.sort((a, b) => {
+    const byRank = rank(a.label) - rank(b.label);
+    return byRank !== 0 ? byRank : b.label.localeCompare(a.label);
+  });
   if (noDate.length > 0) {
     groups.push({ label: "更早", jobs: noDate });
   }

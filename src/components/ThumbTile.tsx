@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Music, Play } from "lucide-react";
 import { formatDuration } from "../lib/spaceFormat";
 import type { DownloadJob } from "../types";
@@ -30,13 +31,21 @@ function NoteBadge() {
 /** History-row thumbnail: 16:9 for video, square tile for audio-only. */
 export function ThumbTile({ job }: { job: DownloadJob }) {
   const audio = job.audio_format != null;
+  const [failed, setFailed] = useState(false);
+  // A different thumbnail (recycled row) deserves a fresh load attempt.
+  useEffect(() => setFailed(false), [job.thumbnail_url]);
   const gradient = FALLBACK_GRADIENTS[hashIndex(job.id, FALLBACK_GRADIENTS.length)];
   const duration = job.duration_secs ? formatDuration(job.duration_secs) : null;
 
   return (
     <span className={`thumb-tile${audio ? " audio" : ""}`}>
-      {job.thumbnail_url ? (
-        <img src={job.thumbnail_url} alt="" loading="lazy" />
+      {!failed && job.thumbnail_url ? (
+        <img
+          src={job.thumbnail_url}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
       ) : (
         <span className="thumb-fallback" style={{ background: gradient }}>
           {audio ? (

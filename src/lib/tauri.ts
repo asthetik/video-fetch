@@ -10,6 +10,7 @@ import type {
   UrlKind,
   SpacePage,
   SpaceInfo,
+  BatchEnqueueItem,
   BatchEnqueueResult,
   EngineVersions,
 } from "../types";
@@ -109,12 +110,7 @@ export const api = {
   spaceListVideos: (mid: number, pn: number, keyword: string, order: string) =>
     invoke<SpacePage>("space_list_videos", { mid, pn, keyword, order }),
   spaceEnqueueBatch: (args: {
-    items: {
-      bvid: string;
-      title: string;
-      cover?: string | null;
-      duration_secs?: number | null;
-    }[];
+    items: BatchEnqueueItem[];
     format_id: string;
     audio_format?: string | null;
   }) => invoke<BatchEnqueueResult>("space_enqueue_batch", { args }),

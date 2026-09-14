@@ -74,9 +74,14 @@ export function DownloadQueue({
   const bulkBusyRef = useRef(false);
 
   const loadJobs = useCallback(async () => {
-    const list = await api.listJobs();
-    setJobs(sortJobs(list));
-    setLoading(false);
+    try {
+      const list = await api.listJobs();
+      setJobs(sortJobs(list));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
