@@ -23,6 +23,8 @@ export interface VideoMeta {
   title: string;
   uploader?: string | null;
   thumbnail?: string | null;
+  /** Source duration in seconds; stored on jobs for the history badge. */
+  duration_secs?: number | null;
   webpage_url: string;
   pages: PageItem[];
   formats: FormatOption[];
@@ -114,6 +116,10 @@ export interface SpaceInfo {
 export interface BatchEnqueueItem {
   bvid: string;
   title: string;
+  /** Cover image URL stored with the job for the history page. */
+  cover?: string | null;
+  /** Source duration in seconds stored with the job for the history page. */
+  duration_secs?: number | null;
 }
 
 export interface BatchEnqueueResult {

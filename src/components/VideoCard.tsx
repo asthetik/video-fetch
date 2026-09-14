@@ -193,6 +193,9 @@ export function VideoCard({
         save_as_copy: saveAsCopy,
         uploader: meta.uploader ?? "",
         thumbnail_url: meta.thumbnail ?? null,
+        // Multi-P top-level duration is the playlist total, not per-page;
+        // only single-P resolves carry a usable per-job duration.
+        duration_secs: meta.pages.length === 1 ? meta.duration_secs ?? null : null,
       });
       onEnqueued(pageIndexes.length);
     } catch (err) {

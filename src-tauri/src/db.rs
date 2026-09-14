@@ -397,6 +397,7 @@ mod tests {
             title: "t".into(),
             uploader: None,
             thumbnail: None,
+            duration_secs: None,
             webpage_url: "https://www.bilibili.com/video/BV1xx".into(),
             pages: vec![],
             formats: vec![],

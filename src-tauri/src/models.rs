@@ -55,6 +55,9 @@ pub struct VideoMeta {
     pub title: String,
     pub uploader: Option<String>,
     pub thumbnail: Option<String>,
+    /// Source duration in seconds from resolve; stored on jobs for history.
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
     pub webpage_url: String,
     pub pages: Vec<PageItem>,
     pub formats: Vec<FormatOption>,
