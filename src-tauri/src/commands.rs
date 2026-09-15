@@ -1327,7 +1327,6 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
             crate::activity_log::ActivityLog::disabled(logs_dir)
         }
     };
-    tracing::info!(target: "core", "app: 启动 v{}", env!("CARGO_PKG_VERSION"));
     // Open the DB only after the subscriber exists so migration records land.
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
@@ -1337,17 +1336,6 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     std::fs::create_dir_all(&work_root)?;
 
     let ytdlp = sidecar::resolve_ytdlp_config(app);
-    tracing::info!(
-        target: "core",
-        "app: 引擎 yt-dlp v{}（{}）· ffmpeg v{}（{}）",
-        env!("SIDECAR_YTDLP_VERSION"),
-        ytdlp.yt_dlp_path.display(),
-        env!("SIDECAR_FFMPEG_VERSION"),
-        ytdlp.ffmpeg_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "未配置".into())
-    );
     let progress: Arc<dyn ProgressEmitter> = Arc::new(TauriProgressEmitter::new(app.clone()));
     let downloads = DownloadManager::with_ytdlp(
         db,
