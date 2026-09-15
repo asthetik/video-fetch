@@ -208,10 +208,17 @@ fn install_panic_hook(logs_dir: &Path) {
     let active = logs_dir.join(ACTIVE_LOG_NAME);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // location is what the default hook prints and the cheapest lead for
+        // a user-pasted log; the payload alone rarely identifies the site.
+        let location = info
+            .location()
+            .map(|l| sanitize_log_line(&l.to_string()))
+            .unwrap_or_else(|| "未知位置".into());
         let line = format!(
-            "{} ERROR app: panic v{} {}\n",
+            "{} ERROR app: panic v{} [{}] {}\n",
             chrono::Local::now().to_rfc3339(),
             env!("CARGO_PKG_VERSION"),
+            location,
             sanitize_log_line(&info.to_string())
         );
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&active) {
@@ -732,5 +739,6 @@ mod tests {
         let content = std::fs::read_to_string(t.path().join("app.log")).unwrap();
         assert!(content.contains("app: panic v"));
         assert!(content.contains("boom <url>"));
+        assert!(content.contains("[src/activity_log.rs:")); // panic site recorded
     }
 }
