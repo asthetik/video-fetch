@@ -75,6 +75,9 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit)
                 && let Some(state) = app_handle.try_state::<commands::AppState>()
             {
+                // Paired with the startup record: no exit line means the
+                // process died unexpectedly (see the panic hook).
+                tracing::info!(target: "core", "app: 退出");
                 state.activity_log.flush();
             }
         });
