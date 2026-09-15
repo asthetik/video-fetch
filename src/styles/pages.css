@@ -368,6 +368,29 @@ html[data-theme="dark"] .queue-badge.done {
   padding: 0.55rem 0;
 }
 
+/* Concurrency slider: full range instead of a fixed preset row. */
+.concurrency-control {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex: 1;
+  max-width: 17rem;
+  justify-content: flex-end;
+}
+
+.concurrency-slider {
+  flex: 1;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.concurrency-value {
+  min-width: 1.5rem;
+  text-align: center;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .settings-row-block + .settings-row-block,
 .settings-field + .settings-field,
 .settings-field + .settings-row-block {
