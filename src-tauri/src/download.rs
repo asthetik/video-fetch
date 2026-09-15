@@ -1012,6 +1012,9 @@ mod tests {
         AppSettings {
             save_dir: dir.to_string_lossy().into(),
             skip_existing: true,
+            // Tests assume one download at a time; keep this pinned so raising
+            // the production default cannot change test premises.
+            concurrency: 1,
             ..AppSettings::default()
         }
     }
@@ -1838,7 +1841,7 @@ mod tests {
         manager.enqueue(a, false).unwrap();
         manager.enqueue(b, false).unwrap();
 
-        // Default concurrency is 1 — only one should be running.
+        // Concurrency is pinned to 1 in test_settings — only one should run.
         let mut saw_one_running = false;
         for _ in 0..100 {
             let jobs = manager.list().unwrap();
