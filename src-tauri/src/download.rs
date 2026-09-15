@@ -734,6 +734,10 @@ impl DownloadManager {
         done.status = JobStatus::Done;
         done.progress = 1.0;
         done.output_path = Some(dest.to_string_lossy().into());
+        done.file_size = std::fs::metadata(&dest)
+            .ok()
+            .map(|m| m.len())
+            .or(done.file_size);
         done.error = None;
         if let Ok(db) = self.db.lock() {
             let _ = db.update_job(&done);
@@ -1026,6 +1030,10 @@ mod tests {
             progress: 0.0,
             error: None,
             output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
         }
     }
 

@@ -84,6 +84,7 @@ pub fn map_view_json(data: &Value, webpage_url: &str) -> AppResult<VideoMeta> {
         .and_then(|v| v.as_str())
         .map(str::to_string);
     let thumbnail = data.get("pic").and_then(|v| v.as_str()).map(str::to_string);
+    let duration_secs = data.get("duration").and_then(|v| v.as_u64());
     let pages_val = data
         .get("pages")
         .and_then(|v| v.as_array())
@@ -125,6 +126,7 @@ pub fn map_view_json(data: &Value, webpage_url: &str) -> AppResult<VideoMeta> {
         title,
         uploader,
         thumbnail,
+        duration_secs,
         webpage_url: webpage_url.to_string(),
         pages,
         formats: Vec::new(),
@@ -148,6 +150,7 @@ pub fn merge_view_with_formats(view: VideoMeta, ytdlp_meta: VideoMeta) -> VideoM
         },
         uploader: view.uploader.or(ytdlp_meta.uploader),
         thumbnail: view.thumbnail.or(ytdlp_meta.thumbnail),
+        duration_secs: view.duration_secs.or(ytdlp_meta.duration_secs),
         webpage_url: if view.webpage_url.is_empty() {
             ytdlp_meta.webpage_url
         } else {
@@ -183,6 +186,7 @@ mod tests {
             "bvid": "BV1xx411c7mD",
             "title": "Test Video",
             "pic": "https://example.com/t.jpg",
+            "duration": 269,
             "owner": { "name": "UP" },
             "pages": [
                 { "cid": 111, "page": 1, "part": "Intro" },
@@ -193,6 +197,7 @@ mod tests {
         assert_eq!(meta.id, "BV1xx411c7mD");
         assert_eq!(meta.title, "Test Video");
         assert_eq!(meta.uploader.as_deref(), Some("UP"));
+        assert_eq!(meta.duration_secs, Some(269));
         assert_eq!(meta.pages.len(), 2);
         assert_eq!(meta.pages[1].page_id, "222");
         assert_eq!(meta.pages[1].title, "Main");
@@ -206,6 +211,7 @@ mod tests {
             title: "From View".into(),
             uploader: Some("V".into()),
             thumbnail: Some("v.jpg".into()),
+            duration_secs: Some(300),
             webpage_url: "https://www.bilibili.com/video/BV1".into(),
             pages: vec![
                 PageItem {
@@ -228,6 +234,7 @@ mod tests {
             title: "From Yt".into(),
             uploader: Some("Y".into()),
             thumbnail: None,
+            duration_secs: Some(999),
             webpage_url: "https://www.bilibili.com/video/BV1".into(),
             pages: vec![PageItem {
                 index: 1,
@@ -257,6 +264,7 @@ mod tests {
         };
         let merged = merge_view_with_formats(view, ytdlp_meta);
         assert_eq!(merged.title, "From View");
+        assert_eq!(merged.duration_secs, Some(300));
         assert_eq!(merged.pages.len(), 2);
         assert_eq!(merged.pages[0].title, "P1");
         assert_eq!(merged.formats.len(), 2);

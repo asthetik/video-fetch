@@ -155,6 +155,13 @@ fn map_video_meta(v: &serde_json::Value) -> AppResult<VideoMeta> {
             .and_then(|x| x.as_str())
             .map(str::to_string);
     }
+    // Playlists may only carry duration per entry, mirroring the thumbnail
+    // fallback to the first media-bearing source.
+    let duration_secs = v.get("duration").and_then(|x| x.as_u64()).or_else(|| {
+        media_source_value(v)
+            .get("duration")
+            .and_then(|x| x.as_u64())
+    });
     let formats = finalize_formats_for_pages(collect_formats_from_playlist(v), pages.len());
 
     Ok(VideoMeta {
@@ -162,6 +169,7 @@ fn map_video_meta(v: &serde_json::Value) -> AppResult<VideoMeta> {
         title,
         uploader,
         thumbnail,
+        duration_secs,
         webpage_url,
         pages,
         formats,

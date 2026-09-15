@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Search } from "lucide-react";
 import { formatDate, formatDuration, formatPlayCount } from "../lib/spaceFormat";
 import { api } from "../lib/tauri";
 import type { SpacePage, SpaceVideoItem } from "../types";
@@ -7,7 +8,7 @@ import { BatchFormatDialog } from "./BatchFormatDialog";
 interface SpaceListViewProps {
   mid: number;
   active?: boolean;
-  onEnqueued: () => void;
+  onEnqueued: (count: number) => void;
 }
 
 export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewProps) {
@@ -131,7 +132,12 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     setFailedItems([]);
     try {
       const result = await api.spaceEnqueueBatch({
-        items: [...selected.values()].map((i) => ({ bvid: i.bvid, title: i.title })),
+        items: [...selected.values()].map((i) => ({
+          bvid: i.bvid,
+          title: i.title,
+          cover: i.cover,
+          duration_secs: i.duration_secs,
+        })),
         format_id: formatId,
         audio_format: audioFormat,
       });
@@ -142,7 +148,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
       );
       setFailedItems(result.failed);
       setSelected(new Map());
-      onEnqueued();
+      onEnqueued(result.enqueued);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -178,12 +184,12 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
       )}
 
       <div className="space-toolbar">
-        <div className="mode-toggle" role="group" aria-label="排序">
+        <div className="segmented" role="group" aria-label="排序">
           {(["pubdate", "click"] as const).map((value) => (
             <button
               key={value}
               type="button"
-              className={order === value ? "mode-segment active" : "mode-segment"}
+              className={order === value ? "segment-item on" : "segment-item"}
               aria-pressed={order === value}
               disabled={degraded}
               onClick={() => setOrder(value)}
@@ -192,17 +198,20 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
             </button>
           ))}
         </div>
-        <input
-          className="space-search"
-          type="search"
-          placeholder="空间内搜索…（回车触发）"
-          value={searchInput}
-          disabled={degraded}
-          onChange={(e) => setSearchInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submitSearch(e.currentTarget.value);
-          }}
-        />
+        <div className="space-search-wrap">
+          <Search size={14} strokeWidth={2} className="space-search-icon" />
+          <input
+            className="space-search"
+            type="search"
+            placeholder="空间内搜索…（回车触发）"
+            value={searchInput}
+            disabled={degraded}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submitSearch(e.currentTarget.value);
+            }}
+          />
+        </div>
       </div>
 
       {loading && <p className="loading-text">正在获取视频列表…</p>}

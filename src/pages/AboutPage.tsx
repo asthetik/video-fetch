@@ -92,7 +92,7 @@ export function AboutPage() {
       </section>
 
       <section className="settings-section">
-        <h3>第三方组件</h3>
+        <h3 className="settings-section-title">第三方组件</h3>
         <p className="about-copy">
           发版包捆绑 yt-dlp 与 ffmpeg，各有独立许可证。详见仓库说明。
         </p>

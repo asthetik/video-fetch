@@ -14,6 +14,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   page_index INTEGER NOT NULL,
   format_id TEXT NOT NULL,
   audio_format TEXT,
+  thumbnail_url TEXT,
+  duration_secs INTEGER,
+  file_size INTEGER,
   title TEXT NOT NULL,
   output_template TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -56,6 +59,18 @@ impl Db {
         if !column_exists(&conn, "jobs", "audio_format")? {
             conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", [])?;
         }
+        // History metadata columns (same idempotent pattern as audio_format).
+        // Declared types must mirror SCHEMA so migrated DBs stay byte-compatible
+        // with fresh ones; bare ALTER columns would carry no type affinity.
+        for (col, kind) in [
+            ("thumbnail_url", "TEXT"),
+            ("duration_secs", "INTEGER"),
+            ("file_size", "INTEGER"),
+        ] {
+            if !column_exists(&conn, "jobs", col)? {
+                conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {kind}"), [])?;
+            }
+        }
         Self::purge_legacy_resolve_cache(&conn)?;
         Ok(Self { conn })
     }
@@ -81,9 +96,11 @@ impl Db {
         self.conn.execute(
             "INSERT INTO jobs (
                 id, url, video_id, page_index, format_id, audio_format, title, output_template,
-                status, progress, error, output_path, created_at, updated_at
+                status, progress, error, output_path, thumbnail_url, duration_secs, file_size,
+                created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'), datetime('now')
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                datetime('now'), datetime('now')
             )",
             params![
                 job.id,
@@ -98,6 +115,9 @@ impl Db {
                 job.progress,
                 job.error,
                 job.output_path,
+                job.thumbnail_url,
+                job.duration_secs.map(|v| v as i64),
+                job.file_size.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -117,6 +137,9 @@ impl Db {
                 error = ?10,
                 output_path = ?11,
                 audio_format = ?12,
+                thumbnail_url = ?13,
+                duration_secs = ?14,
+                file_size = ?15,
                 updated_at = datetime('now')
             WHERE id = ?1",
             params![
@@ -132,6 +155,9 @@ impl Db {
                 job.error,
                 job.output_path,
                 job.audio_format,
+                job.thumbnail_url,
+                job.duration_secs.map(|v| v as i64),
+                job.file_size.map(|v| v as i64),
             ],
         )?;
         if updated == 0 {
@@ -144,7 +170,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path, audio_format
+                status, progress, error, output_path, audio_format,
+                thumbnail_url, duration_secs, file_size, created_at
             FROM jobs
             ORDER BY created_at DESC",
         )?;
@@ -163,6 +190,10 @@ impl Db {
                 error: row.get(9)?,
                 output_path: row.get(10)?,
                 audio_format: row.get(11)?,
+                thumbnail_url: row.get(12)?,
+                duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
+                file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                created_at: row.get(15)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -172,7 +203,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path, audio_format
+                status, progress, error, output_path, audio_format,
+                thumbnail_url, duration_secs, file_size, created_at
             FROM jobs
             WHERE id = ?1",
         )?;
@@ -191,6 +223,10 @@ impl Db {
                 error: row.get(9)?,
                 output_path: row.get(10)?,
                 audio_format: row.get(11)?,
+                thumbnail_url: row.get(12)?,
+                duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
+                file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                created_at: row.get(15)?,
             })
         })?;
         Ok(job)
@@ -361,6 +397,7 @@ mod tests {
             title: "t".into(),
             uploader: None,
             thumbnail: None,
+            duration_secs: None,
             webpage_url: "https://www.bilibili.com/video/BV1xx".into(),
             pages: vec![],
             formats: vec![],
@@ -507,6 +544,10 @@ mod tests {
             progress: 1.0,
             error: None,
             output_path: Some("virtual/demo.mp4".into()),
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
         }
     }
 
@@ -524,6 +565,10 @@ mod tests {
             progress: 0.0,
             error: None,
             output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
         }
     }
 
@@ -666,5 +711,99 @@ mod tests {
         assert!(jobs.iter().any(|j| j.id == "p1"));
         assert!(jobs.iter().any(|j| j.id == "r1"));
         assert!(!jobs.iter().any(|j| j.id == "d1" || j.id == "f1"));
+    }
+
+    #[test]
+    fn job_metadata_columns_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut job = sample_job_for_db("meta-job");
+        job.thumbnail_url = Some("https://i0.hdslb.com/bfs/archive/cover.jpg".into());
+        job.duration_secs = Some(269);
+        job.file_size = Some(299_892_736);
+        db.insert_job(&job).unwrap();
+
+        let listed = db.list_jobs().unwrap();
+        let got = listed.iter().find(|j| j.id == "meta-job").unwrap();
+        assert_eq!(
+            got.thumbnail_url.as_deref(),
+            Some("https://i0.hdslb.com/bfs/archive/cover.jpg")
+        );
+        assert_eq!(got.duration_secs, Some(269));
+        assert_eq!(got.file_size, Some(299_892_736));
+        // created_at is set by SQLite on insert and must be exposed.
+        assert!(got.created_at.as_deref().unwrap_or("").len() >= 19);
+    }
+
+    #[test]
+    fn legacy_db_without_metadata_columns_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("jobs.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY, url TEXT NOT NULL, video_id TEXT NOT NULL,
+                    page_index INTEGER NOT NULL, format_id TEXT NOT NULL,
+                    audio_format TEXT, title TEXT NOT NULL, output_template TEXT NOT NULL,
+                    status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
+                    error TEXT, output_path TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&db_path).unwrap(); // migration runs here
+        let mut job = sample_job_for_db("legacy-meta-job");
+        job.thumbnail_url = None;
+        db.insert_job(&job).unwrap();
+        assert!(db.get_job("legacy-meta-job").is_ok());
+    }
+
+    fn column_decl_type(conn: &Connection, column: &str) -> Option<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(jobs)").unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows.into_iter()
+            .find(|(name, _)| name == column)
+            .and_then(|(_, decl)| decl)
+    }
+
+    #[test]
+    fn migrated_metadata_columns_carry_declared_types() {
+        // A migrated DB must expose the same declared types as a fresh SCHEMA
+        // install; bare ALTER TABLE ADD COLUMN would leave them untyped.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("jobs.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY, url TEXT NOT NULL, video_id TEXT NOT NULL,
+                    page_index INTEGER NOT NULL, format_id TEXT NOT NULL,
+                    audio_format TEXT, title TEXT NOT NULL, output_template TEXT NOT NULL,
+                    status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
+                    error TEXT, output_path TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&db_path).unwrap();
+
+        for (col, kind) in [
+            ("thumbnail_url", "TEXT"),
+            ("duration_secs", "INTEGER"),
+            ("file_size", "INTEGER"),
+        ] {
+            assert_eq!(
+                column_decl_type(&db.conn, col).as_deref(),
+                Some(kind),
+                "migrated column {col} must declare {kind}"
+            );
+        }
     }
 }

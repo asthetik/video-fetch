@@ -1,4 +1,5 @@
 import { useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useModalFocus } from "../lib/useModalFocus";
 
 interface ConfirmDialogProps {
@@ -34,7 +35,9 @@ export function ConfirmDialog({
     return null;
   }
 
-  return (
+  // Portal to document.body: keeps dialogs out of any transformed/filtered
+  // ancestor stacking context.
+  return createPortal(
     <div
       className="modal-backdrop"
       role="presentation"
@@ -79,6 +82,7 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
