@@ -42,14 +42,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let state = build_app_state(app.handle()).map_err(|e| {
-                tracing::error!(
-                    target: "core",
-                    "app: 启动失败: {}",
-                    crate::activity_log::clean_log_message(&e.to_string())
-                );
-                e
-            })?;
+            let state =
+                build_app_state(app.handle()).inspect_err(|e| {
+                    tracing::error!(
+                        target: "core",
+                        "app: 启动失败: {}",
+                        crate::activity_log::clean_log_message(&e.to_string())
+                    );
+                })?;
             app.manage(state);
             Ok(())
         })

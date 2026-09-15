@@ -576,10 +576,10 @@ impl DownloadManager {
 
         let mut running = job.clone();
         running.status = JobStatus::Running;
-        if let Ok(db) = self.db.lock() {
-            if let Err(e) = db.update_job(&running) {
-                tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
-            }
+        if let Ok(db) = self.db.lock()
+            && let Err(e) = db.update_job(&running)
+        {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
         tracing::info!(target: "core", "download: 开始 {job_id}");
         self.emit(&running);
@@ -752,10 +752,10 @@ impl DownloadManager {
             .map(|m| m.len())
             .or(done.file_size);
         done.error = None;
-        if let Ok(db) = self.db.lock() {
-            if let Err(e) = db.update_job(&done) {
-                tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
-            }
+        if let Ok(db) = self.db.lock()
+            && let Err(e) = db.update_job(&done)
+        {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
         tracing::info!(target: "core", "download: 完成 {job_id} -> {}", dest.display());
         self.emit(&done);

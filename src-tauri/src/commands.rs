@@ -777,13 +777,17 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
             file_size: None,
             created_at: None,
         };
-        last = Some(state.downloads.enqueue(job, save_as_copy).map_err(|e| {
-            warn_cmd(
-                &format!("download: 入队失败（{} P{page_index}）", args.video_id),
-                &e,
-            );
-            e
-        })?);
+        last = Some(
+            state
+                .downloads
+                .enqueue(job, save_as_copy)
+                .inspect_err(|e| {
+                    warn_cmd(
+                        &format!("download: 入队失败（{} P{page_index}）", args.video_id),
+                        e,
+                    );
+                })?,
+        );
     }
     tracing::info!(
         target: "core",
@@ -932,7 +936,7 @@ pub fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJ
     state
         .downloads
         .cancel(&id)
-        .map_err(|e| (warn_cmd(&format!("download: 取消失败 {id}"), &e), e).1)
+        .inspect_err(|e| warn_cmd(&format!("download: 取消失败 {id}"), e))
 }
 
 #[tauri::command]
@@ -940,7 +944,7 @@ pub fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult>
     let result = state
         .downloads
         .cancel_all()
-        .map_err(|e| (warn_cmd("download: 取消全部失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("download: 取消全部失败", e))?;
     tracing::info!(target: "core", "download: 取消全部（{} 个）", result.cancelled);
     Ok(result)
 }
@@ -950,7 +954,7 @@ pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishe
     let result = state
         .downloads
         .clear_finished()
-        .map_err(|e| (warn_cmd("history: 清空失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("history: 清空失败", e))?;
     tracing::info!(target: "core", "history: 清空已完成（{} 条）", result.cleared);
     Ok(result)
 }
@@ -961,7 +965,7 @@ pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJo
     state
         .downloads
         .retry(&id)
-        .map_err(|e| (warn_cmd(&format!("download: 重试失败 {id}"), &e), e).1)
+        .inspect_err(|e| warn_cmd(&format!("download: 重试失败 {id}"), e))
 }
 
 #[derive(Debug, Deserialize)]
@@ -979,7 +983,7 @@ pub fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<
     state
         .downloads
         .delete(&args.id, args.delete_file)
-        .map_err(|e| (warn_cmd(&format!("download: 删除失败 {}", args.id), &e), e).1)
+        .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {}", args.id), e))
 }
 
 #[tauri::command]
@@ -996,7 +1000,7 @@ pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
 pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<()> {
     naming::validate_output_template(&settings.filename_template)
         .map_err(AppError::Message)
-        .map_err(|e| (warn_cmd("settings: 保存失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
     let old = state
         .settings
         .lock()
@@ -1016,7 +1020,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
         changed.push("skip_existing");
     }
     settings_store::save_settings(&state.app_dir, &settings)
-        .map_err(|e| (warn_cmd("settings: 保存失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
     *state
         .settings
         .lock()
@@ -1024,7 +1028,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
     state
         .downloads
         .update_settings(settings)
-        .map_err(|e| (warn_cmd("settings: 保存失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
     // A no-op save logs nothing: "nothing happened" fails the record criteria.
     if !changed.is_empty() {
         tracing::info!(target: "core", "settings: 保存 {}", changed.join("、"));
@@ -1046,7 +1050,7 @@ pub fn import_cookies_path(
     let status = state
         .auth
         .import_cookies_file(Path::new(&path))
-        .map_err(|e| (warn_cmd("auth: 导入 Cookie 失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("auth: 导入 Cookie 失败", e))?;
     let _ = rematerialize_cookies(&state)?;
     let _ = app.emit("auth://status", status.clone());
     tracing::info!(target: "core", "auth: 导入 Cookie（文件）");
@@ -1521,7 +1525,7 @@ pub fn read_log_tail(state: State<'_, AppState>, name: String) -> AppResult<Vec<
 pub fn clear_logs(state: State<'_, AppState>) -> AppResult<usize> {
     let today = chrono::Local::now().date_naive();
     let cleared = crate::activity_log::clear_all_logs(state.activity_log.logs_dir(), today)
-        .map_err(|e| (warn_cmd("log: 清空失败", &e), e).1)?;
+        .inspect_err(|e| warn_cmd("log: 清空失败", e))?;
     tracing::info!(target: "core", "log: 清空全部日志（{cleared} 个文件）");
     Ok(cleared)
 }
