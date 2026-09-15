@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import packageJson from "../../package.json";
+import { logUi } from "../lib/activityLog";
 import { api } from "../lib/tauri";
 import type { EngineVersions } from "../types";
 
@@ -15,7 +16,7 @@ async function openExternal(url: string) {
   try {
     await openUrl(url);
   } catch (err) {
-    console.error(err);
+    logUi("about", `打开外部链接失败: ${err instanceof Error ? err.message : String(err)}`, "warn");
   }
 }
 
@@ -37,7 +38,7 @@ export function AboutPage() {
         if (!cancelled) setEngineVersions(v);
       })
       .catch((err) => {
-        console.error(err);
+        logUi("about", `获取引擎版本失败: ${err instanceof Error ? err.message : String(err)}`, "warn");
       });
     return () => {
       cancelled = true;

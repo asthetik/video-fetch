@@ -34,6 +34,7 @@ tauri-plugin-dialog = "2.7"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 which = "8.0"
 tauri-plugin-shell = "2.3"
+tauri-plugin-single-instance = "2.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 md-5 = "0.11"
 percent-encoding = "2.3"

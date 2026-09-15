@@ -5,7 +5,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tracing::Subscriber;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 /// Current-generation log file names (size-only rotation, at most 2 files):
@@ -68,6 +71,7 @@ pub fn install(
     fs::create_dir_all(&logs_dir)
         .map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
     crate::fsutil::restrict_private_dir_perms(&logs_dir);
+    install_panic_hook(&logs_dir);
     let today = chrono::Local::now().date_naive();
     cleanup_old_logs(&logs_dir, retention_days, today)?;
 
@@ -78,7 +82,7 @@ pub fn install(
         .with_writer(non_blocking)
         .with_ansi(false)
         .with_target(false)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+        .event_format(SanitizedFormatter);
     // Release builds pin the filter to info (no verbose mode); debug builds
     // keep RUST_LOG as a developer escape hatch.
     #[cfg(debug_assertions)]
@@ -155,6 +159,75 @@ pub fn clean_log_message(input: &str) -> String {
     }
 }
 
+/// Formatting-layer backstop: every line written to the activity log is
+/// redacted and length-capped here, so no call site can bypass the red line.
+pub fn sanitize_log_line(line: &str) -> String {
+    let cleaned = clean_log_message(line);
+    if cleaned.chars().count() <= MAX_LOG_MESSAGE_CHARS {
+        return cleaned;
+    }
+    let mut truncated: String = cleaned.chars().take(MAX_LOG_MESSAGE_CHARS).collect();
+    truncated.push_str("…（截断）");
+    truncated
+}
+
+/// `RFC3339 LEVEL message` formatter that routes the rendered line through
+/// `sanitize_log_line`, mechanizing redaction and truncation for the file sink.
+struct SanitizedFormatter;
+
+impl<S, N> FormatEvent<S, N> for SanitizedFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        let mut rendered = String::with_capacity(256);
+        {
+            let mut inner = tracing_subscriber::fmt::format::Writer::new(&mut rendered);
+            write!(
+                inner,
+                "{} {} ",
+                chrono::Local::now().to_rfc3339(),
+                event.metadata().level()
+            )?;
+            ctx.format_fields(inner, event)?;
+        }
+        writeln!(writer, "{}", sanitize_log_line(rendered.trim_end()))
+    }
+}
+
+/// Best-effort panic record: the non-blocking writer's buffer dies with the
+/// process, so panics are appended straight to the active file before the
+/// previous hook (default stderr print) runs.
+fn install_panic_hook(logs_dir: &Path) {
+    let active = logs_dir.join(ACTIVE_LOG_NAME);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // location is what the default hook prints and the cheapest lead for
+        // a user-pasted log; the payload alone rarely identifies the site.
+        let location = info
+            .location()
+            .map(|l| sanitize_log_line(&l.to_string()))
+            .unwrap_or_else(|| "未知位置".into());
+        let line = format!(
+            "{} ERROR app: panic v{} [{}] {}\n",
+            chrono::Local::now().to_rfc3339(),
+            env!("CARGO_PKG_VERSION"),
+            location,
+            sanitize_log_line(&info.to_string())
+        );
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&active) {
+            let _ = file.write_all(line.as_bytes());
+        }
+        previous(info);
+    }));
+}
+
 /// Parse a legacy date-named log file. The fixed current-generation names
 /// (`app.log`/`app.old.log`) are not handled here; callers compare them
 /// explicitly. Used only for legacy cleanup/listing/clearing.
@@ -196,6 +269,7 @@ pub(crate) struct Rotator {
     dir: PathBuf,
     max_size: u64,
     file: Option<File>,
+    rotation_failure_notified: bool,
 }
 
 impl Rotator {
@@ -205,6 +279,7 @@ impl Rotator {
             dir,
             max_size,
             file: Some(file),
+            rotation_failure_notified: false,
         })
     }
 
@@ -219,11 +294,31 @@ impl Rotator {
         self.file = None;
         if let Err(e) = fs::rename(&active, &old) {
             self.file = Some(open_append(&active)?);
+            self.notify_rotation_failure(&e.to_string());
             return Err(AppError::Message(format!("滚动日志文件失败: {e}")));
         }
         // 4. Open the fresh active file.
         self.file = Some(open_append(&active)?);
+        self.rotation_failure_notified = false;
         Ok(())
+    }
+
+    /// A failed rotation drops the triggering event, so the notice cannot go
+    /// through tracing itself (its write would trigger — and drop on — another
+    /// failed rotation). Append it directly, once per failure streak.
+    fn notify_rotation_failure(&mut self, error: &str) {
+        if self.rotation_failure_notified {
+            return;
+        }
+        self.rotation_failure_notified = true;
+        let line = format!(
+            "{} WARN log: 日志滚动失败，回退追加模式: {}\n",
+            chrono::Local::now().to_rfc3339(),
+            sanitize_log_line(error)
+        );
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 
     fn write_chunk(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -602,5 +697,48 @@ mod tests {
     fn clean_log_message_escapes_newlines() {
         assert_eq!(clean_log_message("a\nhttps://x\nb\r"), "a\\n<url>\\nb\\r");
         assert_eq!(clean_log_message("plain text"), "plain text");
+    }
+
+    #[test]
+    fn sanitize_log_line_redacts_escapes_and_truncates() {
+        assert_eq!(sanitize_log_line("a https://x/1?token=1 b"), "a <url> b");
+        assert_eq!(sanitize_log_line("a\nb"), "a\\nb");
+        let long = "字".repeat(MAX_LOG_MESSAGE_CHARS + 10);
+        let out = sanitize_log_line(&long);
+        assert!(out.ends_with("…（截断）"));
+        assert!(out.chars().count() <= MAX_LOG_MESSAGE_CHARS + "…（截断）".chars().count());
+        assert_eq!(
+            sanitize_log_line(&"x".repeat(MAX_LOG_MESSAGE_CHARS)).len(),
+            MAX_LOG_MESSAGE_CHARS
+        );
+    }
+
+    #[test]
+    fn rotator_notifies_rotation_failure_once_via_direct_write() {
+        // app.old.log as a directory: remove_file fails (ignored) and the
+        // rename onto it fails, forcing the append-fallback path.
+        let t = dir();
+        std::fs::create_dir(t.path().join("app.old.log")).unwrap();
+        std::fs::write(t.path().join("app.log"), b"x").unwrap();
+        let mut rotator = Rotator::open(t.path().to_path_buf(), 1).unwrap();
+        assert!(rotator.write_chunk(b"yy").is_err()); // rotation fails, event dropped
+        let first = std::fs::read_to_string(t.path().join("app.log")).unwrap();
+        assert!(first.contains("log: 日志滚动失败"));
+        assert!(rotator.write_chunk(b"zz").is_err());
+        let second = std::fs::read_to_string(t.path().join("app.log")).unwrap();
+        assert_eq!(first, second); // notice emitted once per failure streak
+    }
+
+    #[test]
+    fn panic_hook_appends_record_to_active_log() {
+        let t = dir();
+        install_panic_hook(t.path());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("boom https://x/secret");
+        }));
+        let content = std::fs::read_to_string(t.path().join("app.log")).unwrap();
+        assert!(content.contains("app: panic v"));
+        assert!(content.contains("boom <url>"));
+        assert!(content.contains("[src/activity_log.rs:")); // panic site recorded
     }
 }

@@ -480,7 +480,7 @@ impl DownloadManager {
     pub fn delete(&self, id: &str, delete_file: bool) -> AppResult<()> {
         let job = self.db.lock().map_err(lock_err)?.get_job(id)?;
         if job.status == JobStatus::Running || job.status == JobStatus::Pending {
-            let _ = self.cancel(id);
+            self.try_cancel(id);
         }
         if delete_file && let Some(path) = job.output_path.as_deref() {
             let p = PathBuf::from(path);
@@ -547,12 +547,12 @@ impl DownloadManager {
         let save_dir = match self.save_dir() {
             Ok(dir) => dir,
             Err(e) => {
-                let _ = self.fail_job(&job_id, e.to_string());
+                self.try_fail_job(&job_id, &e.to_string());
                 return;
             }
         };
         if let Err(e) = check_save_dir_writable(&save_dir) {
-            let _ = self.fail_job(&job_id, e.to_string());
+            self.try_fail_job(&job_id, &e.to_string());
             return;
         }
 
@@ -560,12 +560,12 @@ impl DownloadManager {
             Ok(db) => match db.get_job(&job_id) {
                 Ok(job) => job,
                 Err(e) => {
-                    let _ = self.fail_job(&job_id, e.to_string());
+                    self.try_fail_job(&job_id, &e.to_string());
                     return;
                 }
             },
             Err(e) => {
-                let _ = self.fail_job(&job_id, e.to_string());
+                self.try_fail_job(&job_id, &e.to_string());
                 return;
             }
         };
@@ -576,14 +576,16 @@ impl DownloadManager {
 
         let mut running = job.clone();
         running.status = JobStatus::Running;
-        if let Ok(db) = self.db.lock() {
-            let _ = db.update_job(&running);
+        if let Ok(db) = self.db.lock()
+            && let Err(e) = db.update_job(&running)
+        {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
         tracing::info!(target: "core", "download: 开始 {job_id}");
         self.emit(&running);
 
         if self.is_cancelled(&job_id) {
-            let _ = self.cancel(&job_id);
+            self.try_cancel(&job_id);
             return;
         }
 
@@ -597,7 +599,7 @@ impl DownloadManager {
                     return;
                 }
                 Err(e) => {
-                    let _ = self.fail_job(&job_id, e);
+                    self.try_fail_job(&job_id, &e);
                     if let Ok(mut tasks) = self.running_tasks.lock() {
                         tasks.remove(&job_id);
                     }
@@ -630,7 +632,9 @@ impl DownloadManager {
                     }
                     current.progress = update.percent / 100.0;
                     current.status = JobStatus::Running;
-                    let _ = db.update_job(&current);
+                    if let Err(e) = db.update_job(&current) {
+                        tracing::debug!(target: "core", "download: 状态写入失败 {}: {e}", current.id);
+                    }
                     progress.emit_progress(DownloadProgressEvent {
                         id: current.id.clone(),
                         progress: current.progress,
@@ -649,7 +653,7 @@ impl DownloadManager {
         let result = self.downloader.run(&running, on_progress).await;
 
         if self.is_cancelled(&job_id) {
-            let _ = self.cancel(&job_id);
+            self.try_cancel(&job_id);
             return;
         }
 
@@ -661,13 +665,13 @@ impl DownloadManager {
                         if let Err(e) =
                             self.complete_relocation(&job_id, &running, &path, &save_dir)
                         {
-                            let _ = self.fail_job(&job_id, e);
+                            self.try_fail_job(&job_id, &e);
                         }
                     }
                     None => {
-                        let _ = self.fail_job(
+                        self.try_fail_job(
                             &job_id,
-                            format!(
+                            &format!(
                                 "下载完成但未找到输出文件（yt-dlp 回报: {}）",
                                 reported_path.display()
                             ),
@@ -678,15 +682,32 @@ impl DownloadManager {
             Err(err) => {
                 // Prefer the cancel marker over a kill/pipe race error from yt-dlp.
                 if self.is_cancelled(&job_id) {
-                    let _ = self.cancel(&job_id);
+                    self.try_cancel(&job_id);
                 } else {
-                    let _ = self.fail_job(&job_id, err);
+                    self.try_fail_job(&job_id, &err);
                 }
             }
         }
 
         if let Ok(mut tasks) = self.running_tasks.lock() {
             tasks.remove(&job_id);
+        }
+    }
+
+    /// fail_job is the last write standing between a task and its Failed row;
+    /// when even that fails the job would vanish from the log's perspective,
+    /// so leave a debug trace instead of a bare swallow.
+    fn try_fail_job(&self, job_id: &str, error: &str) {
+        if let Err(e) = self.fail_job(job_id, error.to_string()) {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+        }
+    }
+
+    /// Same contract as try_fail_job: cancel persists the Cancelled status, so
+    /// a swallowed failure must still leave a debug trace.
+    fn try_cancel(&self, job_id: &str) {
+        if let Err(e) = self.cancel(job_id) {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
 
@@ -739,8 +760,10 @@ impl DownloadManager {
             .map(|m| m.len())
             .or(done.file_size);
         done.error = None;
-        if let Ok(db) = self.db.lock() {
-            let _ = db.update_job(&done);
+        if let Ok(db) = self.db.lock()
+            && let Err(e) = db.update_job(&done)
+        {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
         tracing::info!(target: "core", "download: 完成 {job_id} -> {}", dest.display());
         self.emit(&done);
@@ -853,16 +876,19 @@ fn local_output_exists(
     false
 }
 
-pub fn cleanup_orphan_work_dirs(work_root: &Path, keep_job_ids: &[String]) {
+pub fn cleanup_orphan_work_dirs(work_root: &Path, keep_job_ids: &[String]) -> usize {
     let Ok(entries) = std::fs::read_dir(work_root) else {
-        return;
+        return 0;
     };
+    let mut removed = 0;
     for ent in entries.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
         if ent.path().is_dir() && !keep_job_ids.iter().any(|id| id == &name) {
             let _ = std::fs::remove_dir_all(ent.path());
+            removed += 1;
         }
     }
+    removed
 }
 
 #[cfg(test)]

@@ -58,10 +58,12 @@ impl Db {
         // Check first and propagate unexpected errors.
         if !column_exists(&conn, "jobs", "audio_format")? {
             conn.execute("ALTER TABLE jobs ADD COLUMN audio_format TEXT", [])?;
+            tracing::info!(target: "core", "db: 迁移 jobs 表（新增 audio_format）");
         }
         // History metadata columns (same idempotent pattern as audio_format).
         // Declared types must mirror SCHEMA so migrated DBs stay byte-compatible
         // with fresh ones; bare ALTER columns would carry no type affinity.
+        let mut migrated: Vec<&str> = Vec::new();
         for (col, kind) in [
             ("thumbnail_url", "TEXT"),
             ("duration_secs", "INTEGER"),
@@ -69,7 +71,11 @@ impl Db {
         ] {
             if !column_exists(&conn, "jobs", col)? {
                 conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {kind}"), [])?;
+                migrated.push(col);
             }
+        }
+        if !migrated.is_empty() {
+            tracing::info!(target: "core", "db: 迁移 jobs 表（新增 {}）", migrated.join("、"));
         }
         Self::purge_legacy_resolve_cache(&conn)?;
         Ok(Self { conn })
@@ -81,13 +87,18 @@ impl Db {
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
+        let mut removed = 0;
         for key in keys {
             if resolve_cache::is_legacy_cache_key(&key) {
                 conn.execute(
                     "DELETE FROM resolve_cache WHERE cache_key = ?1",
                     params![key],
                 )?;
+                removed += 1;
             }
+        }
+        if removed > 0 {
+            tracing::debug!(target: "core", "resolve_cache: 清理旧版缓存 {removed} 条");
         }
         Ok(())
     }
