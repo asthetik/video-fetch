@@ -31,11 +31,25 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // A second instance would fight over jobs.db and the log rotator;
+        // focus the existing window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let state = build_app_state(app.handle())?;
+            let state = build_app_state(app.handle()).map_err(|e| {
+                tracing::error!(
+                    target: "core",
+                    "app: 启动失败: {}",
+                    crate::activity_log::clean_log_message(&e.to_string())
+                );
+                e
+            })?;
             app.manage(state);
             Ok(())
         })
