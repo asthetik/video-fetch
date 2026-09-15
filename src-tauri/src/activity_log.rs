@@ -305,7 +305,7 @@ impl Rotator {
         }
         self.rotation_failure_notified = true;
         let line = format!(
-            "{} ERROR log: 日志滚动失败，回退追加模式: {}\n",
+            "{} WARN log: 日志滚动失败，回退追加模式: {}\n",
             chrono::Local::now().to_rfc3339(),
             sanitize_log_line(error)
         );

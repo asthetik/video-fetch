@@ -480,7 +480,7 @@ impl DownloadManager {
     pub fn delete(&self, id: &str, delete_file: bool) -> AppResult<()> {
         let job = self.db.lock().map_err(lock_err)?.get_job(id)?;
         if job.status == JobStatus::Running || job.status == JobStatus::Pending {
-            let _ = self.cancel(id);
+            self.try_cancel(id);
         }
         if delete_file && let Some(path) = job.output_path.as_deref() {
             let p = PathBuf::from(path);
@@ -585,7 +585,7 @@ impl DownloadManager {
         self.emit(&running);
 
         if self.is_cancelled(&job_id) {
-            let _ = self.cancel(&job_id);
+            self.try_cancel(&job_id);
             return;
         }
 
@@ -653,7 +653,7 @@ impl DownloadManager {
         let result = self.downloader.run(&running, on_progress).await;
 
         if self.is_cancelled(&job_id) {
-            let _ = self.cancel(&job_id);
+            self.try_cancel(&job_id);
             return;
         }
 
@@ -682,7 +682,7 @@ impl DownloadManager {
             Err(err) => {
                 // Prefer the cancel marker over a kill/pipe race error from yt-dlp.
                 if self.is_cancelled(&job_id) {
-                    let _ = self.cancel(&job_id);
+                    self.try_cancel(&job_id);
                 } else {
                     self.try_fail_job(&job_id, &err);
                 }
@@ -699,6 +699,14 @@ impl DownloadManager {
     /// so leave a debug trace instead of a bare swallow.
     fn try_fail_job(&self, job_id: &str, error: &str) {
         if let Err(e) = self.fail_job(job_id, error.to_string()) {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+        }
+    }
+
+    /// Same contract as try_fail_job: cancel persists the Cancelled status, so
+    /// a swallowed failure must still leave a debug trace.
+    fn try_cancel(&self, job_id: &str) {
+        if let Err(e) = self.cancel(job_id) {
             tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
