@@ -771,11 +771,12 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     }
     tracing::info!(
         target: "core",
-        "download: 入队 {}（{}，格式 {}，{} P）",
+        "download: 入队 {}（{}，格式 {}，{} P{}）",
         crate::activity_log::clean_log_message(&title),
         args.video_id,
         args.format_id,
-        page_count
+        page_count,
+        if save_as_copy { "，另存副本" } else { "" }
     );
     last.ok_or_else(|| AppError::Message("未能创建下载任务".into()))
 }

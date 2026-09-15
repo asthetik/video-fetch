@@ -1,5 +1,6 @@
 import { Download as DownloadIcon, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { logUi } from "../lib/activityLog";
 import { api } from "../lib/tauri";
 import type { FormatOption, VideoMeta } from "../types";
 import { IconButton } from "./IconButton";
@@ -173,6 +174,13 @@ export function VideoCard({
       let saveAsCopy = false;
       if (conflict.file_exists) {
         if (settings.skip_existing) {
+          // Skip decisions never reach the backend, so this frontend-only
+          // outcome is the only trace of "why nothing downloaded".
+          logUi(
+            "download",
+            `本地已存在，跳过 ${meta.id}${pageIndexes.length > 1 ? ` 的 ${pageIndexes.length} 个分 P` : ""}`,
+            "warn",
+          );
           setInfo(
             pageIndexes.length > 1
               ? "所选分 P 中已有本地文件，已跳过"
