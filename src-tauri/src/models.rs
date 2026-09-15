@@ -146,7 +146,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             save_dir: String::new(),
-            concurrency: 1,
+            concurrency: 3,
             filename_template: "%(title)s [%(id)s].%(ext)s".into(),
             skip_existing: true,
         }

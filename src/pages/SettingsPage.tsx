@@ -21,7 +21,8 @@ const NAMING_PRESETS: { label: string; template: string }[] = [
   },
 ];
 
-const CONCURRENCY_PRESETS = [1, 2, 3, 4, 8];
+const CONCURRENCY_MIN = 1;
+const CONCURRENCY_MAX = 16;
 
 const AUTOSAVE_DEBOUNCE_MS = 400;
 
@@ -135,9 +136,6 @@ export function SettingsPage() {
   }
 
   const activePreset = NAMING_PRESETS.find((p) => p.template === settings.filename_template);
-  const concurrencyOptions = CONCURRENCY_PRESETS.includes(settings.concurrency)
-    ? CONCURRENCY_PRESETS
-    : [...CONCURRENCY_PRESETS, settings.concurrency].sort((a, b) => a - b);
 
   return (
     <div className="settings-page">
@@ -191,14 +189,26 @@ export function SettingsPage() {
           </div>
         </label>
 
-        <div className="settings-row-block">
-          <p className="settings-row-label">并发下载数</p>
-          <Segmented
-            options={concurrencyOptions.map((n) => ({ value: n, label: String(n) }))}
-            value={settings.concurrency}
-            ariaLabel="并发下载数"
-            onChange={(n) => patch({ concurrency: n })}
-          />
+        <div className="settings-row-block concurrency-row">
+          <div>
+            <p className="settings-row-label">并发下载数</p>
+            <p className="settings-hint">同时进行的下载任务数；过高可能触发 B 站风控</p>
+          </div>
+          <div className="concurrency-control">
+            <input
+              type="range"
+              className="concurrency-slider"
+              min={CONCURRENCY_MIN}
+              max={CONCURRENCY_MAX}
+              step={1}
+              value={settings.concurrency}
+              aria-label="并发下载数"
+              onChange={(e) =>
+                patch({ concurrency: Number(e.target.value) }, { debounce: true })
+              }
+            />
+            <span className="concurrency-value">{settings.concurrency}</span>
+          </div>
         </div>
 
         <div className="settings-row-block">
