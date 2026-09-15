@@ -87,13 +87,18 @@ impl Db {
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
+        let mut removed = 0;
         for key in keys {
             if resolve_cache::is_legacy_cache_key(&key) {
                 conn.execute(
                     "DELETE FROM resolve_cache WHERE cache_key = ?1",
                     params![key],
                 )?;
+                removed += 1;
             }
+        }
+        if removed > 0 {
+            tracing::debug!(target: "core", "resolve_cache: 清理旧版缓存 {removed} 条");
         }
         Ok(())
     }

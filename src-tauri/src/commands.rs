@@ -177,6 +177,16 @@ pub struct EnqueueArgs {
     pub duration_secs: Option<u64>,
 }
 
+/// Log a command-level failure (already surfaced to the UI as a toast) so it
+/// also lands in the activity log; the formatter sanitizes the message.
+fn warn_cmd(scope: &str, e: &AppError) {
+    tracing::warn!(
+        target: "core",
+        "{scope}: {}",
+        crate::activity_log::clean_log_message(&e.to_string())
+    );
+}
+
 fn normalize_audio_format(value: Option<String>) -> AppResult<Option<String>> {
     let Some(raw) = value else {
         return Ok(None);
@@ -767,7 +777,13 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
             file_size: None,
             created_at: None,
         };
-        last = Some(state.downloads.enqueue(job, save_as_copy)?);
+        last = Some(state.downloads.enqueue(job, save_as_copy).map_err(|e| {
+            warn_cmd(
+                &format!("download: 入队失败（{} P{page_index}）", args.video_id),
+                &e,
+            );
+            e
+        })?);
     }
     tracing::info!(
         target: "core",
@@ -913,19 +929,28 @@ pub fn list_jobs(state: State<'_, AppState>) -> AppResult<Vec<DownloadJob>> {
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 取消 {id}");
-    state.downloads.cancel(&id)
+    state
+        .downloads
+        .cancel(&id)
+        .map_err(|e| (warn_cmd(&format!("download: 取消失败 {id}"), &e), e).1)
 }
 
 #[tauri::command]
 pub fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
-    let result = state.downloads.cancel_all()?;
+    let result = state
+        .downloads
+        .cancel_all()
+        .map_err(|e| (warn_cmd("download: 取消全部失败", &e), e).1)?;
     tracing::info!(target: "core", "download: 取消全部（{} 个）", result.cancelled);
     Ok(result)
 }
 
 #[tauri::command]
 pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishedResult> {
-    let result = state.downloads.clear_finished()?;
+    let result = state
+        .downloads
+        .clear_finished()
+        .map_err(|e| (warn_cmd("history: 清空失败", &e), e).1)?;
     tracing::info!(target: "core", "history: 清空已完成（{} 条）", result.cleared);
     Ok(result)
 }
@@ -933,7 +958,10 @@ pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishe
 #[tauri::command]
 pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 重试 {id}");
-    state.downloads.retry(&id)
+    state
+        .downloads
+        .retry(&id)
+        .map_err(|e| (warn_cmd(&format!("download: 重试失败 {id}"), &e), e).1)
 }
 
 #[derive(Debug, Deserialize)]
@@ -948,7 +976,10 @@ pub struct DeleteJobArgs {
 #[tauri::command]
 pub fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
     tracing::info!(target: "core", "download: 删除 {}（含文件={}）", args.id, args.delete_file);
-    state.downloads.delete(&args.id, args.delete_file)
+    state
+        .downloads
+        .delete(&args.id, args.delete_file)
+        .map_err(|e| (warn_cmd(&format!("download: 删除失败 {}", args.id), &e), e).1)
 }
 
 #[tauri::command]
@@ -963,7 +994,9 @@ pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
 
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<()> {
-    naming::validate_output_template(&settings.filename_template).map_err(AppError::Message)?;
+    naming::validate_output_template(&settings.filename_template)
+        .map_err(AppError::Message)
+        .map_err(|e| (warn_cmd("settings: 保存失败", &e), e).1)?;
     let old = state
         .settings
         .lock()
@@ -982,17 +1015,20 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
     if old.skip_existing != settings.skip_existing {
         changed.push("skip_existing");
     }
-    settings_store::save_settings(&state.app_dir, &settings)?;
+    settings_store::save_settings(&state.app_dir, &settings)
+        .map_err(|e| (warn_cmd("settings: 保存失败", &e), e).1)?;
     *state
         .settings
         .lock()
         .map_err(|_| AppError::Message("settings lock poisoned".into()))? = settings.clone();
-    state.downloads.update_settings(settings)?;
-    tracing::info!(
-        target: "core",
-        "settings: 保存 {}",
-        if changed.is_empty() { "（无变化）".to_string() } else { changed.join("、") }
-    );
+    state
+        .downloads
+        .update_settings(settings)
+        .map_err(|e| (warn_cmd("settings: 保存失败", &e), e).1)?;
+    // A no-op save logs nothing: "nothing happened" fails the record criteria.
+    if !changed.is_empty() {
+        tracing::info!(target: "core", "settings: 保存 {}", changed.join("、"));
+    }
     Ok(())
 }
 
@@ -1007,7 +1043,10 @@ pub fn import_cookies_path(
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<AuthStatus> {
-    let status = state.auth.import_cookies_file(Path::new(&path))?;
+    let status = state
+        .auth
+        .import_cookies_file(Path::new(&path))
+        .map_err(|e| (warn_cmd("auth: 导入 Cookie 失败", &e), e).1)?;
     let _ = rematerialize_cookies(&state)?;
     let _ = app.emit("auth://status", status.clone());
     tracing::info!(target: "core", "auth: 导入 Cookie（文件）");
@@ -1084,22 +1123,19 @@ async fn clear_webview_session(win: &tauri::WebviewWindow) {
     const MAX_ATTEMPTS: usize = 6;
     for attempt in 0..MAX_ATTEMPTS {
         if let Err(e) = win.clear_all_browsing_data() {
-            tracing::warn!(target: "core", "auth: clear browsing data failed: {e}");
+            tracing::warn!(target: "core", "auth: 清理浏览数据失败: {e}");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         if !cookies::has_bilibili_sessdata(&collect_bilibili_cookies(win)) {
             return;
         }
-        tracing::warn!(
+        tracing::debug!(
             target: "core",
-            "auth: SESSDATA still present after clear (attempt {})",
+            "auth: 清理后 SESSDATA 仍存在（第 {} 次尝试）",
             attempt + 1
         );
     }
-    tracing::warn!(
-        target: "core",
-        "auth: gave up waiting for browsing data clear; navigating anyway"
-    );
+    tracing::warn!(target: "core", "auth: 放弃等待浏览数据清理，继续导航");
 }
 
 /// Open an embedded Bilibili login WebView, poll for SESSDATA, and return auth status.
@@ -1272,10 +1308,6 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         let _ = settings_store::save_settings(&app_dir, &settings);
     }
 
-    let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
-    let auth = AuthManager::new(cache_dir);
-    let _ = auth.materialize_cookies_file();
-
     let logs_dir = app_dir.join("logs");
     let activity_log = match crate::activity_log::install(
         logs_dir.clone(),
@@ -1292,11 +1324,26 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         }
     };
     tracing::info!(target: "core", "app: 启动 v{}", env!("CARGO_PKG_VERSION"));
+    // Open the DB only after the subscriber exists so migration records land.
+    let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
+    let auth = AuthManager::new(cache_dir);
+    let _ = auth.materialize_cookies_file();
 
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
 
     let ytdlp = sidecar::resolve_ytdlp_config(app);
+    tracing::info!(
+        target: "core",
+        "app: 引擎 yt-dlp v{}（{}）· ffmpeg v{}（{}）",
+        env!("SIDECAR_YTDLP_VERSION"),
+        ytdlp.yt_dlp_path.display(),
+        env!("SIDECAR_FFMPEG_VERSION"),
+        ytdlp.ffmpeg_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "未配置".into())
+    );
     let progress: Arc<dyn ProgressEmitter> = Arc::new(TauriProgressEmitter::new(app.clone()));
     let downloads = DownloadManager::with_ytdlp(
         db,
@@ -1318,7 +1365,10 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         })
         .map(|j| j.id)
         .collect();
-    cleanup_orphan_work_dirs(&work_root, &active_ids);
+    let removed_orphans = cleanup_orphan_work_dirs(&work_root, &active_ids);
+    if removed_orphans > 0 {
+        tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed_orphans} 个");
+    }
 
     let http_client = reqwest::Client::builder()
         .user_agent(bilibili_view::USER_AGENT)
@@ -1470,7 +1520,8 @@ pub fn read_log_tail(state: State<'_, AppState>, name: String) -> AppResult<Vec<
 #[tauri::command]
 pub fn clear_logs(state: State<'_, AppState>) -> AppResult<usize> {
     let today = chrono::Local::now().date_naive();
-    let cleared = crate::activity_log::clear_all_logs(state.activity_log.logs_dir(), today)?;
+    let cleared = crate::activity_log::clear_all_logs(state.activity_log.logs_dir(), today)
+        .map_err(|e| (warn_cmd("log: 清空失败", &e), e).1)?;
     tracing::info!(target: "core", "log: 清空全部日志（{cleared} 个文件）");
     Ok(cleared)
 }
