@@ -5,33 +5,66 @@
   font-display: swap;
 }
 
+/* MiSans subsets: GB2312 full set + app UI chars, one file per used weight. */
+@font-face {
+  font-family: "MiSans";
+  src: url("../assets/fonts/MiSans-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("../assets/fonts/MiSans-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("../assets/fonts/MiSans-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("../assets/fonts/MiSans-800.woff2") format("woff2");
+  font-weight: 800;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
-  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-ui: "MiSans", system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
   --font-display: "Smiley Sans", system-ui, -apple-system, "PingFang SC", sans-serif;
   --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-human: "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", serif;
   font-family: var(--font-ui);
   line-height: 1.5;
 
-  --bg: #f2f2f7;
-  --surface: #ffffff;
-  --surface-border: rgba(0, 0, 0, 0.06);
-  --surface-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-  --ctl-bg: #ffffff;
-  --hairline: rgba(0, 0, 0, 0.09);
-  --header-bg: rgba(255, 255, 255, 0.92);
+  --bg: #faf7f4;
+  --surface: #fffdf8;
+  --surface-border: #e6dfd5;
+  --surface-shadow: 0 1px 3px rgba(34, 31, 38, 0.07);
+  --ctl-bg: #fffdf8;
+  --hairline: #e6dfd5;
+  --header-bg: rgba(255, 253, 248, 0.92);
 
-  --text: #1d1d1f;
-  --muted: #8e8e93;
-  --accent: #0a84ff;
-  --accent-hover: #409cff;
-  --danger: #d70015;
-  --success: #248a3d;
-  --warn: #a16207;
+  --text: #221f26;
+  --muted: #73707a;
+  --accent: #f2596f;
+  --accent-hover: #d8435c;
+  --pink: #fb7299;
+  --pink-hover: #e05c80;
+  --celebrate: #ffb042;
+  --danger: #d6453f;
+  --success: #2f9e6e;
+  --warn: #d98a2b;
 
-  --seg-track: #e9e9ee;
-  --radius-card: 11px;
-  --radius-ctl: 8px;
+  --seg-track: #efe8de;
+  --radius-card: 18px;
+  --radius-ctl: 10px;
   --radius-chip: 999px;
 
   --page-enter-ms: 200ms;
@@ -39,30 +72,33 @@
   --nav-transition-ms: 150ms;
   --micro-ms: 150ms;
 
-  --space-accent: var(--accent);
-  --space-hover: rgba(127, 127, 127, 0.08);
-  --space-selected: rgba(10, 132, 255, 0.1);
+  --space-accent: var(--pink);
+  --space-hover: rgba(115, 112, 122, 0.08);
+  --space-selected: rgba(251, 114, 153, 0.12);
 }
 
 html[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #1c1c1e;
-  --surface: #2c2c2e;
-  --surface-border: rgba(255, 255, 255, 0.05);
+  --bg: #17151c;
+  --surface: #211e27;
+  --surface-border: #2b2e36;
   --surface-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  --ctl-bg: #2c2c2e;
-  --hairline: rgba(255, 255, 255, 0.08);
-  --header-bg: #232326;
+  --ctl-bg: #211e27;
+  --hairline: #2b2e36;
+  --header-bg: #1d1a22;
 
-  --text: #f5f5f7;
-  --muted: #98989d;
-  --accent: #0a84ff;
-  --accent-hover: #409cff;
-  --danger: #ff453a;
-  --success: #32d74b;
-  --warn: #ffd60a;
+  --text: #f3efe8;
+  --muted: #a0a3ae;
+  --accent: #ff6b82;
+  --accent-hover: #ff8a9c;
+  --pink: #fb7299;
+  --pink-hover: #ff8aa3;
+  --celebrate: #ffb042;
+  --danger: #e26060;
+  --success: #4bbe8b;
+  --warn: #e3a04c;
 
-  --seg-track: rgba(255, 255, 255, 0.1);
-  --space-hover: rgba(127, 127, 127, 0.12);
-  --space-selected: rgba(10, 132, 255, 0.16);
+  --seg-track: #2b2e36;
+  --space-hover: rgba(160, 163, 174, 0.12);
+  --space-selected: rgba(251, 114, 153, 0.16);
 }

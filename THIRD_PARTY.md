@@ -1,6 +1,6 @@
 # 第三方组件声明
 
-Video Fetch（影取）在发版包中捆绑以下独立可执行文件，供下载与音视频合并使用。本应用源码采用 Apache-2.0 许可证；下列组件各有独立许可证，使用者须一并遵守。
+Video Fetch（影取）在发版包中捆绑以下独立可执行文件与字体文件，供下载、音视频合并与界面渲染使用。本应用源码采用 Apache-2.0 许可证；下列组件各有独立许可证，使用者须一并遵守。
 
 上述二进制由 `scripts/fetch_sidecars.py` 在构建前下载，不入库；版本固定——yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot 自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`（手动升级）。实际随包版本以应用「关于」页显示为准。
 
@@ -27,6 +27,20 @@ Video Fetch（影取）在发版包中捆绑以下独立可执行文件，供下
 | **本仓库获取方式** | 按平台选用第三方静态构建（版本固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`，当前 9.0.1，手动升级）：<br>• **macOS**：https://evermeet.cx/ffmpeg/ — `ffmpeg-9.0.1.zip`（单文件 `ffmpeg`）<br>• **Linux**：https://github.com/BtbN/FFmpeg-Builds — `ffmpeg-n9.0-latest-{linux64\|linuxarm64}-gpl-9.0.tar.xz`<br>• **Windows x64**：https://github.com/BtbN/FFmpeg-Builds — `ffmpeg-n9.0-latest-win64-gpl-9.0.zip`<br>• **Windows arm64**：https://github.com/BtbN/FFmpeg-Builds — `ffmpeg-n9.0-latest-winarm64-gpl-9.0.zip` |
 
 BtbN 构建文件名含 `gpl`，表示包含 GPL 许可组件；若需严格 LGPL 链路，请自行替换为符合要求的 ffmpeg 构建并在设置中使用系统路径。
+
+---
+
+## 字体
+
+应用内嵌以下字体文件（位于 `src/assets/fonts/`），随安装包分发：
+
+| 项目 | 说明 |
+|------|------|
+| **MiSans** | **用途**：界面正文与控件字体。<br>**上游**：小米官方字体 https://hyperos.mi.com/font/<br>**许可证**：小米官方声明可全球免费商用，允许嵌入软件分发；嵌入使用须注明「使用了 MiSans 字体」。<br>**本仓库获取方式**：官方 `MiSans.zip`（v1.1）中的 ttf 经 fontTools 按「GB2312 全集 + 界面字符」子集化为 woff2，仅含 400/600/700/800 四个实际使用的字重。详见 `src/assets/fonts/MiSans-LICENSE-NOTE.md`。 |
+| **Smiley Sans（得意黑）** | **用途**：展示字体（wordmark 与大标题）。<br>**上游**：https://github.com/atelier-anchor/smiley-sans<br>**许可证**：[SIL Open Font License 1.1](https://github.com/atelier-anchor/smiley-sans/blob/main/LICENSE)（全文见 `src/assets/fonts/SmileySans-OFL.txt`）。 |
+| **JetBrains Mono** | **用途**：数据等宽字体（清晰度、体积、速度等数字）。<br>**上游**：https://www.jetbrains.com/lp/mono/<br>**许可证**：[SIL Open Font License 1.1](https://github.com/JetBrains/JetBrainsMono/blob/master/OFL.txt)<br>**本仓库获取方式**：npm 包 `@fontsource/jetbrains-mono`（400/500 字重，随构建打包）。 |
+
+界面中的楷体时刻（如完成印章）使用系统楷体回退（macOS「楷体-简」/ Windows「楷体」），不随包分发字体文件。
 
 ---
 
