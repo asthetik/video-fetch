@@ -54,7 +54,7 @@
 
 .nav-btn.active {
   color: #fff;
-  background: var(--accent);
+  background: var(--accent-strong);
   font-weight: 600;
 }
 
@@ -89,19 +89,19 @@
 }
 
 .auth-chip.logged_in {
-  color: var(--success);
+  color: var(--success-ink);
 }
 
 .auth-chip.logged_in .auth-chip-dot {
-  background: var(--success);
+  background: var(--success-ink);
 }
 
 .auth-chip.possibly_expired {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 .auth-chip.possibly_expired .auth-chip-dot {
-  background: var(--warn);
+  background: var(--warn-ink);
 }
 
 .app-main {
@@ -136,6 +136,6 @@
 }
 
 :focus-visible {
-  outline: 2px solid var(--pink);
+  outline: 2px solid var(--pink-ink);
   outline-offset: 2px;
 }

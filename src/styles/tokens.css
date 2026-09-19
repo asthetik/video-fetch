@@ -44,23 +44,59 @@
   line-height: 1.5;
 
   --bg: #faf7f4;
-  --surface: #fffdf8;
+  /* Surfaces stay pure white so the paper canvas earns its warmth: the tint
+     exists to let cards float, and at #fffdf8 the gap to --bg collapsed to
+     6/255, which is not enough to read as a layer. */
+  --surface: #ffffff;
   --surface-border: #e6dfd5;
   --surface-shadow: 0 1px 3px rgba(34, 31, 38, 0.07);
-  --ctl-bg: #fffdf8;
+  --ctl-bg: #ffffff;
   --hairline: #e6dfd5;
-  --header-bg: rgba(255, 253, 248, 0.92);
+  --header-bg: rgba(255, 255, 255, 0.92);
 
   --text: #221f26;
   --muted: #73707a;
   --accent: #f2596f;
-  --accent-hover: #d8435c;
+  --accent-hover: #b83f50;
+  /* Brand key. Deliberately not used as text or a focus ring any more --
+     see --pink-ink. Kept as the documented palette value for fills,
+     borders and the icon asset. */
   --pink: #fb7299;
-  --pink-hover: #e05c80;
   --celebrate: #ffb042;
   --danger: #d6453f;
   --success: #2f9e6e;
   --warn: #d98a2b;
+
+  /* Status "ink": the semantic colours above are decorative-grade (fills,
+     borders, large icons). As chip labels at 10.5-13px they are small text
+     and need a darker step of the same hue to clear WCAG AA (4.5:1). These
+     are solved against the darker of the two backdrops they sit on -- a
+     tint over the paper canvas, not over pure white -- so they hold on
+     either surface. */
+  --accent-ink: #b2404f;
+  --warn-ink: #965f1e;
+  --danger-ink: #bb3b36;
+  --success-ink: #1f7049;
+  --muted-ink: #66636d;
+  --celebrate-ink: #8a5a10;
+  /* Focus rings and text links share the pink identity but need a step that
+     functions as both: #FB7299 is 2.64:1 on white and 2.47:1 on paper,
+     failing the 4.5:1 link-text bar and the 3:1 focus-indicator bar. */
+  --pink-ink: #d6204f;
+  --pink-ink-hover: #c01444;
+  /* --accent is decorative-grade: white on it is 3.26:1, below the 4.5:1 the
+     13-14px white labels on the nav pill, primary button and chips need.
+     --accent-strong is the rest fill behind light text; --accent-hover is
+     the hover fill and is only ever used as a fill. */
+  --accent-strong: #ca4a5d;
+
+  /* Chip fills for the status colours. Explicit rgba rather than derived, so
+     the three sit on one deliberate ramp instead of inheriting whatever
+     alpha the brand hue happens to imply. */
+  --accent-tint: rgba(242, 89, 111, 0.12);
+  --warn-tint: rgba(217, 138, 43, 0.16);
+  --danger-tint: rgba(214, 69, 63, 0.1);
+  --success-tint: rgba(47, 158, 110, 0.13);
 
   --seg-track: #efe8de;
   --radius-card: 18px;
@@ -72,7 +108,7 @@
   --nav-transition-ms: 150ms;
   --micro-ms: 150ms;
 
-  --space-accent: var(--pink);
+  --space-accent: var(--pink-ink);
   --space-hover: rgba(115, 112, 122, 0.08);
   --space-selected: rgba(251, 114, 153, 0.12);
 }
@@ -90,13 +126,29 @@ html[data-theme="dark"] {
   --text: #f3efe8;
   --muted: #a0a3ae;
   --accent: #ff6b82;
-  --accent-hover: #ff8a9c;
+  --accent-hover: #b04556;
   --pink: #fb7299;
-  --pink-hover: #ff8aa3;
   --celebrate: #ffb042;
   --danger: #e26060;
   --success: #4bbe8b;
   --warn: #e3a04c;
+
+  --accent-ink: #ff6b82;
+  --warn-ink: #e3a04c;
+  --danger-ink: #f07070;
+  --success-ink: #4bbe8b;
+  --muted-ink: #a0a3ae;
+  --celebrate-ink: #ffb042;
+  --pink-ink: #fb7299;
+  --pink-ink-hover: #ff9fb4;
+  --accent-strong: #c25163;
+
+  --warn-tint: rgba(227, 160, 76, 0.16);
+  --danger-tint: rgba(226, 96, 96, 0.15);
+  --success-tint: rgba(75, 190, 139, 0.16);
+  /* Raised from 0.12 to sit in the same band as its siblings, so the three
+     log badges read with equal weight in dark mode. */
+  --accent-tint: rgba(242, 89, 111, 0.15);
 
   --seg-track: #2b2e36;
   --space-hover: rgba(160, 163, 174, 0.12);
