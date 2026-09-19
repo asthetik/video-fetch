@@ -19,6 +19,7 @@ import { IconButton } from "./IconButton";
 import { api } from "../lib/tauri";
 import { formatBytes } from "../lib/format";
 import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
+import { diffLanding, type StatusMap } from "../lib/queueLanding";
 import {
   type DownloadProgressPayload,
   mergeJob,
@@ -32,6 +33,9 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   done: "完成",
   failed: "失败",
 };
+
+/** How long the「到手」stamp stays before it fades and the landing state clears. */
+const LANDING_MS = 3200;
 
 function formatSpeed(bps?: number | null): string | null {
   if (bps == null || !Number.isFinite(bps) || bps <= 0) {
@@ -72,6 +76,11 @@ export function DownloadQueue({
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
+  const statusRef = useRef<StatusMap>(new Map());
+  const [landedIds, setLandedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const landingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
 
   const loadJobs = useCallback(async () => {
     try {
@@ -87,6 +96,53 @@ export function DownloadQueue({
   useEffect(() => {
     void loadJobs();
   }, [loadJobs, refreshToken]);
+
+  // 落定: a live non-done -> done flip plays the settle animation and stamps
+  // 「到手」for a few seconds. First-seen done rows (history reloads) don't land.
+  useEffect(() => {
+    const { next, newlyDone } = diffLanding(statusRef.current, jobs);
+    statusRef.current = next;
+    if (newlyDone.length === 0) {
+      return;
+    }
+    setLandedIds((prevSet) => {
+      const merged = new Set(prevSet);
+      for (const id of newlyDone) {
+        merged.add(id);
+      }
+      return merged;
+    });
+    for (const id of newlyDone) {
+      const old = landingTimers.current.get(id);
+      if (old) {
+        clearTimeout(old);
+      }
+      landingTimers.current.set(
+        id,
+        setTimeout(() => {
+          setLandedIds((prevSet) => {
+            if (!prevSet.has(id)) {
+              return prevSet;
+            }
+            const cleared = new Set(prevSet);
+            cleared.delete(id);
+            return cleared;
+          });
+          landingTimers.current.delete(id);
+        }, LANDING_MS),
+      );
+    }
+  }, [jobs]);
+
+  useEffect(() => {
+    const timers = landingTimers.current;
+    return () => {
+      for (const t of timers.values()) {
+        clearTimeout(t);
+      }
+      timers.clear();
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -190,6 +246,7 @@ export function DownloadQueue({
         ? `${formatBytes(job.downloaded_bytes)} / ${formatBytes(job.total_bytes)}`
         : null;
     const pct = Math.round(job.progress * 100);
+    const landed = landedIds.has(job.id);
     return (
       <motion.li
         key={job.id}
@@ -198,8 +255,13 @@ export function DownloadQueue({
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, y: -6 }}
         transition={{ duration: 0.15 }}
-        className="queue-item"
+        className={`queue-item${landed ? " landed" : ""}`}
       >
+        {job.status === "done" && landed && (
+          <span className="stamp-daoshou" aria-hidden="true">
+            到手
+          </span>
+        )}
         <div className="queue-main">
           <div className="queue-item-header">
             <p className="queue-title">

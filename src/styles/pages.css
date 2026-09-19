@@ -212,6 +212,7 @@ html[data-theme="dark"] .queue-badge.done {
 }
 
 .queue-item {
+  position: relative; /* anchors the「到手」stamp overlay */
   display: flex;
   gap: 0.75rem;
   align-items: center;
@@ -219,6 +220,63 @@ html[data-theme="dark"] .queue-badge.done {
   border-bottom: 1px solid var(--hairline);
   background: transparent; /* flat rows, no per-item card chrome */
   border-radius: 0;
+}
+
+/* 落定: the finished card settles with a 1px drop-and-straighten (240ms). */
+.queue-item.landed {
+  animation: luoding-settle 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes luoding-settle {
+  0% {
+    transform: translateY(-3px) rotate(0.4deg);
+  }
+  55% {
+    transform: translateY(1px) rotate(0deg);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+/* 到手 stamp: amber kai seal over the row's corner, pressed in with the
+   settle and faded before the landing state clears. */
+.stamp-daoshou {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.4rem;
+  z-index: 1;
+  padding: 0 0.4rem;
+  font-family: var(--font-human);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--celebrate);
+  border: 2px solid var(--celebrate);
+  border-radius: 0.5rem;
+  transform: rotate(-6deg);
+  animation: stamp-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both,
+    stamp-fade 400ms ease-in 2800ms both;
+  pointer-events: none;
+}
+
+@keyframes stamp-in {
+  from {
+    opacity: 0;
+    transform: rotate(-6deg) scale(1.5);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(-6deg) scale(1);
+  }
+}
+
+@keyframes stamp-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 .queue-list > li:last-child {
@@ -1010,6 +1068,16 @@ html[data-theme="dark"] .tag.hires {
 @media (prefers-reduced-motion: reduce) {
   .history-row-actions {
     opacity: 1;
+  }
+
+  .queue-item.landed {
+    animation: none;
+  }
+
+  .stamp-daoshou {
+    /* Stamp appears without the press-in motion; the opacity fade stays so the
+       landing state still clears on schedule. */
+    animation: stamp-fade 400ms ease-in 2800ms both;
   }
 }
 
