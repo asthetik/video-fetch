@@ -14,7 +14,7 @@
 轻量桌面视频下载器（影取），目前支持哔哩哔哩（B 站）。粘贴链接，一键下载。
 
 <p style="text-align: center">
-  <img src="docs/images/home-multipage.png" alt="Video Fetch 主页：多 P 视频勾选分 P 后下载" width="720" />
+  <img src="docs/images/home.png" alt="Video Fetch 主页：多 P 视频勾选分 P 后下载" width="720" />
 </p>
 
 ## 它能做什么
