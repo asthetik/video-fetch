@@ -149,7 +149,7 @@
 .queue-count {
   padding: 0 0.5rem;
   border-radius: var(--radius-chip);
-  background: rgba(10, 132, 255, 0.12);
+  background: rgba(242, 89, 111, 0.12);
   color: var(--accent);
   font-size: 0.72rem;
   font-weight: 700;
@@ -192,22 +192,22 @@
 }
 
 .queue-badge.running {
-  background: rgba(10, 132, 255, 0.12);
+  background: rgba(242, 89, 111, 0.12);
   color: var(--accent);
 }
 
 .queue-badge.done {
-  background: rgba(36, 138, 61, 0.13);
+  background: rgba(47, 158, 110, 0.13);
   color: var(--success);
 }
 
 html[data-theme="dark"] .queue-badge.done {
-  background: rgba(50, 215, 75, 0.16);
-  color: #32d74b;
+  background: rgba(75, 190, 139, 0.16);
+  color: var(--success);
 }
 
 .queue-badge.failed {
-  background: rgba(215, 0, 21, 0.1);
+  background: rgba(214, 69, 63, 0.1);
   color: var(--danger);
 }
 
@@ -649,7 +649,7 @@ html[data-theme="dark"] .queue-badge.done {
 }
 
 .log-badge-info {
-  background: rgba(10, 132, 255, 0.12);
+  background: rgba(242, 89, 111, 0.12);
   color: var(--accent);
 }
 
@@ -659,18 +659,18 @@ html[data-theme="dark"] .queue-badge.done {
 }
 
 html[data-theme="dark"] .log-badge-warn {
-  background: rgba(255, 214, 10, 0.15);
-  color: #ffd60a;
+  background: rgba(227, 160, 76, 0.16);
+  color: var(--warn);
 }
 
 .log-badge-error {
-  background: rgba(215, 0, 21, 0.1);
+  background: rgba(214, 69, 63, 0.1);
   color: var(--danger);
 }
 
 html[data-theme="dark"] .log-badge-error {
-  background: rgba(255, 69, 58, 0.15);
-  color: #ff453a;
+  background: rgba(226, 96, 96, 0.15);
+  color: var(--danger);
 }
 
 .log-msg {
@@ -991,13 +991,13 @@ html[data-theme="dark"] .log-badge-error {
 }
 
 .tag.hires {
-  background: rgba(240, 180, 41, 0.16);
-  color: #b8860b;
+  background: rgba(255, 176, 66, 0.16);
+  color: var(--celebrate);
 }
 
 html[data-theme="dark"] .tag.hires {
-  background: rgba(255, 214, 10, 0.15);
-  color: #ffd60a;
+  background: rgba(255, 176, 66, 0.18);
+  color: var(--celebrate);
 }
 
 .history-row-actions {
