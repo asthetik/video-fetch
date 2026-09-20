@@ -106,7 +106,7 @@ const CHECKS: Array<[string, string, string, number]> = [
   ["muted-ink on surface", "--muted-ink", "--surface", TEXT_MIN],
   ["muted-ink on neutral tint", "--muted-ink", "--muted-tint|--surface", TEXT_MIN],
   ["muted-ink on soft neutral tint", "--muted-ink", "--muted-tint-soft|--surface", TEXT_MIN],
-  ["celebrate-ink on Hi-Res tag", "--celebrate-ink", "#ffb042@0.16|--surface", TEXT_MIN],
+  ["celebrate-ink on Hi-Res tag", "--celebrate-ink", "--celebrate-tint|--surface", TEXT_MIN],
   // Focus rings are omitted on purpose: they keep the brand pink #FB7299
   // (2.64:1 on white, 2.47:1 on paper), a product decision recorded in
   // tokens.css and CHANGELOG.md rather than a target to assert.
@@ -117,17 +117,13 @@ const CHECKS: Array<[string, string, string, number]> = [
 
 /**
  * "surface" -> that token's colour; "tint|surface" -> the tint composited over
- * the surface, i.e. the worst backdrop a chip label can land on. A "#rrggbb@a"
- * base overrides the written alpha, for the two Hi-Res tag tints that are still
- * inline in pages.css.
+ * the surface, i.e. the worst backdrop a chip label can land on.
  */
 function background(spec: string, theme: Map<string, string>): string {
   const [baseSpec, surfaceSpec] = spec.split("|");
-  const at = baseSpec.indexOf("@");
-  const alpha = at === -1 ? undefined : Number(baseSpec.slice(at + 1));
-  const top = resolve(at === -1 ? baseSpec : baseSpec.slice(0, at), theme);
+  const top = resolve(baseSpec, theme);
   if (!surfaceSpec) return top;
-  return over(top, token(surfaceSpec, theme), alpha);
+  return over(top, token(surfaceSpec, theme));
 }
 
 for (const [themeName, theme] of [
@@ -151,4 +147,53 @@ test("every ink token is defined for both themes", () => {
   for (const name of ["--accent-ink", "--warn-ink", "--danger-ink", "--success-ink", "--muted-ink", "--celebrate-ink"]) {
     assert.ok(dark.has(name), `${name} has no dark-theme value`);
   }
+});
+
+// The ratio checks above guard the palette in isolation; these guard the
+// migration itself. If a consumer rule gets reverted to a mid-tone (the exact
+// defect class this file exists for), the declarations below stop matching
+// and the suite fails loudly.
+const PAGES_CSS = join(import.meta.dirname, "..", "styles", "pages.css");
+const COMPONENTS_CSS = join(import.meta.dirname, "..", "styles", "components.css");
+const pagesCss = readFileSync(PAGES_CSS, "utf8");
+const componentsCss = readFileSync(COMPONENTS_CSS, "utf8");
+
+/** [file css, selector, required declaration snippets]. */
+const CONSUMER_RULES: Array<[string, string, string[]]> = [
+  [pagesCss, ".queue-badge.pending", ["background: var(--muted-tint)", "color: var(--muted-ink)"]],
+  [pagesCss, ".queue-badge.running", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
+  [pagesCss, ".queue-badge.done", ["background: var(--success-tint)", "color: var(--success-ink)"]],
+  [pagesCss, ".queue-badge.failed", ["background: var(--danger-tint)", "color: var(--danger-ink)"]],
+  [pagesCss, ".queue-count", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
+  [pagesCss, ".log-badge-info", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
+  [pagesCss, ".log-badge-warn", ["background: var(--warn-tint)", "color: var(--warn-ink)"]],
+  [pagesCss, ".log-badge-error", ["background: var(--danger-tint)", "color: var(--danger-ink)"]],
+  [pagesCss, ".log-badge-debug", ["background: var(--muted-tint)", "color: var(--muted-ink)"]],
+  [pagesCss, ".tag.hires", ["background: var(--celebrate-tint)", "color: var(--celebrate-ink)"]],
+  [pagesCss, ".tag.fmt", ["background: var(--muted-tint-soft)", "color: var(--muted-ink)"]],
+  [componentsCss, ".url-hint.error", ["color: var(--danger-ink)"]],
+  [componentsCss, ".auth-hint", ["color: var(--danger-ink)"]],
+  [componentsCss, ".auth-label.ok", ["color: var(--success-ink)"]],
+  [componentsCss, ".auth-label.warn", ["color: var(--warn-ink)"]],
+  [pagesCss, ".history-row-err", ["color: var(--danger-ink)"]],
+];
+
+for (const [css, selector, declarations] of CONSUMER_RULES) {
+  test(`consumer rule ${selector} keeps its ink/tint tokens`, () => {
+    const block = cssBlock(css, selector);
+    for (const declaration of declarations) {
+      assert.ok(
+        block.includes(declaration),
+        `${selector} no longer declares "${declaration}" — the ink migration regressed`,
+      );
+    }
+  });
+}
+
+test("Hi-Res tag needs no dark override (tint is a themed token)", () => {
+  assert.equal(
+    pagesCss.indexOf('html[data-theme="dark"] .tag.hires'),
+    -1,
+    "the dark .tag.hires override should not exist; --celebrate-tint carries the dark value",
+  );
 });

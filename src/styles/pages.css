@@ -985,12 +985,7 @@
 }
 
 .tag.hires {
-  background: rgba(255, 176, 66, 0.16);
-  color: var(--celebrate-ink);
-}
-
-html[data-theme="dark"] .tag.hires {
-  background: rgba(255, 176, 66, 0.18);
+  background: var(--celebrate-tint);
   color: var(--celebrate-ink);
 }
 
