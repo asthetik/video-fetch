@@ -100,6 +100,9 @@
      grey in both themes, so unlike the four above they need no dark step. */
   --muted-tint: rgba(120, 120, 128, 0.14);
   --muted-tint-soft: rgba(120, 120, 128, 0.12);
+  /* Hi-Res tag: amber tint, the only celebrate chip. Dark runs a touch
+     stronger so it holds on the night surface (see the dark block). */
+  --celebrate-tint: rgba(255, 176, 66, 0.16);
 
   --seg-track: #efe8de;
   --radius-card: 18px;
@@ -147,6 +150,7 @@ html[data-theme="dark"] {
   --warn-tint: rgba(227, 160, 76, 0.16);
   --danger-tint: rgba(226, 96, 96, 0.15);
   --success-tint: rgba(75, 190, 139, 0.16);
+  --celebrate-tint: rgba(255, 176, 66, 0.18);
   /* Raised from 0.12 to sit in the same band as its siblings, so the three
      log badges read with equal weight in dark mode. */
   --accent-tint: rgba(242, 89, 111, 0.15);
