@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { ExternalLink } from "lucide-react";
 import packageJson from "../../package.json";
 import { logUi } from "../lib/activityLog";
+import { AUTHOR_URL, LICENSE_URL, REPO_URL, releaseUrl, THIRD_PARTY_URL } from "../lib/links";
 import { api } from "../lib/tauri";
 import type { EngineVersions } from "../types";
 
-const REPO_URL = "https://github.com/asthetik/video-fetch";
-const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
-const THIRD_PARTY_URL = `${REPO_URL}/blob/main/THIRD_PARTY.md`;
 /** Same source as release bumps (`package.json`); Tauri runtime may refine via getVersion(). */
 const PKG_VERSION = packageJson.version;
 
@@ -18,6 +17,31 @@ async function openExternal(url: string) {
   } catch (err) {
     logUi("about", `打开外部链接失败: ${err instanceof Error ? err.message : String(err)}`, "warn");
   }
+}
+
+interface LinkCardProps {
+  label: string;
+  value: string;
+  hint: string;
+  url: string;
+}
+
+function LinkCard({ label, value, hint, url }: LinkCardProps) {
+  return (
+    <button
+      type="button"
+      className="about-card"
+      data-action="open-external"
+      onClick={() => void openExternal(url)}
+    >
+      <span className="about-card-label">{label}</span>
+      <span className="about-card-value">{value}</span>
+      <span className="about-card-hint">
+        {hint}
+        <ExternalLink size={13} strokeWidth={2} />
+      </span>
+    </button>
+  );
 }
 
 export function AboutPage() {
@@ -54,42 +78,12 @@ export function AboutPage() {
         <p className="about-copy">
           轻量桌面视频下载器；当前支持哔哩哔哩（B 站），下载引擎为 yt-dlp。
         </p>
-        <dl className="about-meta">
-          <div>
-            <dt>作者</dt>
-            <dd>asthetik</dd>
-          </div>
-          <div>
-            <dt>版本</dt>
-            <dd>{version}</dd>
-          </div>
-          <div>
-            <dt>许可证</dt>
-            <dd>
-              <button
-                type="button"
-                className="about-link"
-                data-action="open-external"
-                onClick={() => void openExternal(LICENSE_URL)}
-              >
-                Apache-2.0
-              </button>
-            </dd>
-          </div>
-          <div>
-            <dt>源码</dt>
-            <dd>
-              <button
-                type="button"
-                className="about-link"
-                data-action="open-external"
-                onClick={() => void openExternal(REPO_URL)}
-              >
-                {REPO_URL}
-              </button>
-            </dd>
-          </div>
-        </dl>
+        <div className="about-cards">
+          <LinkCard label="作者" value="asthetik" hint="GitHub 主页" url={AUTHOR_URL} />
+          <LinkCard label="版本" value={version} hint="发行说明" url={releaseUrl(version)} />
+          <LinkCard label="许可证" value="Apache-2.0" hint="许可证全文" url={LICENSE_URL} />
+          <LinkCard label="源码" value="asthetik/video-fetch" hint="GitHub 仓库" url={REPO_URL} />
+        </div>
       </section>
 
       <section className="settings-section">

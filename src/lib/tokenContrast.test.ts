@@ -106,6 +106,10 @@ const CHECKS: Array<[string, string, string, number]> = [
   ["muted-ink on surface", "--muted-ink", "--surface", TEXT_MIN],
   ["muted-ink on neutral tint", "--muted-ink", "--muted-tint|--surface", TEXT_MIN],
   ["muted-ink on soft neutral tint", "--muted-ink", "--muted-tint-soft|--surface", TEXT_MIN],
+  // :active swaps .about-card onto --space-selected; its 0.85rem label, and the
+  // hovered hint (which keeps --accent-ink while pressed), sit on that composite.
+  ["muted-ink on pressed card", "--muted-ink", "--space-selected|--surface", TEXT_MIN],
+  ["accent-ink on pressed card", "--accent-ink", "--space-selected|--surface", TEXT_MIN],
   ["celebrate-ink on Hi-Res tag", "--celebrate-ink", "--celebrate-tint|--surface", TEXT_MIN],
   // Focus rings are omitted on purpose: they keep the brand pink #FB7299
   // (2.64:1 on white, 2.47:1 on paper), a product decision recorded in
@@ -176,6 +180,9 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   [componentsCss, ".auth-label.ok", ["color: var(--success-ink)"]],
   [componentsCss, ".auth-label.warn", ["color: var(--warn-ink)"]],
   [pagesCss, ".history-row-err", ["color: var(--danger-ink)"]],
+  [pagesCss, ".about-card-hint", ["color: var(--muted-ink)"]],
+  [pagesCss, ".about-card-label", ["color: var(--muted-ink)"]],
+  [pagesCss, ".about-card:hover .about-card-hint", ["color: var(--accent-ink)"]],
 ];
 
 for (const [css, selector, declarations] of CONSUMER_RULES) {

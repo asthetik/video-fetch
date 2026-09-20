@@ -480,6 +480,8 @@
 
 .about-page {
   max-width: 40rem;
+  /* Shared so the link cards and the meta list below keep the same label-column width. */
+  --about-label-col: 5rem;
 }
 
 .about-copy {
@@ -496,7 +498,7 @@
 
 .about-meta div {
   display: grid;
-  grid-template-columns: 5rem 1fr;
+  grid-template-columns: var(--about-label-col) 1fr;
   gap: 0.5rem;
   align-items: baseline;
 }
@@ -512,19 +514,66 @@
   word-break: break-all;
 }
 
-.about-link {
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--accent-ink);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  text-decoration: underline;
+/* About: clickable meta rows (paper-inset cards, not nested surfaces) */
+.about-cards {
+  display: grid;
+  gap: 0.5rem;
 }
 
-.about-link:hover {
-  opacity: 0.85;
+.about-card {
+  display: grid;
+  grid-template-columns: var(--about-label-col) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-ctl);
+  background: var(--bg);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--micro-ms) ease, box-shadow var(--micro-ms) ease,
+    background-color var(--micro-ms) ease;
+}
+
+.about-card:hover {
+  border-color: var(--pink);
+  box-shadow: var(--surface-shadow);
+}
+
+.about-card:active {
+  background: var(--space-selected);
+}
+
+.about-card-label {
+  color: var(--muted-ink);
+  font-size: 0.85rem;
+}
+
+.about-card-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.about-card-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted-ink);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  transition: color var(--micro-ms) ease;
+}
+
+.about-card:hover .about-card-hint {
+  color: var(--accent-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .about-card,
+  .about-card-hint {
+    transition: none;
+  }
 }
 
 .logs-page {
