@@ -44,12 +44,15 @@
   line-height: 1.5;
 
   --bg: #faf7f4;
-  --surface: #fffdf8;
+  /* Surfaces stay pure white so the paper canvas earns its warmth: the tint
+     exists to let cards float, and at #fffdf8 the gap to --bg collapsed to
+     6/255, which is not enough to read as a layer. */
+  --surface: #ffffff;
   --surface-border: #e6dfd5;
   --surface-shadow: 0 1px 3px rgba(34, 31, 38, 0.07);
-  --ctl-bg: #fffdf8;
+  --ctl-bg: #ffffff;
   --hairline: #e6dfd5;
-  --header-bg: rgba(255, 253, 248, 0.92);
+  --header-bg: rgba(255, 255, 255, 0.92);
 
   --text: #221f26;
   --muted: #73707a;
@@ -61,6 +64,42 @@
   --danger: #d6453f;
   --success: #2f9e6e;
   --warn: #d98a2b;
+
+  /* Status "ink": the semantic colours above are decorative-grade (fills,
+     borders, large icons). As chip labels at 10.5-13px they are small text
+     and need a darker step of the same hue to clear WCAG AA (4.5:1). These
+     are solved against the darker of the two backdrops a chip can sit on --
+     its own tint over the paper canvas, not over pure white -- so a label
+     holds whichever surface the chip lands on. */
+  --accent-ink: #b2404f;
+  /* Solved against the chip's own tint over the card surface (4.57:1). The
+     same chip over the paper canvas only reaches 4.34:1, so a warn chip
+     belongs on --surface / --ctl-bg, not straight on --bg. */
+  --warn-ink: #965f1e;
+  --danger-ink: #bb3b36;
+  --success-ink: #1f7049;
+  --muted-ink: #66636d;
+  --celebrate-ink: #8a5a10;
+  /* Buttons and focus rings keep every one of their original colours. White on
+     --accent is 3.26:1 light / 2.74:1 dark, on --danger 4.39:1 / 3.46:1, the
+     labels that use --accent/--danger/--pink sit below 4.5:1, and the brand
+     pink ring is 2.64:1 on white / 2.47:1 on paper against the 3:1 indicator
+     bar -- product decision 2026-09-20: buttons keep their colours, pink is
+     the standard for the pink identity. These are known deviations; do not
+     "fix" them without asking. */
+
+  /* Chip fills for the status colours. Explicit rgba rather than derived, so
+     the four sit on one deliberate ramp instead of inheriting whatever alpha
+     the brand hue happens to imply; the light ramp lands within 1.15-1.16:1
+     of white for all four, so no chip reads heavier than its siblings. */
+  --accent-tint: rgba(242, 89, 111, 0.12);
+  --warn-tint: rgba(217, 138, 43, 0.16);
+  --danger-tint: rgba(214, 69, 63, 0.1);
+  --success-tint: rgba(47, 158, 110, 0.13);
+  /* Neutral chips -- queue "pending", the DEBUG badge, the format tag -- are
+     grey in both themes, so unlike the four above they need no dark step. */
+  --muted-tint: rgba(120, 120, 128, 0.14);
+  --muted-tint-soft: rgba(120, 120, 128, 0.12);
 
   --seg-track: #efe8de;
   --radius-card: 18px;
@@ -97,6 +136,20 @@ html[data-theme="dark"] {
   --danger: #e26060;
   --success: #4bbe8b;
   --warn: #e3a04c;
+
+  --accent-ink: #ff6b82;
+  --warn-ink: #e3a04c;
+  --danger-ink: #f07070;
+  --success-ink: #4bbe8b;
+  --muted-ink: #a0a3ae;
+  --celebrate-ink: #ffb042;
+
+  --warn-tint: rgba(227, 160, 76, 0.16);
+  --danger-tint: rgba(226, 96, 96, 0.15);
+  --success-tint: rgba(75, 190, 139, 0.16);
+  /* Raised from 0.12 to sit in the same band as its siblings, so the three
+     log badges read with equal weight in dark mode. */
+  --accent-tint: rgba(242, 89, 111, 0.15);
 
   --seg-track: #2b2e36;
   --space-hover: rgba(160, 163, 174, 0.12);

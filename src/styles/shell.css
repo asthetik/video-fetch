@@ -54,6 +54,10 @@
 
 .nav-btn.active {
   color: #fff;
+  /* The active menu button keeps the full-strength brand coral: button fills
+     stay as designed. Consequence: white on #F2596F is 3.26:1, below the
+     4.5:1 small-text bar -- a deliberate, documented exception (see CHANGELOG
+     "Unreleased" and the ink-ramp rules in DESIGN.md). */
   background: var(--accent);
   font-weight: 600;
 }
