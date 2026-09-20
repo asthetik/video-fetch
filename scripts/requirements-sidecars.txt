@@ -1,5 +1,10 @@
 # Sidecar version pins — single source of truth for release packaging.
 #
+# Any version bump here also needs new SHA-256 digests in
+# sidecar_pins.json. Run `python scripts/fetch_sidecars.py --update-pins`
+# right after a bump (digests are cross-checked against upstream's own
+# checksum files); see the fetch_sidecars.py module docstring.
+#
 # yt-dlp: auto-upgraded by Dependabot (pip ecosystem, see
 # .github/dependabot.yml). PyPI normalizes the version string
 # (GitHub tag 2026.08.19 -> PyPI 2026.8.19); fetch_sidecars.py
@@ -7,5 +12,5 @@
 #
 # ffmpeg: BtbN / evermeet ship raw binaries with no package-registry
 # ecosystem for Dependabot to track — it is pinned as FFMPEG_VERSION
-# in scripts/fetch_sidecars.py and bumped manually.
+# and FFMPEG_BTBN_TAG in scripts/fetch_sidecars.py and bumped manually.
 yt-dlp==2026.8.19

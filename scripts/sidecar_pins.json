@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "//": "SHA-256 pins for artifacts downloaded by fetch_sidecars.py. Update with --update-pins; see the script docstring.",
+  "downloads": {
+    "ffmpeg-9.0.1.zip": "8a8c9e549983409fe6604b9aa665648b7a5def9407fe814c39c8b2ea7f64a48f",
+    "ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0.tar.xz": "7569c7c00a421d4fb4636925a126e96e051bb5cdd0b0e0a91576ddfadddd9bff",
+    "ffmpeg-n9.0.2-3-ga5923073bf-linuxarm64-gpl-9.0.tar.xz": "031d4336d6a9fab8c0bc26c3bca4fab0c09fcfdd405a7ef6ce2aa4b535fddce9",
+    "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip": "2304b4ad6a5d9660b163c8a42d15433327d1ff4a57cae79a8e2d122c5af0f491",
+    "ffmpeg-n9.0.2-3-ga5923073bf-winarm64-gpl-9.0.zip": "6f6fcd5b12dea77454079e7135c43444461b15bee85d5537cdb56a1731c0d8ea",
+    "yt-dlp.exe": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
+    "yt-dlp_arm64.exe": "05b438997bafc3affdfda9d041353c9d73e04dc842207254b655b0887c4445b0",
+    "yt-dlp_linux": "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a",
+    "yt-dlp_linux_aarch64": "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc",
+    "yt-dlp_macos": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
+  },
+  "binaries": {
+    "ffmpeg": {
+      "aarch64-apple-darwin": "e27de05e3a9f9c758f9766d15d1a069fddeed5f725e35d9ab28683be4740dad7",
+      "x86_64-unknown-linux-gnu": "34336eeef07ca088a34cbbe598eefe0001602afcef6be6bd63992c5f7e198c96",
+      "aarch64-unknown-linux-gnu": "54d5bb6430e76adc0d9eabf433fdfc2127ab1d879e7724fdfdaebde5ac5e0407",
+      "x86_64-pc-windows-msvc": "2b56d430babac3793ab574ad6f8b9b1ec70344eb91d4ded9a2b26c2d9b37d0ee",
+      "aarch64-pc-windows-msvc": "f8eff33e092c282e6445a02028d19b6886d9197a0a720901ac9291c0e68f84d0"
+    },
+    "yt-dlp": {
+      "aarch64-apple-darwin": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202",
+      "x86_64-unknown-linux-gnu": "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a",
+      "aarch64-unknown-linux-gnu": "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc",
+      "x86_64-pc-windows-msvc": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
+      "aarch64-pc-windows-msvc": "05b438997bafc3affdfda9d041353c9d73e04dc842207254b655b0887c4445b0"
+    }
+  }
+}
