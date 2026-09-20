@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import io
+import shutil
+import tarfile
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
+from unittest import mock
 
+import fetch_sidecars
 from fetch_sidecars import (
     FFMPEG_VERSION,
+    extract_tar_xz,
+    fetch_ffmpeg,
     ffmpeg_branch,
     ffmpeg_download_url,
     load_ytdlp_version,
@@ -16,6 +24,30 @@ from fetch_sidecars import (
 
 PIN = "2026.8.19"
 TAG = "2026.08.19"
+
+
+def write_tar_xz(
+    path: Path,
+    files: Sequence[tuple[str, bytes]] = (),
+    links: Sequence[tuple[str, str]] = (),
+) -> None:
+    with tarfile.open(path, "w:xz") as tf:
+        for name, data in files:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        for name, target in links:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            tf.addfile(info)
+
+
+class TmpDirTestCase(unittest.TestCase):
+    def tmpdir(self) -> Path:
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
 
 
 class TestYtdlpUrl(unittest.TestCase):
@@ -162,6 +194,90 @@ class TestFfmpegUrl(unittest.TestCase):
 
     def test_ffmpeg_version_shape(self) -> None:
         self.assertRegex(FFMPEG_VERSION, r"^\d+\.\d+\.\d+$")
+
+
+class TestExtractTarXz(TmpDirTestCase):
+    def write_archive(self, name: str, data: bytes = b"binary\n") -> Path:
+        archive = self.tmpdir() / "ffmpeg.tar.xz"
+        write_tar_xz(archive, files=[(name, data)])
+        return archive
+
+    def test_extracts_nested_binary(self) -> None:
+        archive = self.write_archive("ffmpeg-n9.0-latest-linux64-gpl-9.0/bin/ffmpeg")
+        dest = self.tmpdir()
+        extract_tar_xz(archive, dest)
+        out = dest / "ffmpeg-n9.0-latest-linux64-gpl-9.0" / "bin" / "ffmpeg"
+        self.assertEqual(out.read_bytes(), b"binary\n")
+
+    def test_rejects_path_traversal(self) -> None:
+        archive = self.write_archive("../escape.txt")
+        # Nested dest so that ".." resolves inside this test's private base,
+        # not the shared system temp dir.
+        base = self.tmpdir()
+        dest = base / "dest"
+        dest.mkdir()
+        with self.assertRaises(tarfile.TarError):
+            extract_tar_xz(archive, dest)
+        self.assertFalse((base / "escape.txt").exists())
+
+    def test_passes_data_filter_explicitly(self) -> None:
+        # 3.14 already defaults to "data", so the behavior tests above stay
+        # green even if the kwarg is dropped; this pins it explicitly.
+        archive = self.write_archive("pkg/bin/ffmpeg")
+        dest = self.tmpdir()
+        with mock.patch.object(tarfile, "open") as opener:
+            extract_tar_xz(archive, dest)
+        opener.return_value.__enter__.return_value.extractall.assert_called_once_with(
+            dest, filter="data"
+        )
+
+    def test_rejects_escaping_symlink(self) -> None:
+        archive = self.tmpdir() / "ffmpeg.tar.xz"
+        write_tar_xz(
+            archive,
+            links=[("ffmpeg-n9.0-latest-linux64-gpl-9.0/bin/ffmpeg", "../../../outside")],
+        )
+        dest = self.tmpdir()
+        with self.assertRaises(tarfile.TarError):
+            extract_tar_xz(archive, dest)
+
+    def test_corrupt_archive_raises(self) -> None:
+        d = self.tmpdir()
+        archive = d / "ffmpeg.tar.xz"
+        archive.write_bytes(b"not an xz archive")
+        with self.assertRaises(tarfile.TarError):
+            extract_tar_xz(archive, self.tmpdir())
+
+
+class TestFetchFfmpegLinux(TmpDirTestCase):
+    def install_fake_download(self, members: list[tuple[str, bytes]]) -> None:
+        def fake_download(url: str, dest: Path) -> None:
+            write_tar_xz(dest, files=members)
+
+        original = fetch_sidecars.download
+        fetch_sidecars.download = fake_download
+        self.addCleanup(setattr, fetch_sidecars, "download", original)
+
+    def test_prefers_bin_ffmpeg_from_archive(self) -> None:
+        tmp = self.tmpdir()
+        out = tmp / "ffmpeg-x86_64-unknown-linux-gnu"
+        self.install_fake_download(
+            [
+                ("ffmpeg-n9.0-latest-linux64-gpl-9.0/bin/ffmpeg", b"real\n"),
+                ("ffmpeg-n9.0-latest-linux64-gpl-9.0/share/ffmpeg", b"decoy\n"),
+            ]
+        )
+        fetch_ffmpeg("Linux", "x86_64", out, tmp)
+        self.assertEqual(out.read_bytes(), b"real\n")
+
+    def test_archive_without_bin_ffmpeg_dies(self) -> None:
+        tmp = self.tmpdir()
+        out = tmp / "ffmpeg-x86_64-unknown-linux-gnu"
+        self.install_fake_download(
+            [("ffmpeg-n9.0-latest-linux64-gpl-9.0/share/ffmpeg", b"decoy\n")]
+        )
+        with self.assertRaises(SystemExit):
+            fetch_ffmpeg("Linux", "x86_64", out, tmp)
 
 
 if __name__ == "__main__":
