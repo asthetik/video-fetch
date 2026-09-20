@@ -2,6 +2,16 @@
   box-sizing: border-box;
 }
 
+/* Form controls do not inherit font by default. Without this, `--font-ui`
+   (bundled MiSans) is bypassed and every button/select renders in the UA
+   default, which differs per platform. */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
 body {
   margin: 0;
   background: var(--bg);

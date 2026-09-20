@@ -149,8 +149,8 @@
 .queue-count {
   padding: 0 0.5rem;
   border-radius: var(--radius-chip);
-  background: rgba(242, 89, 111, 0.12);
-  color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -187,28 +187,23 @@
 }
 
 .queue-badge.pending {
-  background: rgba(120, 120, 128, 0.14);
-  color: var(--muted);
+  background: var(--muted-tint);
+  color: var(--muted-ink);
 }
 
 .queue-badge.running {
-  background: rgba(242, 89, 111, 0.12);
-  color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .queue-badge.done {
-  background: rgba(47, 158, 110, 0.13);
-  color: var(--success);
-}
-
-html[data-theme="dark"] .queue-badge.done {
-  background: rgba(75, 190, 139, 0.16);
-  color: var(--success);
+  background: var(--success-tint);
+  color: var(--success-ink);
 }
 
 .queue-badge.failed {
-  background: rgba(214, 69, 63, 0.1);
-  color: var(--danger);
+  background: var(--danger-tint);
+  color: var(--danger-ink);
 }
 
 .queue-item {
@@ -521,7 +516,7 @@ html[data-theme="dark"] .queue-badge.done {
   padding: 0;
   border: none;
   background: none;
-  color: var(--accent);
+  color: var(--accent-ink);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -649,28 +644,27 @@ html[data-theme="dark"] .queue-badge.done {
 }
 
 .log-badge-info {
-  background: rgba(242, 89, 111, 0.12);
-  color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .log-badge-warn {
-  background: rgba(255, 204, 0, 0.2);
-  color: var(--warn);
-}
-
-html[data-theme="dark"] .log-badge-warn {
-  background: rgba(227, 160, 76, 0.16);
-  color: var(--warn);
+  background: var(--warn-tint);
+  color: var(--warn-ink);
 }
 
 .log-badge-error {
-  background: rgba(214, 69, 63, 0.1);
-  color: var(--danger);
+  background: var(--danger-tint);
+  color: var(--danger-ink);
 }
 
-html[data-theme="dark"] .log-badge-error {
-  background: rgba(226, 96, 96, 0.15);
-  color: var(--danger);
+/* Release writes info and above, so DEBUG only appears in debug builds or
+   when RUST_LOG lowers the filter -- but parseLogLine accepts it and
+   LogsPage renders log-badge-debug, so the badge needs a rule rather than
+   rendering bare. */
+.log-badge-debug {
+  background: var(--muted-tint);
+  color: var(--muted-ink);
 }
 
 .log-msg {
@@ -685,7 +679,7 @@ html[data-theme="dark"] .log-badge-error {
   padding: 0.35rem 0.6rem;
   border-radius: 6px;
   background: var(--space-hover);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .space-toolbar { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
 .space-search-wrap {
@@ -714,7 +708,7 @@ html[data-theme="dark"] .log-badge-error {
   font-size: 0.9rem;
 }
 
-.space-search:focus {
+.space-search:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -971,7 +965,7 @@ html[data-theme="dark"] .log-badge-error {
 }
 
 .history-row-err {
-  color: var(--danger);
+  color: var(--danger-ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -986,18 +980,18 @@ html[data-theme="dark"] .log-badge-error {
 }
 
 .tag.fmt {
-  background: rgba(120, 120, 128, 0.12);
-  color: var(--muted);
+  background: var(--muted-tint-soft);
+  color: var(--muted-ink);
 }
 
 .tag.hires {
   background: rgba(255, 176, 66, 0.16);
-  color: var(--celebrate);
+  color: var(--celebrate-ink);
 }
 
 html[data-theme="dark"] .tag.hires {
   background: rgba(255, 176, 66, 0.18);
-  color: var(--celebrate);
+  color: var(--celebrate-ink);
 }
 
 .history-row-actions {
