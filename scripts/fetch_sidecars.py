@@ -198,6 +198,16 @@ def find_one(root: Path, pattern: str) -> Path:
     return files[0]
 
 
+def extract_tar_xz(archive: Path, dest: Path) -> None:
+    with tarfile.open(archive, mode="r:xz") as tf:
+        # Passing "data" explicitly makes the path-traversal guard visible and
+        # gives 3.12 through 3.14 one extraction behavior (3.12-3.13 default to
+        # fully_trusted, 3.14+ to data). The kwarg exists on 3.12+ and on the
+        # 3.9.17/3.10.12/3.11.4 backports; older interpreters fail loudly
+        # instead of silently extracting unfiltered.
+        tf.extractall(dest, filter="data")
+
+
 def fetch_ffmpeg(system: str, machine: str, out: Path, tmp: Path) -> None:
     print(f"Downloading ffmpeg {FFMPEG_VERSION}...")
     if system == "Darwin":
@@ -222,11 +232,13 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, tmp: Path) -> None:
         assert url is not None
         archive = tmp / "ffmpeg.tar.xz"
         download(url, archive)
-        with tarfile.open(archive, mode="r:xz") as tf:
-            tf.extractall(tmp)
+        extract_dir = tmp / "ffmpeg-linux"
+        extract_dir.mkdir()
+        extract_tar_xz(archive, extract_dir)
         # Prefer */bin/ffmpeg like the bash find path filter.
         candidates = [
-            p for p in tmp.rglob("ffmpeg") if p.is_file() and p.parent.name == "bin"
+            p for p in extract_dir.rglob("ffmpeg")
+            if p.is_file() and p.parent.name == "bin"
         ]
         if not candidates:
             die("ffmpeg binary not found in archive")
