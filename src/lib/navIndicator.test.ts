@@ -16,6 +16,8 @@ import { join } from "node:path";
 //    label colour fading for anyone who asked for reduced motion.
 const SHELL_CSS = join(import.meta.dirname, "..", "styles", "shell.css");
 const css = readFileSync(SHELL_CSS, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const TOKENS_CSS = join(import.meta.dirname, "..", "styles", "tokens.css");
+const tokens = readFileSync(TOKENS_CSS, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 function cssBlock(source: string, selector: string): string {
   const start = source.indexOf(selector);
@@ -69,4 +71,21 @@ test("prefers-reduced-motion disables the selected label's own transition too", 
     "the reduced-motion block lists .nav-btn but not .nav-btn.active — the more"
       + " specific rule outranks it, so the label still fades",
   );
+});
+
+test("the label timing tokens are defined", () => {
+  // `.nav-btn.active` spends both tokens in its transition shorthand, and a
+  // missing custom property invalidates that whole declaration: the shorthand
+  // falls back to its initial value and the base `.nav-btn` transition does
+  // NOT take over. The label then snaps white on click, restoring the
+  // white-on-paper window this file exists to prevent — while every other
+  // test here stays green.
+  const root = cssBlock(tokens, ":root");
+  for (const token of ["--nav-label-ms", "--nav-label-in-delay"]) {
+    assert.match(
+      root,
+      new RegExp(`${token}\\s*:`),
+      `tokens.css :root is missing ${token}, which the selected label's transition needs`,
+    );
+  }
 });
