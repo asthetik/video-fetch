@@ -1343,10 +1343,11 @@ fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Res
             None => std::ptr::null_mut(),
         };
         let _: () = msg_send![ns_window, setAppearance: appearance];
-        // macOS 27 accepts the appearance change but defers the titlebar
-        // recomposite until the next window update (navigating repaints it).
-        // Nudge every cheap redraw layer so the flip is immediate: shadow
-        // recomposite, theme-frame redraw, background and title re-set.
+        // macOS 26+ accepts the appearance change but defers the titlebar
+        // recomposite until the next full content commit (page navigation
+        // repaints it); the appearance state itself updates immediately.
+        // Nudge the cheap redraw layers to try to bring the repaint forward —
+        // a full fix needs an upstream tao/macOS change.
         let _: () = msg_send![ns_window, invalidateShadow];
         let frame: *mut AnyObject = msg_send![ns_window, contentView];
         let frame: *mut AnyObject = msg_send![frame, superview];
