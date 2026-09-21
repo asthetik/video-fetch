@@ -29,19 +29,56 @@ export function nativeThemeFor(mode: ThemeMode): "light" | "dark" | null {
   return mode === "system" ? null : mode;
 }
 
+/** Last appearance handed to the native windows; undefined when nothing has
+ * been sent yet or the last send failed, so the next apply retries. */
+let lastNativeTheme: "light" | "dark" | null | undefined;
+/** The native sync kicked off by the most recent applyTheme, if any. */
+let lastNativeSync: Promise<void> | undefined;
+
 function syncNativeTheme(mode: ThemeMode): void {
   if (!("__TAURI_INTERNALS__" in window)) {
     return; // Browser dev/preview and node tests: no native titlebar to sync.
   }
-  void invoke("set_window_theme", { theme: nativeThemeFor(mode) }).catch((error) => {
-    // IPC rejected (rare: command missing or window gone): the webview theme
-    // still applies, but the titlebar would silently stop following — record it.
-    logUi(
-      "theme",
-      `同步原生窗口主题失败: ${error instanceof Error ? error.message : String(error)}`,
-      "warn",
-    );
-  });
+  const native = nativeThemeFor(mode);
+  if (native === lastNativeTheme) {
+    return; // Already applied; re-sending would only re-run the native nudge.
+  }
+  lastNativeTheme = native;
+  lastNativeSync = invoke("set_window_theme", { theme: native })
+    .then(() => {
+      // The resolution above still read the appearance pinned until this
+      // call landed (a pinned window drives prefers-color-scheme), so a
+      // switch to system may have resolved against the stale pin. Re-resolve
+      // now so the UI flips without waiting for the media-query event.
+      if (getThemeMode() !== "system") {
+        return;
+      }
+      if (
+        resolveTheme("system", systemPrefersDark()) ===
+        document.documentElement.dataset.theme
+      ) {
+        return;
+      }
+      applyTheme("system");
+    })
+    .catch((error) => {
+      // IPC rejected (rare: command missing or window gone): the webview theme
+      // still applies, but the titlebar would silently stop following — record
+      // it, and allow a later apply to retry.
+      lastNativeTheme = undefined;
+      logUi(
+        "theme",
+        `同步原生窗口主题失败: ${error instanceof Error ? error.message : String(error)}`,
+        "warn",
+      );
+    });
+}
+
+/** Settles when the most recent native theme sync finished (already resolved
+ * when nothing had to be sent). main.tsx awaits this before revealing the
+ * window so its first visible frame carries the right titlebar. */
+export function nativeThemeSynced(): Promise<void> {
+  return lastNativeSync ?? Promise.resolve();
 }
 
 function systemPrefersDark(): boolean {

@@ -15,7 +15,8 @@
         "title": "Video Fetch",
         "width": 960,
         "height": 720,
-        "resizable": true
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {
