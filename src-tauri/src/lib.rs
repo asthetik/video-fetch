@@ -51,6 +51,20 @@ pub fn run() {
                     );
                 })?;
             app.manage(state);
+
+            // The main window starts hidden and the frontend reveals it once
+            // the stored theme is applied (no cold-start titlebar flash). If
+            // the frontend never gets that far, reveal it anyway so a broken
+            // bundle cannot leave the app invisible.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if let Some(window) = handle.get_webview_window("main")
+                    && !window.is_visible().unwrap_or(true)
+                {
+                    let _ = window.show();
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
