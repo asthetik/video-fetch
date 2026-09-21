@@ -4995,6 +4995,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "md-5",
+ "objc2",
  "percent-encoding",
  "reqwest",
  "rusqlite",

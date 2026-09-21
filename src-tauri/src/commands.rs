@@ -54,6 +54,10 @@ pub struct AppState {
     pub active_resolve_id: AtomicU64,
     /// Local activity log writer (files under app_dir/logs).
     pub activity_log: crate::activity_log::ActivityLog,
+    /// Window theme pinned by the UI ("dark"/"light"); None follows the system.
+    /// Windows created later (the Bilibili login window) read it at creation
+    /// so they do not lag one switch behind.
+    pub window_theme: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1180,6 +1184,21 @@ pub async fn start_bilibili_login(
         .build()
         .map_err(|e| AppError::Message(format!("无法打开登录窗口: {e}")))?;
 
+        // The theme switch only reached windows open at the time; theme this
+        // new window as well. This command is async (off the main thread), so
+        // the AppKit work is dispatched to the main thread.
+        let pinned = state
+            .window_theme
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let themed = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            if let Err(e) = apply_window_theme(&themed, pinned.as_deref()) {
+                tracing::warn!(target: "core", "auth: 登录窗口主题同步失败: {e}");
+            }
+        });
+
         // The WebView cookie store survives across windows, so a previous session
         // would auto-complete login the moment the page opens. Clear browsing data
         // and verify it took effect before navigating, so every login starts from
@@ -1257,6 +1276,102 @@ pub fn open_path(path: String) -> AppResult<()> {
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|e| AppError::Message(format!("无法打开路径: {e}")))?;
     Ok(())
+}
+
+/// Mirror the theme choice onto the native window. macOS renders window
+/// chrome from the window's own appearance only — an app-level setAppearance
+/// is accepted by AppKit but ignored for the titlebar — so the window gets
+/// the appearance set directly; other platforms take tao's per-window theme.
+#[tauri::command]
+pub fn set_window_theme(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    theme: Option<String>,
+) -> Result<(), String> {
+    match theme.as_deref() {
+        None | Some("dark" | "light") => {
+            *state
+                .window_theme
+                .lock()
+                .map_err(|_| "theme lock poisoned".to_string())? = theme.clone();
+            apply_window_theme_to_all(&window, theme.as_deref())
+        }
+        Some(other) => Err(format!("unknown theme: {other}")),
+    }
+}
+
+/// Theme every open window — the main one plus the embedded Bilibili login
+/// window when it is up; a failure on one window still themes the rest.
+fn apply_window_theme_to_all(
+    window: &tauri::WebviewWindow,
+    theme: Option<&str>,
+) -> Result<(), String> {
+    let mut first_error = None;
+    for (_, open) in window.app_handle().webview_windows() {
+        if let Err(e) = apply_window_theme(&open, theme) {
+            first_error.get_or_insert(e);
+        }
+    }
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Result<(), String> {
+    use objc2::{class, msg_send, runtime::AnyObject};
+
+    let appearance_name: Option<&std::ffi::CStr> = match theme {
+        Some("dark") => Some(c"NSAppearanceNameDarkAqua"),
+        Some("light") => Some(c"NSAppearanceNameAqua"),
+        // None: clear the override so the window tracks the system again.
+        _ => None,
+    };
+
+    unsafe {
+        let ns_window = window.ns_window().map_err(|e| e.to_string())? as *mut AnyObject;
+        if ns_window.is_null() {
+            return Err("ns_window unavailable".into());
+        }
+        let appearance: *mut AnyObject = match appearance_name {
+            Some(name) => {
+                let name: *mut AnyObject =
+                    msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+                msg_send![class!(NSAppearance), appearanceNamed: name]
+            }
+            None => std::ptr::null_mut(),
+        };
+        let _: () = msg_send![ns_window, setAppearance: appearance];
+        // macOS 26+ accepts the appearance change but defers the titlebar
+        // recomposite until the next full content commit (page navigation
+        // repaints it); the appearance state itself updates immediately.
+        // Nudge the cheap redraw layers to try to bring the repaint forward —
+        // a full fix needs an upstream tao/macOS change.
+        let _: () = msg_send![ns_window, invalidateShadow];
+        let frame: *mut AnyObject = msg_send![ns_window, contentView];
+        let frame: *mut AnyObject = msg_send![frame, superview];
+        let _: () = msg_send![frame, setNeedsDisplay: objc2::runtime::Bool::new(true)];
+        let _: () = msg_send![ns_window, displayIfNeeded];
+        let background: *mut AnyObject = msg_send![ns_window, backgroundColor];
+        let _: () = msg_send![ns_window, setBackgroundColor: background];
+        let title: *mut AnyObject = msg_send![ns_window, title];
+        let _: () = msg_send![ns_window, setTitle: title];
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Result<(), String> {
+    use tauri::Theme;
+
+    let theme = match theme {
+        Some("dark") => Some(Theme::Dark),
+        Some("light") => Some(Theme::Light),
+        None => None,
+        Some(other) => return Err(format!("unknown theme: {other}")),
+    };
+    window.set_theme(theme).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1380,6 +1495,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
+        window_theme: std::sync::Mutex::new(None),
     })
 }
 

@@ -23,8 +23,8 @@ use commands::{
     clear_finished_jobs, clear_logs, delete_job, detect_url, enqueue_download, get_auth_status,
     get_engine_versions, get_settings, import_cookies_path, list_jobs, list_log_files,
     log_ui_events, open_path, pick_cookies_file, pick_save_dir, preview_name, read_log_tail,
-    resolve_url, retry_job, save_settings, space_enqueue_batch, space_info, space_list_videos,
-    start_bilibili_login,
+    resolve_url, retry_job, save_settings, set_window_theme, space_enqueue_batch, space_info,
+    space_list_videos, start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -80,6 +80,7 @@ pub fn run() {
             start_bilibili_login,
             preview_name,
             open_path,
+            set_window_theme,
             pick_save_dir,
             pick_cookies_file,
         ])

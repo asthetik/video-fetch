@@ -1,3 +1,7 @@
+import { invoke } from "@tauri-apps/api/core";
+// .ts extension required: node --test loads this module directly (ESM).
+import { logUi } from "./activityLog.ts";
+
 export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
@@ -18,6 +22,28 @@ export function parseThemeMode(raw: string | null): ThemeMode {
   return raw === "light" || raw === "dark" || raw === "system" ? raw : "system";
 }
 
+/** Theme handed to the native window: fixed modes pin the titlebar to the
+ * choice immediately, system mode passes null so the window keeps tracking
+ * the OS instead of freezing on whatever the webview last resolved. */
+export function nativeThemeFor(mode: ThemeMode): "light" | "dark" | null {
+  return mode === "system" ? null : mode;
+}
+
+function syncNativeTheme(mode: ThemeMode): void {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return; // Browser dev/preview and node tests: no native titlebar to sync.
+  }
+  void invoke("set_window_theme", { theme: nativeThemeFor(mode) }).catch((error) => {
+    // IPC rejected (rare: command missing or window gone): the webview theme
+    // still applies, but the titlebar would silently stop following — record it.
+    logUi(
+      "theme",
+      `同步原生窗口主题失败: ${error instanceof Error ? error.message : String(error)}`,
+      "warn",
+    );
+  });
+}
+
 function systemPrefersDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
@@ -32,6 +58,7 @@ export function applyTheme(mode: ThemeMode): ResolvedTheme {
   const resolved = resolveTheme(mode, systemPrefersDark());
   document.documentElement.dataset.theme = resolved;
   document.documentElement.style.colorScheme = resolved;
+  syncNativeTheme(mode);
   announce(resolved);
   return resolved;
 }
