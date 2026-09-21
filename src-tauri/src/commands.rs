@@ -54,6 +54,10 @@ pub struct AppState {
     pub active_resolve_id: AtomicU64,
     /// Local activity log writer (files under app_dir/logs).
     pub activity_log: crate::activity_log::ActivityLog,
+    /// Window theme pinned by the UI ("dark"/"light"); None follows the system.
+    /// Windows created later (the Bilibili login window) read it at creation
+    /// so they do not lag one switch behind.
+    pub window_theme: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1180,6 +1184,21 @@ pub async fn start_bilibili_login(
         .build()
         .map_err(|e| AppError::Message(format!("无法打开登录窗口: {e}")))?;
 
+        // The theme switch only reached windows open at the time; theme this
+        // new window as well. This command is async (off the main thread), so
+        // the AppKit work is dispatched to the main thread.
+        let pinned = state
+            .window_theme
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let themed = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            if let Err(e) = apply_window_theme(&themed, pinned.as_deref()) {
+                tracing::warn!(target: "core", "auth: 登录窗口主题同步失败: {e}");
+            }
+        });
+
         // The WebView cookie store survives across windows, so a previous session
         // would auto-complete login the moment the page opens. Clear browsing data
         // and verify it took effect before navigating, so every login starts from
@@ -1264,10 +1283,38 @@ pub fn open_path(path: String) -> AppResult<()> {
 /// is accepted by AppKit but ignored for the titlebar — so the window gets
 /// the appearance set directly; other platforms take tao's per-window theme.
 #[tauri::command]
-pub fn set_window_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Result<(), String> {
+pub fn set_window_theme(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    theme: Option<String>,
+) -> Result<(), String> {
     match theme.as_deref() {
-        None | Some("dark" | "light") => apply_window_theme(&window, theme.as_deref()),
+        None | Some("dark" | "light") => {
+            *state
+                .window_theme
+                .lock()
+                .map_err(|_| "theme lock poisoned".to_string())? = theme.clone();
+            apply_window_theme_to_all(&window, theme.as_deref())
+        }
         Some(other) => Err(format!("unknown theme: {other}")),
+    }
+}
+
+/// Theme every open window — the main one plus the embedded Bilibili login
+/// window when it is up; a failure on one window still themes the rest.
+fn apply_window_theme_to_all(
+    window: &tauri::WebviewWindow,
+    theme: Option<&str>,
+) -> Result<(), String> {
+    let mut first_error = None;
+    for (_, open) in window.app_handle().webview_windows() {
+        if let Err(e) = apply_window_theme(&open, theme) {
+            first_error.get_or_insert(e);
+        }
+    }
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 
@@ -1447,6 +1494,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
+        window_theme: std::sync::Mutex::new(None),
     })
 }
 
