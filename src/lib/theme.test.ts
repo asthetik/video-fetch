@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseThemeMode, resolveTheme } from "./theme.ts";
+import { nativeThemeFor, parseThemeMode, resolveTheme } from "./theme.ts";
 
 test("resolveTheme follows system in system mode", () => {
   assert.equal(resolveTheme("system", true), "dark");
@@ -10,6 +10,15 @@ test("resolveTheme follows system in system mode", () => {
 test("resolveTheme ignores system when overridden", () => {
   assert.equal(resolveTheme("light", true), "light");
   assert.equal(resolveTheme("dark", false), "dark");
+});
+
+test("nativeThemeFor pins the native titlebar for fixed modes", () => {
+  assert.equal(nativeThemeFor("light"), "light");
+  assert.equal(nativeThemeFor("dark"), "dark");
+});
+
+test("nativeThemeFor hands the titlebar back to the OS in system mode", () => {
+  assert.equal(nativeThemeFor("system"), null);
 });
 
 test("parseThemeMode validates stored values", () => {

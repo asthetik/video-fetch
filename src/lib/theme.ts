@@ -1,3 +1,5 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
@@ -18,6 +20,29 @@ export function parseThemeMode(raw: string | null): ThemeMode {
   return raw === "light" || raw === "dark" || raw === "system" ? raw : "system";
 }
 
+/** Theme handed to the native window: fixed modes pin the titlebar to the
+ * choice immediately, system mode passes null so the window keeps tracking
+ * the OS instead of freezing on whatever the webview last resolved. */
+export function nativeThemeFor(mode: ThemeMode): "light" | "dark" | null {
+  return mode === "system" ? null : mode;
+}
+
+function syncNativeTheme(mode: ThemeMode): void {
+  try {
+    void getCurrentWindow()
+      .setTheme(nativeThemeFor(mode))
+      .catch((error) => {
+        // Tauri IPC rejected (missing permission, platform gap): the webview
+        // theme still applies, but the titlebar silently stops following --
+        // leave a trace instead of failing the whole apply.
+        console.warn("[theme] native setTheme rejected:", error);
+      });
+  } catch {
+    // Not running under Tauri (vite dev/preview, node tests): no native
+    // titlebar to sync.
+  }
+}
+
 function systemPrefersDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
@@ -32,6 +57,7 @@ export function applyTheme(mode: ThemeMode): ResolvedTheme {
   const resolved = resolveTheme(mode, systemPrefersDark());
   document.documentElement.dataset.theme = resolved;
   document.documentElement.style.colorScheme = resolved;
+  syncNativeTheme(mode);
   announce(resolved);
   return resolved;
 }
