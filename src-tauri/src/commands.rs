@@ -1272,10 +1272,7 @@ pub fn set_window_theme(window: tauri::WebviewWindow, theme: Option<String>) -> 
 }
 
 #[cfg(target_os = "macos")]
-fn apply_window_theme(
-    window: &tauri::WebviewWindow,
-    theme: Option<&str>,
-) -> Result<(), String> {
+fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Result<(), String> {
     use objc2::{class, msg_send, runtime::AnyObject};
 
     let appearance_name: Option<&std::ffi::CStr> = match theme {
@@ -1317,10 +1314,7 @@ fn apply_window_theme(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn apply_window_theme(
-    window: &tauri::WebviewWindow,
-    theme: Option<&str>,
-) -> Result<(), String> {
+fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Result<(), String> {
     use tauri::Theme;
 
     let theme = match theme {
