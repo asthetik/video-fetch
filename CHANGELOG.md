@@ -7,6 +7,7 @@
 ### Added
 
 - 新增 `scripts/verify_macos_ffmpeg.py`，离线复核 macOS 侧载来源：ffmpeg 的 macOS 包改取 martin-riedl 的 arm64 构建，URL 固定到不可变的构建号（绝不走 `/redirect/latest/`——那会随上游发布而漂移，静默作废固定的摘要）。脚本先取上游挨着该构建号发布的 `.sha256`，与 `sidecar_pins.json` 中的固定值比对（构建号 URL 应永不变化，两者不一致按供应链事件处理，而不是刷新 pin），再核对下载包的 SHA-256、解包后二进制的 SHA-256、arm64 Mach-O 架构与 Developer ID 签名（团队 KU3N25YGLU），全过才输出 OK。
+- Linux/Windows 侧载补上架构断言：取源时读取解包二进制的 ELF `e_machine` / PE `Machine` 字段，与 BtbN 资源名里的架构令牌（linux64 / linuxarm64 / win64 / winarm64）比对，字段对不上、或根本不是该格式的二进制一律拒绝打包。此前只有 macOS 有等价检查（Mach-O 头加 Developer ID 签名），Linux/Windows 全靠「架构写在资源名里」这层约定——上游若把资源标错，摘要会照着实到的字节记下来，错的二进制就随对应平台的安装包发出去了。断言表按资源令牌建键，新增平台若忘了补表，取源阶段硬失败而不是静默跳过。
 - CI 的 scripts 任务改为自动发现测试模块（`python -m unittest discover`），新增测试文件不必再同步修改工作流。
 
 ### Changed

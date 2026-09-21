@@ -33,6 +33,13 @@ Integrity:
   scripts/verify_macos_ffmpeg.py out-of-band to re-confirm the pinned zip
   against upstream's checksum, architecture and signature.
 
+  Every platform's ffmpeg carries the CPU its asset name claims: macOS
+  through the Mach-O header above, Linux and Windows through the ELF
+  e_machine / PE Machine field. The Linux/Windows assertion keys off the
+  same BtbN arch token the asset name is built from, so a platform added
+  to BTBN_ARCHES without an assertion entry fails the build instead of
+  shipping unchecked.
+
 Naming:
   binaries/yt-dlp-{TARGET_TRIPLE}[.exe]
   binaries/ffmpeg-{TARGET_TRIPLE}[.exe]
@@ -150,6 +157,10 @@ _MH_MAGIC_64 = 0xFEEDFACF
 _FAT_MAGIC = 0xCAFEBABE
 _FAT_MAGIC_64 = 0xCAFEBABF
 _CPU_TYPE_ARM64 = 0x0100000C
+_EM_X86_64 = 0x3E
+_EM_AARCH64 = 0xB7
+_IMAGE_FILE_MACHINE_AMD64 = 0x8664
+_IMAGE_FILE_MACHINE_ARM64 = 0xAA64
 
 
 def macho_cpu_types(data: bytes) -> set[int]:
@@ -175,6 +186,40 @@ def macho_cpu_types(data: bytes) -> set[int]:
     if int.from_bytes(data[0:4], "little") == _MH_MAGIC_64:
         return {int.from_bytes(data[4:8], "little")}
     raise ValueError("not a 64-bit Mach-O file")
+
+
+def elf_machine(data: bytes) -> int:
+    """e_machine from a 64-bit ELF header.
+
+    Raises ValueError when the bytes are not a 64-bit ELF file.
+    """
+    if len(data) < 20:
+        raise ValueError("too small to hold an ELF header")
+    if data[:4] != b"\x7fELF":
+        raise ValueError("not an ELF file")
+    if data[4] != 2:
+        raise ValueError("not a 64-bit ELF file")
+    order = "little" if data[5] == 1 else "big"
+    return int.from_bytes(data[18:20], order)
+
+
+def pe_machine(data: bytes) -> int:
+    """COFF Machine field from a PE header.
+
+    Raises ValueError when the bytes are not a PE file. The DOS stub is
+    skipped through e_lfanew at 0x3C, the only fixed offset before the
+    signature.
+    """
+    if len(data) < 0x40:
+        raise ValueError("too small to hold a DOS header")
+    if data[:2] != b"MZ":
+        raise ValueError("not a PE file")
+    offset = int.from_bytes(data[0x3C:0x40], "little")
+    if len(data) < offset + 6:
+        raise ValueError("PE header offset points past the end of the file")
+    if data[offset : offset + 4] != b"PE\0\0":
+        raise ValueError("not a PE file")
+    return int.from_bytes(data[offset + 4 : offset + 6], "little")
 
 
 def verify_macos_ffmpeg(path: Path) -> None:
@@ -482,6 +527,14 @@ BTBN_ARCHES = {
 }
 
 
+def btbn_arch_token(system: str, machine: str) -> str:
+    """The BtbN asset arch token (linux64, winarm64, ...) for a platform."""
+    try:
+        return BTBN_ARCHES[system][machine.lower()]
+    except KeyError:
+        raise ValueError(f"Unsupported OS/arch for ffmpeg: {system}/{machine}")
+
+
 def btbn_asset_name(system: str, machine: str) -> str:
     """The pinned BtbN asset name for a platform.
 
@@ -490,10 +543,7 @@ def btbn_asset_name(system: str, machine: str) -> str:
     which is why the frozen autobuild tag alone is not enough).
     """
     branch = ffmpeg_branch()
-    try:
-        arch = BTBN_ARCHES[system][machine.lower()]
-    except KeyError:
-        raise ValueError(f"Unsupported OS/arch for ffmpeg: {system}/{machine}")
+    arch = btbn_arch_token(system, machine)
     ext = "zip" if system == "Windows" else "tar.xz"
     names = [
         name
@@ -510,6 +560,48 @@ def btbn_asset_name(system: str, machine: str) -> str:
             "with: python scripts/fetch_sidecars.py --update-pins"
         )
     return names[0]
+
+
+# BtbN asset arch token -> (header parser, machine field, display name).
+# btbn_asset_name picks the asset by token, so the assertion keys off the
+# same token: a token with no entry here is a hard error, which keeps a
+# newly added platform from silently shipping without the check.
+_BTBN_ARCH_MACHINES = {
+    "linux64": (elf_machine, _EM_X86_64, "x86-64"),
+    "linuxarm64": (elf_machine, _EM_AARCH64, "AArch64"),
+    "win64": (pe_machine, _IMAGE_FILE_MACHINE_AMD64, "x86-64"),
+    "winarm64": (pe_machine, _IMAGE_FILE_MACHINE_ARM64, "ARM64"),
+}
+
+
+def verify_btbn_ffmpeg_arch(path: Path, system: str, machine: str) -> None:
+    """Assert a Linux/Windows sidecar carries the CPU its asset name claims.
+
+    macOS gets the same guarantee from the Mach-O check in
+    verify_macos_ffmpeg. Without this the only thing tying an asset to a CPU
+    is its name, and a mislabelled one would be pinned by its own bytes and
+    shipped inside an installer for the wrong architecture.
+    """
+    token = btbn_arch_token(system, machine)
+    entry = _BTBN_ARCH_MACHINES.get(token)
+    if entry is None:
+        die(f"no arch assertion covers the BtbN asset class {token!r}")
+    parse, expected, name = entry
+    with path.open("rb") as f:
+        header = f.read(4096)
+    try:
+        actual = parse(header)
+    except ValueError as e:
+        die(f"{path} is not a usable ffmpeg binary for {system}: {e}")
+    if actual != expected:
+        die(
+            f"{path} carries machine {actual:#06x}, not {expected:#06x} "
+            f"({name}) for {system}/{machine}.\nThis is the 0.4.0 failure "
+            "mode on another platform: an ffmpeg built for a different CPU "
+            "cannot run, so yt-dlp cannot merge and downloads come out as "
+            "silent fragments. Refusing to bundle it."
+        )
+    print(f"  ok       {name} ({token})")
 
 
 def ffmpeg_download_url(system: str, machine: str) -> str | None:
@@ -613,6 +705,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
                 die("ffmpeg binary not found in archive")
             shutil.copy2(candidates[0], out)
             make_executable(out)
+            verify_btbn_ffmpeg_arch(out, system, machine)
             return
 
         if system == "Windows":
@@ -627,6 +720,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
                 zf.extractall(work)
             src = find_one(work, "ffmpeg.exe")
             shutil.copy2(src, out)
+            verify_btbn_ffmpeg_arch(out, system, machine)
             return
 
         die(f"Unsupported OS for ffmpeg: {system}")
