@@ -9,6 +9,7 @@
 - 新增 `scripts/verify_macos_ffmpeg.py`，离线复核 macOS 侧载来源：ffmpeg 的 macOS 包改取 martin-riedl 的 arm64 构建，URL 固定到不可变的构建号（绝不走 `/redirect/latest/`——那会随上游发布而漂移，静默作废固定的摘要）。脚本先取上游挨着该构建号发布的 `.sha256`，与 `sidecar_pins.json` 中的固定值比对（构建号 URL 应永不变化，两者不一致按供应链事件处理，而不是刷新 pin），再核对下载包的 SHA-256、解包后二进制的 SHA-256、arm64 Mach-O 架构与 Developer ID 签名（团队 KU3N25YGLU），全过才输出 OK。
 - Linux/Windows 侧载补上架构断言：取源时读取解包二进制的 ELF `e_machine` / PE `Machine` 字段，与 BtbN 资源名里的架构令牌（linux64 / linuxarm64 / win64 / winarm64）比对，字段对不上、或根本不是该格式的二进制一律拒绝打包。此前只有 macOS 有等价检查（Mach-O 头加 Developer ID 签名），Linux/Windows 全靠「架构写在资源名里」这层约定——上游若把资源标错，摘要会照着实到的字节记下来，错的二进制就随对应平台的安装包发出去了。断言表按资源令牌建键，新增平台若忘了补表，取源阶段硬失败而不是静默跳过。
 - CI 的 scripts 任务改为自动发现测试模块（`python -m unittest discover`），新增测试文件不必再同步修改工作流。
+- 日志补齐「下载引擎坏了」的现场，此前三类静默都不留痕：解析 yt-dlp / ffmpeg 路径时逐个候选实际执行一次版本探测，候选存在却跑不起来时记 WARN（含来源、路径与原因，如 `exec format error`），内置候选失效而回退到环境变量或系统 PATH 的二进制时记 WARN，三个来源都不可用时记 WARN——此前探测只负责挡掉坏候选，淘汰过程一个字都不写，内置二进制失效要等到下一次下载失败，才以「安装包缺少下载组件」这种间接症状出现。yt-dlp 此前根本不探测（只看文件是否存在），现与 ffmpeg 走同一条链路，且两个工具各用各自的版本参数：ffmpeg `-version`，yt-dlp `--version`（yt-dlp 会把 `-version` 解析成 `-v ersion` 并以退出码 2 失败，共用一个参数会把健康的 yt-dlp 判成坏的）。yt-dlp 以 0 退出但 stderr 留有 `WARNING:` / `ERROR:` 时记一条 WARN（去重、最多 5 行）：成功时 stderr 此前被整段丢弃，而 macOS 那次「ffmpeg 不可用所以没有合并」的原始报错正在其中。未合成守卫拒绝交付时同样记 WARN，带上回报的文件名、工作目录里的媒体文件数与当时解析到的 ffmpeg 路径，「没解析到 ffmpeg」和「解析到了但合并仍失败」由此可分。
 
 ### Changed
 
