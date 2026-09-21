@@ -59,6 +59,7 @@ function App() {
                   {active && (
                     <motion.span
                       layoutId="nav-indicator"
+                      layoutDependency={page}
                       className="nav-indicator"
                       transition={{ duration: NAV_INDICATOR_S, ease: "easeInOut" }}
                     />
