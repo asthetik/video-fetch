@@ -1,4 +1,4 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 
 export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
@@ -28,19 +28,14 @@ export function nativeThemeFor(mode: ThemeMode): "light" | "dark" | null {
 }
 
 function syncNativeTheme(mode: ThemeMode): void {
-  try {
-    void getCurrentWindow()
-      .setTheme(nativeThemeFor(mode))
-      .catch((error) => {
-        // Tauri IPC rejected (missing permission, platform gap): the webview
-        // theme still applies, but the titlebar silently stops following --
-        // leave a trace instead of failing the whole apply.
-        console.warn("[theme] native setTheme rejected:", error);
-      });
-  } catch {
-    // Not running under Tauri (vite dev/preview, node tests): no native
-    // titlebar to sync.
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return; // Browser dev/preview and node tests: no native titlebar to sync.
   }
+  void invoke("set_window_theme", { theme: nativeThemeFor(mode) }).catch((error) => {
+    // IPC rejected (rare: command missing or window gone): the webview theme
+    // still applies, but the titlebar would silently stop following — warn.
+    console.warn("[theme] native window theme rejected:", error);
+  });
 }
 
 function systemPrefersDark(): boolean {

@@ -1259,6 +1259,79 @@ pub fn open_path(path: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Mirror the theme choice onto the native window. macOS renders window
+/// chrome from the window's own appearance only — an app-level setAppearance
+/// is accepted by AppKit but ignored for the titlebar — so the window gets
+/// the appearance set directly; other platforms take tao's per-window theme.
+#[tauri::command]
+pub fn set_window_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Result<(), String> {
+    match theme.as_deref() {
+        None | Some("dark" | "light") => apply_window_theme(&window, theme.as_deref()),
+        Some(other) => Err(format!("unknown theme: {other}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_window_theme(
+    window: &tauri::WebviewWindow,
+    theme: Option<&str>,
+) -> Result<(), String> {
+    use objc2::{class, msg_send, runtime::AnyObject};
+
+    let appearance_name: Option<&std::ffi::CStr> = match theme {
+        Some("dark") => Some(c"NSAppearanceNameDarkAqua"),
+        Some("light") => Some(c"NSAppearanceNameAqua"),
+        // None: clear the override so the window tracks the system again.
+        _ => None,
+    };
+
+    unsafe {
+        let ns_window = window.ns_window().map_err(|e| e.to_string())? as *mut AnyObject;
+        if ns_window.is_null() {
+            return Err("ns_window unavailable".into());
+        }
+        let appearance: *mut AnyObject = match appearance_name {
+            Some(name) => {
+                let name: *mut AnyObject =
+                    msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+                msg_send![class!(NSAppearance), appearanceNamed: name]
+            }
+            None => std::ptr::null_mut(),
+        };
+        let _: () = msg_send![ns_window, setAppearance: appearance];
+        // macOS 27 accepts the appearance change but defers the titlebar
+        // recomposite until the next window update (navigating repaints it).
+        // Nudge every cheap redraw layer so the flip is immediate: shadow
+        // recomposite, theme-frame redraw, background and title re-set.
+        let _: () = msg_send![ns_window, invalidateShadow];
+        let frame: *mut AnyObject = msg_send![ns_window, contentView];
+        let frame: *mut AnyObject = msg_send![frame, superview];
+        let _: () = msg_send![frame, setNeedsDisplay: objc2::runtime::Bool::new(true)];
+        let _: () = msg_send![ns_window, displayIfNeeded];
+        let background: *mut AnyObject = msg_send![ns_window, backgroundColor];
+        let _: () = msg_send![ns_window, setBackgroundColor: background];
+        let title: *mut AnyObject = msg_send![ns_window, title];
+        let _: () = msg_send![ns_window, setTitle: title];
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_window_theme(
+    window: &tauri::WebviewWindow,
+    theme: Option<&str>,
+) -> Result<(), String> {
+    use tauri::Theme;
+
+    let theme = match theme {
+        Some("dark") => Some(Theme::Dark),
+        Some("light") => Some(Theme::Light),
+        None => None,
+        Some(other) => return Err(format!("unknown theme: {other}")),
+    };
+    window.set_theme(theme).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
     let folder =
