@@ -39,6 +39,28 @@ pub const RESOLVE_COMPLETE_EVENT: &str = "resolve://complete";
 pub const RESOLVE_FORMATS_FAILED_EVENT: &str = "resolve://formats_failed";
 pub const RESOLVE_FORMATS_PROGRESS_EVENT: &str = "resolve://formats_progress";
 
+/// Window appearance requested by the UI. Parsed once at the command
+/// boundary and carried as a typed value from there on, so both platform
+/// backends and the AppState pin agree on what is valid.
+#[derive(Clone, Copy)]
+pub enum WindowTheme {
+    /// Follow the system appearance (no override).
+    System,
+    Light,
+    Dark,
+}
+
+impl WindowTheme {
+    fn parse(theme: Option<&str>) -> Result<Self, String> {
+        match theme {
+            None => Ok(Self::System),
+            Some("light") => Ok(Self::Light),
+            Some("dark") => Ok(Self::Dark),
+            Some(other) => Err(format!("unknown theme: {other}")),
+        }
+    }
+}
+
 pub struct AppState {
     pub app_dir: PathBuf,
     pub auth: AuthManager,
@@ -54,10 +76,10 @@ pub struct AppState {
     pub active_resolve_id: AtomicU64,
     /// Local activity log writer (files under app_dir/logs).
     pub activity_log: crate::activity_log::ActivityLog,
-    /// Window theme pinned by the UI ("dark"/"light"); None follows the system.
-    /// Windows created later (the Bilibili login window) read it at creation
-    /// so they do not lag one switch behind.
-    pub window_theme: std::sync::Mutex<Option<String>>,
+    /// Window theme pinned by the UI; System follows the OS. Windows created
+    /// later (the Bilibili login window) read it at creation so they do not
+    /// lag one switch behind.
+    pub window_theme: std::sync::Mutex<WindowTheme>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1190,11 +1212,11 @@ pub async fn start_bilibili_login(
         let pinned = state
             .window_theme
             .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
+            .map(|guard| *guard)
+            .unwrap_or(WindowTheme::System);
         let themed = win.clone();
         let _ = win.run_on_main_thread(move || {
-            if let Err(e) = apply_window_theme(&themed, pinned.as_deref()) {
+            if let Err(e) = apply_window_theme(&themed, pinned) {
                 tracing::warn!(target: "core", "auth: 登录窗口主题同步失败: {e}");
             }
         });
@@ -1288,23 +1310,19 @@ pub fn set_window_theme(
     state: State<'_, AppState>,
     theme: Option<String>,
 ) -> Result<(), String> {
-    match theme.as_deref() {
-        None | Some("dark" | "light") => {
-            *state
-                .window_theme
-                .lock()
-                .map_err(|_| "theme lock poisoned".to_string())? = theme.clone();
-            apply_window_theme_to_all(&window, theme.as_deref())
-        }
-        Some(other) => Err(format!("unknown theme: {other}")),
-    }
+    let theme = WindowTheme::parse(theme.as_deref())?;
+    *state
+        .window_theme
+        .lock()
+        .map_err(|_| "theme lock poisoned".to_string())? = theme;
+    apply_window_theme_to_all(&window, theme)
 }
 
 /// Theme every open window — the main one plus the embedded Bilibili login
 /// window when it is up; a failure on one window still themes the rest.
 fn apply_window_theme_to_all(
     window: &tauri::WebviewWindow,
-    theme: Option<&str>,
+    theme: WindowTheme,
 ) -> Result<(), String> {
     let mut first_error = None;
     for (_, open) in window.app_handle().webview_windows() {
@@ -1318,15 +1336,50 @@ fn apply_window_theme_to_all(
     }
 }
 
+/// Whether the user enabled Increase Contrast in Accessibility settings.
+/// AppKit applies the high-contrast appearance variant automatically to
+/// system-following windows; a pinned appearance must pick it itself, or
+/// those users lose the variant.
 #[cfg(target_os = "macos")]
-fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Result<(), String> {
+fn increase_contrast_enabled() -> bool {
     use objc2::{class, msg_send, runtime::AnyObject};
 
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return false;
+        }
+        let enabled: objc2::runtime::Bool =
+            msg_send![workspace, accessibilityDisplayShouldIncreaseContrast];
+        enabled.as_bool()
+    }
+}
+
+/// Applies the appearance straight to the NSWindow's `appearance` property.
+///
+/// This deliberately bypasses tao's theme bookkeeping (tao only records
+/// themes set through its own path): `Window::theme()` and the
+/// `tauri://theme-changed` event keep reporting the app-level value, so the
+/// window theme must never be read back through tao — `AppState.window_theme`
+/// is the source of truth, e.g. for windows created later.
+#[cfg(target_os = "macos")]
+fn apply_window_theme(window: &tauri::WebviewWindow, theme: WindowTheme) -> Result<(), String> {
+    use objc2::{class, msg_send, runtime::AnyObject};
+
+    let high_contrast = increase_contrast_enabled();
     let appearance_name: Option<&std::ffi::CStr> = match theme {
-        Some("dark") => Some(c"NSAppearanceNameDarkAqua"),
-        Some("light") => Some(c"NSAppearanceNameAqua"),
-        // None: clear the override so the window tracks the system again.
-        _ => None,
+        WindowTheme::Dark => Some(if high_contrast {
+            c"NSAppearanceNameAccessibilityDarkAqua"
+        } else {
+            c"NSAppearanceNameDarkAqua"
+        }),
+        WindowTheme::Light => Some(if high_contrast {
+            c"NSAppearanceNameAccessibilityAqua"
+        } else {
+            c"NSAppearanceNameAqua"
+        }),
+        // System: clear the override so the window tracks the system again.
+        WindowTheme::System => None,
     };
 
     unsafe {
@@ -1346,30 +1399,26 @@ fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Res
         // macOS 26+ accepts the appearance change but defers the titlebar
         // recomposite until the next full content commit (page navigation
         // repaints it); the appearance state itself updates immediately.
-        // Nudge the cheap redraw layers to try to bring the repaint forward —
-        // a full fix needs an upstream tao/macOS change.
+        // Force the shadow and the theme-frame view to redraw in case that
+        // brings the recomposite forward — a full fix needs an upstream
+        // tao/macOS change.
         let _: () = msg_send![ns_window, invalidateShadow];
         let frame: *mut AnyObject = msg_send![ns_window, contentView];
         let frame: *mut AnyObject = msg_send![frame, superview];
         let _: () = msg_send![frame, setNeedsDisplay: objc2::runtime::Bool::new(true)];
         let _: () = msg_send![ns_window, displayIfNeeded];
-        let background: *mut AnyObject = msg_send![ns_window, backgroundColor];
-        let _: () = msg_send![ns_window, setBackgroundColor: background];
-        let title: *mut AnyObject = msg_send![ns_window, title];
-        let _: () = msg_send![ns_window, setTitle: title];
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn apply_window_theme(window: &tauri::WebviewWindow, theme: Option<&str>) -> Result<(), String> {
+fn apply_window_theme(window: &tauri::WebviewWindow, theme: WindowTheme) -> Result<(), String> {
     use tauri::Theme;
 
     let theme = match theme {
-        Some("dark") => Some(Theme::Dark),
-        Some("light") => Some(Theme::Light),
-        None => None,
-        Some(other) => return Err(format!("unknown theme: {other}")),
+        WindowTheme::Dark => Some(Theme::Dark),
+        WindowTheme::Light => Some(Theme::Light),
+        WindowTheme::System => None,
     };
     window.set_theme(theme).map_err(|e| e.to_string())
 }
@@ -1495,7 +1544,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
-        window_theme: std::sync::Mutex::new(None),
+        window_theme: std::sync::Mutex::new(WindowTheme::System),
     })
 }
 
@@ -1812,5 +1861,33 @@ mod space_batch_tests {
     fn batch_rejects_bad_audio_format_values() {
         assert!(normalize_audio_format(Some("flac".into())).is_ok());
         assert!(normalize_audio_format(Some("ogg".into())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod window_theme_tests {
+    use super::*;
+
+    #[test]
+    fn parse_accepts_only_known_modes() {
+        assert!(matches!(WindowTheme::parse(None), Ok(WindowTheme::System)));
+        assert!(matches!(
+            WindowTheme::parse(Some("dark")),
+            Ok(WindowTheme::Dark)
+        ));
+        assert!(matches!(
+            WindowTheme::parse(Some("light")),
+            Ok(WindowTheme::Light)
+        ));
+        assert!(WindowTheme::parse(Some("auto")).is_err());
+    }
+
+    /// Guards the NSWorkspace selector spelling: the query runs on every
+    /// theme switch, so a typo would crash the app at runtime rather than
+    /// fail visibly.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn increase_contrast_query_hits_a_real_selector() {
+        let _ = increase_contrast_enabled();
     }
 }
