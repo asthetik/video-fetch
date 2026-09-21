@@ -908,6 +908,43 @@ fn job_is_cancelled(cancelled: &Arc<Mutex<HashMap<String, bool>>>, job_id: &str)
         .unwrap_or(false)
 }
 
+/// yt-dlp names per-stream intermediates `Title.f<format-id>.<ext>`. A
+/// reported product still carrying that infix is a fragment whose merge never
+/// ran (an ffmpeg sidecar that cannot execute), not a finished download. The
+/// infix must be the last component before the extension, so a title that
+/// merely contains `.f123.` inside it is not mistaken for a fragment.
+pub(crate) fn has_fragment_infix(name: &str) -> bool {
+    let mut rest = name;
+    while let Some(pos) = rest.find(".f") {
+        let after = &rest[pos + 2..];
+        let digits = after.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits > 0
+            && let Some(ext) = after[digits..].strip_prefix('.')
+            && !ext.is_empty()
+            && !ext.contains('.')
+        {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
+/// True when a yt-dlp run that exited 0 clearly did not finish: the reported
+/// product is a stream fragment, or it does not exist while the work dir
+/// holds several media files (the audio/video pair that never got merged).
+/// A user config with `-k` leaves fragments next to the merged file, so the
+/// file count only counts against a run whose reported product is missing.
+/// Also applied to leftovers before a retry relocates them as a finished
+/// download (see `DownloadManager::run_job`).
+pub(crate) fn looks_unmerged(reported: &Path, media_files: usize) -> bool {
+    let name = reported
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    has_fragment_infix(&name) || (!reported.exists() && media_files >= 2)
+}
+
 /// Spawn yt-dlp to download a single video and stream progress from stdout/stderr.
 pub async fn download(
     req: DownloadRequest<'_>,
@@ -1125,7 +1162,18 @@ pub async fn download(
         return Err(AppError::Message(msg));
     }
 
-    final_path.ok_or_else(|| AppError::Message("yt-dlp 未返回输出路径".into()))
+    let final_path = final_path.ok_or_else(|| AppError::Message("yt-dlp 未返回输出路径".into()))?;
+
+    // A merge that never ran still exits 0 and prints a fragment path; the
+    // job must fail loudly instead of delivering an audio-only or video-only
+    // file as the finished download.
+    if looks_unmerged(&final_path, crate::fsutil::count_media_files(output_dir)) {
+        return Err(AppError::Message(
+            "音视频流未合成完整文件（下载组件异常）。请重新安装影取后重试。".into(),
+        ));
+    }
+
+    Ok(final_path)
 }
 
 fn remove_child(children: &Arc<Mutex<HashMap<String, tokio::process::Child>>>, job_id: &str) {
@@ -1642,5 +1690,30 @@ mod tests {
         );
         assert_eq!(parse_height_format_id("vh1080"), Some(1080));
         assert_eq!(parse_height_format_id("80"), None);
+    }
+
+    #[test]
+    fn detects_fragment_infixes() {
+        assert!(has_fragment_infix("clip.f30016.mp4"));
+        assert!(has_fragment_infix("clip.f30280.m4a"));
+        assert!(has_fragment_infix("标题.f100026.mp4"));
+        assert!(!has_fragment_infix("clip.mp4"));
+        assert!(!has_fragment_infix("clip.f.mp4"));
+        assert!(!has_fragment_infix("clip.f1a.mp4"));
+        assert!(!has_fragment_infix("clip.f30016.backup.mp4"));
+    }
+
+    #[test]
+    fn flags_unmerged_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let merged = dir.path().join("clip.mp4");
+        std::fs::write(&merged, b"x").unwrap();
+        let missing = dir.path().join("gone.mp4");
+        assert!(looks_unmerged(Path::new("clip.f30016.mp4"), 1));
+        assert!(looks_unmerged(&missing, 2));
+        assert!(!looks_unmerged(&missing, 1));
+        assert!(!looks_unmerged(&merged, 1));
+        // `-k` in a user config leaves fragments next to a finished merge.
+        assert!(!looks_unmerged(&merged, 3));
     }
 }

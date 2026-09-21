@@ -590,7 +590,14 @@ impl DownloadManager {
         }
 
         let work = fsutil::work_dir_for(&self.work_root, &job_id);
-        if let Some(work_path) = fsutil::find_work_product(&work) {
+        // Only a finished leftover is worth relocating. Fragments from a
+        // previous attempt (a merge that never ran: the 0.4.0 macOS failure
+        // mode, or a user config that keeps streams separate) are skipped so
+        // the retry downloads again instead of delivering a video-only or
+        // audio-only file as a success.
+        let recoverable = fsutil::find_work_product(&work)
+            .filter(|path| !crate::ytdlp::looks_unmerged(path, fsutil::count_media_files(&work)));
+        if let Some(work_path) = recoverable {
             match self.complete_relocation(&job_id, &running, &work_path, &save_dir) {
                 Ok(()) => {
                     if let Ok(mut tasks) = self.running_tasks.lock() {
@@ -1795,6 +1802,72 @@ mod tests {
 
         assert!(!called.load(Ordering::SeqCst));
         assert!(save_dir.join("demo.mp4").is_file());
+        assert!(!work_root.join(job_id).exists());
+    }
+
+    #[tokio::test]
+    async fn retry_redownloads_when_leftover_is_only_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("download-work");
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+
+        let job_id = "job-fragment-retry";
+        let work = fsutil::work_dir_for(&work_root, job_id);
+        std::fs::create_dir_all(&work).unwrap();
+        // What the 0.4.0 macOS bug left behind: two stream fragments, no merge.
+        std::fs::write(work.join("demo.f100026.mp4"), b"video-only").unwrap();
+        std::fs::write(work.join("demo.f30280.m4a"), b"audio-only").unwrap();
+
+        let called = Arc::new(AtomicBool::new(false));
+        struct FragmentRetryMock {
+            called: Arc<AtomicBool>,
+            scratch: tempfile::TempDir,
+        }
+        #[async_trait]
+        impl Downloader for FragmentRetryMock {
+            async fn run(
+                &self,
+                _job: &DownloadJob,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                self.called.store(true, Ordering::SeqCst);
+                let path = self.scratch.path().join("demo.mp4");
+                std::fs::write(&path, b"merged").map_err(|e| e.to_string())?;
+                Ok(path)
+            }
+        }
+
+        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let mut failed = sample_job(job_id);
+        failed.status = JobStatus::Failed;
+        failed.error =
+            Some("音视频流未合成完整文件（下载组件异常）。请重新安装影取后重试。".into());
+        db.insert_job(&failed).unwrap();
+
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let manager = DownloadManager::new(
+            db,
+            test_settings(&save_dir),
+            Arc::new(FragmentRetryMock {
+                called: Arc::clone(&called),
+                scratch: tempfile::tempdir().unwrap(),
+            }) as Arc<dyn Downloader>,
+            Arc::new(emitter),
+            Arc::new(Mutex::new(HashMap::new())),
+            work_root.clone(),
+        )
+        .unwrap();
+
+        manager.retry(job_id).unwrap();
+        wait_for_status(&manager, job_id, JobStatus::Done).await;
+
+        assert!(
+            called.load(Ordering::SeqCst),
+            "a fragment-only work dir must be re-downloaded, not relocated"
+        );
+        assert!(save_dir.join("demo.mp4").is_file());
+        assert!(!save_dir.join("demo.f100026.mp4").exists());
         assert!(!work_root.join(job_id).exists());
     }
 

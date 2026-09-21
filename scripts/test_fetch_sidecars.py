@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -16,17 +17,24 @@ from unittest import mock
 import fetch_sidecars
 from fetch_sidecars import (
     FFMPEG_BTBN_TAG,
+    FFMPEG_MACOS_BUILD,
+    FFMPEG_MACOS_SIGNER,
+    FFMPEG_MACOS_TEAM_ID,
     FFMPEG_VERSION,
     extract_tar_xz,
     fetch_ffmpeg,
     ffmpeg_branch,
     ffmpeg_download_url,
+    ffmpeg_macos_artifact,
+    ffmpeg_macos_url,
     load_pins,
     load_ytdlp_version,
+    macho_cpu_types,
     normalize_ytdlp_version,
     parse_shasums,
     pin_key_from_url,
     sha256_hex,
+    verify_macos_ffmpeg,
     verify_sha256,
     ytdlp_download_url,
 )
@@ -284,7 +292,9 @@ class TestExtractTarXz(TmpDirTestCase):
 
 class TestFetchFfmpegLinux(TmpDirTestCase):
     def install_fake_download(self, members: list[tuple[str, bytes]]) -> None:
-        def fake_download(url: str, dest: Path, pins: dict) -> None:
+        def fake_download(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
             write_tar_xz(dest, files=members)
 
         original = fetch_sidecars.download_and_verify
@@ -360,8 +370,10 @@ class TestParseShasums(unittest.TestCase):
 
     def test_ignores_blank_lines_and_comments(self) -> None:
         self.assertEqual(
-            parse_shasums(f"# header\n\n{'d' * 64}  ffmpeg-9.0.1.zip\n"),
-            {"ffmpeg-9.0.1.zip": "d" * 64},
+            parse_shasums(
+                f"# header\n\n{'d' * 64}  ffmpeg-macos-arm64-{FFMPEG_MACOS_BUILD}.zip\n"
+            ),
+            {f"ffmpeg-macos-arm64-{FFMPEG_MACOS_BUILD}.zip": "d" * 64},
         )
 
     def test_keeps_filenames_with_spaces(self) -> None:
@@ -421,7 +433,7 @@ class TestLoadPins(unittest.TestCase):
                     r"^(yt-dlp(_macos|_linux|_linux_aarch64|_arm64)?\.exe"
                     r"|yt-dlp_(macos|linux|linux_aarch64)"
                     r"|ffmpeg-.*-(linux64|linuxarm64|win64|winarm64)-gpl-.*"
-                    r"|ffmpeg-\d+\.\d+\.\d+\.zip)$",
+                    r"|ffmpeg-macos-arm64-\S+\.zip)$",
                     "unexpected sidecar artifact name",
                 )
                 self.assertRegex(digest, r"^[0-9a-f]{64}$")
@@ -510,9 +522,9 @@ class TestPinCoverage(unittest.TestCase):
                 self.assertIn(key, downloads)
                 self.assertRegex(key, r"-gpl-%s\." % ffmpeg_branch())
 
-    def test_evermeet_zip_is_pinned(self) -> None:
+    def test_macos_zip_is_pinned(self) -> None:
         pins = load_pins()
-        self.assertIn(f"ffmpeg-{FFMPEG_VERSION}.zip", pins["downloads"])
+        self.assertIn(ffmpeg_macos_artifact(), pins["downloads"])
 
 
 class TestFetchFfmpegTempIsolation(unittest.TestCase):
@@ -533,7 +545,9 @@ class TestFetchFfmpegTempIsolation(unittest.TestCase):
         tar_payload = tar_buf.getvalue()
         zip_payload = zip_buf.getvalue()
 
-        def fake_download(url: str, dest: Path, pins: dict) -> None:
+        def fake_download(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
             Path(dest).write_bytes(
                 zip_payload if url.endswith(".zip") else tar_payload
             )
@@ -580,6 +594,278 @@ class TestFetchFfmpegTempIsolation(unittest.TestCase):
             self.assertEqual(len(set(work_dirs)), 3)
             for made in work_dirs:
                 self.assertFalse(made.exists(), "extraction dir must be cleaned up")
+
+
+class TestHttpUserAgent(unittest.TestCase):
+    def test_sends_a_non_urllib_user_agent(self) -> None:
+        # martin-riedl.de 403s Python-urllib's default UA; curl's works.
+        with mock.patch.object(
+            fetch_sidecars.urllib.request, "urlopen"
+        ) as urlopen:
+            fetch_sidecars._open_url("https://example.com/blob")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("User-agent"), fetch_sidecars.HTTP_USER_AGENT)
+        self.assertNotIn("urllib", fetch_sidecars.HTTP_USER_AGENT.lower())
+
+
+def thin_arm64_header() -> bytes:
+    return (
+        (0xFEEDFACF).to_bytes(4, "little")
+        + (0x0100000C).to_bytes(4, "little")
+        + b"\x00" * 8
+    )
+
+
+def thin_x86_64_header() -> bytes:
+    return (
+        (0xFEEDFACF).to_bytes(4, "little")
+        + (0x01000007).to_bytes(4, "little")
+        + b"\x00" * 8
+    )
+
+
+class TestMachoParser(unittest.TestCase):
+    def test_thin_arm64_header(self) -> None:
+        self.assertEqual(macho_cpu_types(thin_arm64_header()), {0x0100000C})
+
+    def test_thin_x86_64_header(self) -> None:
+        self.assertEqual(macho_cpu_types(thin_x86_64_header()), {0x01000007})
+
+    def test_fat_header_lists_every_slice(self) -> None:
+        cpus = (0x0100000C, 0x01000007)
+        entries = b"".join(cpu.to_bytes(4, "big") + b"\x00" * 16 for cpu in cpus)
+        data = (
+            (0xCAFEBABE).to_bytes(4, "big")
+            + len(cpus).to_bytes(4, "big")
+            + entries
+        )
+        self.assertEqual(macho_cpu_types(data), set(cpus))
+
+    def test_fat_64_header(self) -> None:
+        cpu = 0x0100000C
+        entry = cpu.to_bytes(4, "big") + b"\x00" * 28
+        data = (0xCAFEBABF).to_bytes(4, "big") + (1).to_bytes(4, "big") + entry
+        self.assertEqual(macho_cpu_types(data), {cpu})
+
+    def test_truncated_fat_header_raises(self) -> None:
+        data = (0xCAFEBABE).to_bytes(4, "big") + (2).to_bytes(4, "big") + b"\x00" * 4
+        with self.assertRaises(ValueError):
+            macho_cpu_types(data)
+
+    def test_non_macho_bytes_raise(self) -> None:
+        for data in (b"", b"plain text", b"\x7fELF" + b"\x00" * 12):
+            with self.subTest(data=data):
+                with self.assertRaises(ValueError):
+                    macho_cpu_types(data)
+
+
+class TestFfmpegMacosUrl(unittest.TestCase):
+    def test_url_pins_the_build_id(self) -> None:
+        url = ffmpeg_macos_url()
+        self.assertTrue(url.startswith("https://"))
+        self.assertIn(f"/{FFMPEG_MACOS_BUILD}/ffmpeg.zip", url)
+
+    def test_never_uses_the_latest_redirect(self) -> None:
+        self.assertNotIn("/redirect/", ffmpeg_macos_url())
+
+    def test_artifact_key_carries_platform_and_build(self) -> None:
+        self.assertEqual(
+            ffmpeg_macos_artifact(),
+            f"ffmpeg-macos-arm64-{FFMPEG_MACOS_BUILD}.zip",
+        )
+
+
+class TestVerifyMacosFfmpeg(TmpDirTestCase):
+    def write_binary(self, header: bytes) -> Path:
+        path = self.tmpdir() / "ffmpeg"
+        path.write_bytes(header + b"\x00" * 64)
+        return path
+
+    def patch_darwin(self, machine: str = "x86_64") -> None:
+        for patcher in (
+            mock.patch.object(fetch_sidecars, "detect_system", return_value="Darwin"),
+            mock.patch.object(fetch_sidecars, "detect_machine", return_value=machine),
+            mock.patch.object(
+                fetch_sidecars.shutil, "which", return_value="/usr/bin/codesign"
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def patch_codesign(
+        self,
+        verify_rc: int = 0,
+        team: str = FFMPEG_MACOS_TEAM_ID,
+        signer: str = FFMPEG_MACOS_SIGNER,
+        chain: bool = True,
+        probe_rc: int = 0,
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            if cmd[1] == "--verify":
+                return subprocess.CompletedProcess(cmd, verify_rc, stdout="", stderr="")
+            if cmd[1] == "-dvvv":
+                lines = [f"TeamIdentifier={team}"]
+                if chain:
+                    lines = [
+                        f"Authority=Developer ID Application: {signer} ({team})",
+                        "Authority=Developer ID Certification Authority",
+                        "Authority=Apple Root CA",
+                        *lines,
+                    ]
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="", stderr="\n".join(lines) + "\n"
+                )
+            if cmd[1] == "-version":
+                return subprocess.CompletedProcess(
+                    cmd, probe_rc, stdout="ffmpeg version 9.0.2\n", stderr=""
+                )
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        patcher = mock.patch.object(fetch_sidecars.subprocess, "run", side_effect=fake_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_accepts_arm64_binary_on_non_darwin(self) -> None:
+        path = self.write_binary(thin_arm64_header())
+        with mock.patch.object(fetch_sidecars, "detect_system", return_value="Linux"):
+            self.assertIsNone(verify_macos_ffmpeg(path))
+
+    def test_rejects_intel_only_binary(self) -> None:
+        path = self.write_binary(thin_x86_64_header())
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+    def test_rejects_non_macho_bytes(self) -> None:
+        path = self.write_binary(b"not a mach-o!")
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+    def test_darwin_checks_signature(self) -> None:
+        path = self.write_binary(thin_arm64_header())
+        self.patch_darwin()
+        self.patch_codesign()
+        self.assertIsNone(verify_macos_ffmpeg(path))
+
+    def test_darwin_rejects_unsigned_binary(self) -> None:
+        path = self.write_binary(thin_arm64_header())
+        self.patch_darwin()
+        self.patch_codesign(verify_rc=1)
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+    def test_darwin_rejects_foreign_team(self) -> None:
+        path = self.write_binary(thin_arm64_header())
+        self.patch_darwin()
+        self.patch_codesign(team="OTHERTEAM")
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+    def test_darwin_rejects_signature_without_the_apple_chain(self) -> None:
+        # The hole the TeamIdentifier substring match left open: the string
+        # alone proves nothing about who signed.
+        path = self.write_binary(thin_arm64_header())
+        self.patch_darwin()
+        self.patch_codesign(chain=False)
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+    def test_darwin_rejects_a_different_signer(self) -> None:
+        path = self.write_binary(thin_arm64_header())
+        self.patch_darwin()
+        self.patch_codesign(signer="Someone Else")
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+    def test_darwin_arm64_fails_when_binary_does_not_run(self) -> None:
+        path = self.write_binary(thin_arm64_header())
+        self.patch_darwin(machine="arm64")
+        self.patch_codesign(probe_rc=1)
+        with self.assertRaises(SystemExit):
+            verify_macos_ffmpeg(path)
+
+
+class TestPinsRecorderDownloadGuard(TmpDirTestCase):
+    """--update-pins records digests from upstream checksums before any
+    download; the archive that gets extracted must match that record."""
+
+    def make_recorder(self) -> fetch_sidecars.PinsRecorder:
+        return fetch_sidecars.PinsRecorder(
+            {"downloads": {}, "binaries": {}}, force=False
+        )
+
+    def patch_download(self, payload: bytes) -> None:
+        def fake_download(url: str, dest: Path) -> None:
+            Path(dest).write_bytes(payload)
+
+        patcher = mock.patch.object(fetch_sidecars, "download", fake_download)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_records_a_download_that_matches_the_upstream_digest(self) -> None:
+        payload = b"the pinned zip"
+        digest = hashlib.sha256(payload).hexdigest()
+        recorder = self.make_recorder()
+        recorder.record("ffmpeg.zip", digest)
+        self.patch_download(payload)
+        dest = self.tmpdir() / "ffmpeg.zip"
+        recorder.download_and_record(
+            "https://example.invalid/ffmpeg.zip", dest, "ffmpeg.zip"
+        )
+        self.assertEqual(recorder.pins["downloads"]["ffmpeg.zip"], digest)
+
+    def test_dies_when_the_download_diverges_from_the_upstream_digest(self) -> None:
+        recorder = self.make_recorder()
+        recorder.record("ffmpeg.zip", hashlib.sha256(b"the pinned zip").hexdigest())
+        self.patch_download(b"substituted bytes")
+        dest = self.tmpdir() / "ffmpeg.zip"
+        with self.assertRaises(SystemExit):
+            recorder.download_and_record(
+                "https://example.invalid/ffmpeg.zip", dest, "ffmpeg.zip"
+            )
+
+
+class TestFetchFfmpegMacos(TmpDirTestCase):
+    def write_zip(self, dest: Path) -> None:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("ffmpeg", thin_arm64_header() + b"\x00" * 64)
+        dest.write_bytes(buf.getvalue())
+
+    def install_fake_download(self) -> list[tuple[str, str | None]]:
+        calls: list[tuple[str, str | None]] = []
+
+        def fake_download(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
+            calls.append((url, artifact))
+            self.write_zip(Path(dest))
+
+        original = fetch_sidecars.download_and_verify
+        fetch_sidecars.download_and_verify = fake_download
+        self.addCleanup(setattr, fetch_sidecars, "download_and_verify", original)
+        return calls
+
+    def install_fake_verify(self) -> list[Path]:
+        seen: list[Path] = []
+        original = fetch_sidecars.verify_macos_ffmpeg
+        fetch_sidecars.verify_macos_ffmpeg = lambda path: seen.append(path)
+        self.addCleanup(setattr, fetch_sidecars, "verify_macos_ffmpeg", original)
+        return seen
+
+    def test_downloads_under_the_macos_pin_key(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-apple-darwin"
+        calls = self.install_fake_download()
+        seen = self.install_fake_verify()
+        fetch_ffmpeg("Darwin", "arm64", out, {"downloads": {}})
+        self.assertEqual(calls, [(ffmpeg_macos_url(), ffmpeg_macos_artifact())])
+        self.assertEqual(seen, [out])
+
+    def test_extracts_ffmpeg_from_the_zip(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-apple-darwin"
+        self.install_fake_download()
+        self.install_fake_verify()
+        fetch_ffmpeg("Darwin", "arm64", out, {"downloads": {}})
+        self.assertTrue(out.read_bytes().startswith(thin_arm64_header()[:4]))
 
 
 if __name__ == "__main__":

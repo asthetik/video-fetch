@@ -2,7 +2,7 @@
 
 Video Fetch（影取）在发版包中捆绑以下独立可执行文件与字体文件，供下载、音视频合并与界面渲染使用。本应用源码采用 Apache-2.0 许可证；下列组件各有独立许可证，使用者须一并遵守。
 
-上述二进制由 `scripts/fetch_sidecars.py` 在构建前下载，不入库；版本固定——yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot 自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION` 与 `FFMPEG_BTBN_TAG`（手动升级）。每个下载产物在解压前都按 SHA-256 校验，摘要表存于 `scripts/sidecar_pins.json`（含 yt-dlp、BtbN 的官方校验文件交叉核对，升级流程见 `fetch_sidecars.py` 模块文档）。实际随包版本以应用「关于」页显示为准。
+上述二进制由 `scripts/fetch_sidecars.py` 在构建前下载，不入库；版本固定——yt-dlp 固定于 `scripts/requirements-sidecars.txt`（Dependabot 自动升级），ffmpeg 固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`、`FFMPEG_BTBN_TAG` 与 `FFMPEG_MACOS_BUILD`（手动升级）。每个下载产物在解压前都按 SHA-256 校验，摘要表存于 `scripts/sidecar_pins.json`（含 yt-dlp、BtbN、martin-riedl 的官方校验文件交叉核对，升级流程见 `fetch_sidecars.py` 模块文档）。实际随包版本以应用「关于」页显示为准。
 
 ---
 
@@ -24,7 +24,7 @@ Video Fetch（影取）在发版包中捆绑以下独立可执行文件与字体
 | **用途** | 合并 DASH 等分离的音视频流 |
 | **上游项目** | https://ffmpeg.org/ |
 | **许可证** | FFmpeg 上游以 **LGPL v2.1+** 为主；部分静态构建启用 GPL 组件，此时以 **GPL** 为准。详见上游 [LICENSE](https://git.ffmpeg.org/ffmpeg.git/tree/LICENSE.md) 与各构建说明。 |
-| **本仓库获取方式** | 按平台选用第三方静态构建（版本固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`，当前 9.0.1，手动升级）：<br>• **macOS**：https://evermeet.cx/ffmpeg/ — `ffmpeg-9.0.1.zip`（单文件 `ffmpeg`）<br>• **Linux / Windows**：https://github.com/BtbN/FFmpeg-Builds — 固定于不可变的 autobuild 快照标签 `autobuild-2026-09-20-13-11`（`FFMPEG_BTBN_TAG`），按宿主架构选择 `-gpl-` 静态构建；具体文件名与 SHA-256 摘要见 `scripts/sidecar_pins.json` |
+| **本仓库获取方式** | 按平台选用第三方静态构建（版本固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`，当前 9.0.2，手动升级）：<br>• **macOS（Apple 芯片）**：https://ffmpeg.martin-riedl.de/ — arm64 构建固定到不可变构建号 `1789931890_9.0.2`（`FFMPEG_MACOS_BUILD`，URL 绝不走 `/redirect/latest/`），Developer ID 签名团队 KU3N25YGLU；`scripts/verify_macos_ffmpeg.py` 可离线复核该包<br>• **Linux / Windows**：https://github.com/BtbN/FFmpeg-Builds — 固定于不可变的 autobuild 快照标签 `autobuild-2026-09-20-13-11`（`FFMPEG_BTBN_TAG`），按宿主架构选择 `-gpl-` 静态构建；具体文件名与 SHA-256 摘要见 `scripts/sidecar_pins.json` |
 
 BtbN 构建文件名含 `gpl`，表示包含 GPL 许可组件；若需严格 LGPL 链路，请自行替换为符合要求的 ffmpeg 构建并在设置中使用系统路径。
 
