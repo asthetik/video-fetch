@@ -109,6 +109,30 @@ fn is_ytdlp_status_line(line: &str) -> bool {
     trimmed.starts_with('[') || trimmed.starts_with('{')
 }
 
+/// yt-dlp writes warnings and errors to stderr under these prefixes. Everything
+/// else on stderr is progress, `[Merger]`-style status, or JSON ticks.
+const STDERR_NOTABLE_PREFIXES: [&str; 2] = ["WARNING:", "ERROR:"];
+
+/// The deduplicated warning/error lines from yt-dlp's stderr tail, keeping the
+/// last `limit`. Identical repeats collapse, and the tail is what survives: a
+/// run that warns once per fragment must not bury the merge failure behind them.
+fn notable_stderr_lines(tail: &str, limit: usize) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut notable: Vec<String> = Vec::new();
+    for line in tail.lines().map(str::trim) {
+        if !STDERR_NOTABLE_PREFIXES.iter().any(|p| line.starts_with(p)) {
+            continue;
+        }
+        if seen.insert(line.to_string()) {
+            notable.push(line.to_string());
+        }
+    }
+    if notable.len() > limit {
+        notable.drain(..notable.len() - limit);
+    }
+    notable
+}
+
 pub fn video_meta_from_yt_dlp_json(v: &serde_json::Value) -> AppResult<VideoMeta> {
     map_video_meta(v)
 }
@@ -1164,10 +1188,35 @@ pub async fn download(
 
     let final_path = final_path.ok_or_else(|| AppError::Message("yt-dlp 未返回输出路径".into()))?;
 
+    // An exit code of 0 can still hide a degraded run: this is where
+    // "ffmpeg is not installed, the streams will not be merged" lands, and it
+    // used to be discarded along with the rest of stderr.
+    let notable = notable_stderr_lines(&stderr_tail, 5);
+    if !notable.is_empty() {
+        tracing::warn!(
+            target: "core",
+            "download: yt-dlp 报告告警 {job_id}：{}",
+            notable.join(" | ")
+        );
+    }
+
     // A merge that never ran still exits 0 and prints a fragment path; the
     // job must fail loudly instead of delivering an audio-only or video-only
     // file as the finished download.
-    if looks_unmerged(&final_path, crate::fsutil::count_media_files(output_dir)) {
+    let media_files = crate::fsutil::count_media_files(output_dir);
+    if looks_unmerged(&final_path, media_files) {
+        tracing::warn!(
+            target: "core",
+            "download: 未合成，拒绝交付 {job_id}：回报 {}，媒体文件 {media_files} 个，ffmpeg {}",
+            final_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            cfg.ffmpeg_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "无".to_string())
+        );
         return Err(AppError::Message(
             "音视频流未合成完整文件（下载组件异常）。请重新安装影取后重试。".into(),
         ));
@@ -1715,5 +1764,44 @@ mod tests {
         assert!(!looks_unmerged(&merged, 1));
         // `-k` in a user config leaves fragments next to a finished merge.
         assert!(!looks_unmerged(&merged, 3));
+    }
+
+    #[test]
+    fn keeps_only_warnings_and_errors_from_stderr() {
+        let tail = "\
+[download] Destination: clip.f137.mp4
+[download] 100% of 12.34MiB
+[Merger] Merging formats into clip.mp4
+{\"status\": \"finished\"}
+WARNING: You have requested merging of multiple formats but ffmpeg is not installed
+[download] Destination: clip.f140.m4a";
+        assert_eq!(
+            notable_stderr_lines(tail, 5),
+            vec![
+                "WARNING: You have requested merging of multiple formats but ffmpeg is not installed"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn collapses_repeats_and_keeps_the_latest_lines() {
+        let mut tail = String::new();
+        for _ in 0..3 {
+            tail.push_str("WARNING: same extractor note\n");
+        }
+        tail.push_str("ERROR: unable to merge\n");
+        tail.push_str("WARNING: same extractor note\n");
+        // The repeat collapses, and the newest lines survive the cap.
+        assert_eq!(
+            notable_stderr_lines(&tail, 1),
+            vec!["ERROR: unable to merge".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_quiet_run_produces_no_notable_lines() {
+        assert!(notable_stderr_lines("", 5).is_empty());
+        assert!(notable_stderr_lines("[download] 42% of 1MiB\n", 5).is_empty());
     }
 }
