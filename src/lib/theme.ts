@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+// .ts extension required: node --test loads this module directly (ESM).
+import { logUi } from "./activityLog.ts";
 
 export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
@@ -33,8 +35,12 @@ function syncNativeTheme(mode: ThemeMode): void {
   }
   void invoke("set_window_theme", { theme: nativeThemeFor(mode) }).catch((error) => {
     // IPC rejected (rare: command missing or window gone): the webview theme
-    // still applies, but the titlebar would silently stop following — warn.
-    console.warn("[theme] native window theme rejected:", error);
+    // still applies, but the titlebar would silently stop following — record it.
+    logUi(
+      "theme",
+      `同步原生窗口主题失败: ${error instanceof Error ? error.message : String(error)}`,
+      "warn",
+    );
   });
 }
 
