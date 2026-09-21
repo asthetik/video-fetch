@@ -16,11 +16,13 @@ from unittest import mock
 
 import fetch_sidecars
 from fetch_sidecars import (
+    BTBN_ARCHES,
     FFMPEG_BTBN_TAG,
     FFMPEG_MACOS_BUILD,
     FFMPEG_MACOS_SIGNER,
     FFMPEG_MACOS_TEAM_ID,
     FFMPEG_VERSION,
+    elf_machine,
     extract_tar_xz,
     fetch_ffmpeg,
     ffmpeg_branch,
@@ -32,8 +34,10 @@ from fetch_sidecars import (
     macho_cpu_types,
     normalize_ytdlp_version,
     parse_shasums,
+    pe_machine,
     pin_key_from_url,
     sha256_hex,
+    verify_btbn_ffmpeg_arch,
     verify_macos_ffmpeg,
     verify_sha256,
     ytdlp_download_url,
@@ -305,12 +309,15 @@ class TestFetchFfmpegLinux(TmpDirTestCase):
         out = self.tmpdir() / "ffmpeg-x86_64-unknown-linux-gnu"
         self.install_fake_download(
             [
-                ("ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0/bin/ffmpeg", b"real\n"),
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0/bin/ffmpeg",
+                    elf_header(0x3E),
+                ),
                 ("ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0/share/ffmpeg", b"decoy\n"),
             ]
         )
         fetch_ffmpeg("Linux", "x86_64", out, {"downloads": {}})
-        self.assertEqual(out.read_bytes(), b"real\n")
+        self.assertEqual(out.read_bytes(), elf_header(0x3E))
 
     def test_archive_without_bin_ffmpeg_dies(self) -> None:
         out = self.tmpdir() / "ffmpeg-x86_64-unknown-linux-gnu"
@@ -319,6 +326,65 @@ class TestFetchFfmpegLinux(TmpDirTestCase):
         )
         with self.assertRaises(SystemExit):
             fetch_ffmpeg("Linux", "x86_64", out, {"downloads": {}})
+
+    def test_x64_payload_under_the_arm64_asset_dies(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-unknown-linux-gnu"
+        self.install_fake_download(
+            [
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-linuxarm64-gpl-9.0/bin/ffmpeg",
+                    elf_header(0x3E),
+                )
+            ]
+        )
+        with self.assertRaises(SystemExit):
+            fetch_ffmpeg("Linux", "aarch64", out, {"downloads": {}})
+
+
+class TestFetchFfmpegWindows(TmpDirTestCase):
+    def install_fake_download(self, members: list[tuple[str, bytes]]) -> None:
+        def fake_download(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                for name, data in members:
+                    zf.writestr(name, data)
+            dest.write_bytes(buf.getvalue())
+
+        original = fetch_sidecars.download_and_verify
+        fetch_sidecars.download_and_verify = fake_download
+        self.addCleanup(setattr, fetch_sidecars, "download_and_verify", original)
+
+    def test_extracts_ffmpeg_exe_and_checks_its_arch(self) -> None:
+        out = self.tmpdir() / "ffmpeg-x86_64-pc-windows-msvc.exe"
+        self.install_fake_download(
+            [
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/bin/ffmpeg.exe",
+                    pe_header(0x8664),
+                ),
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/bin/ffprobe.exe",
+                    pe_header(0x8664),
+                ),
+            ]
+        )
+        fetch_ffmpeg("Windows", "AMD64", out, {"downloads": {}})
+        self.assertEqual(out.read_bytes(), pe_header(0x8664))
+
+    def test_x64_payload_under_the_arm64_asset_dies(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-pc-windows-msvc.exe"
+        self.install_fake_download(
+            [
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-winarm64-gpl-9.0/bin/ffmpeg.exe",
+                    pe_header(0x8664),
+                )
+            ]
+        )
+        with self.assertRaises(SystemExit):
+            fetch_ffmpeg("Windows", "ARM64", out, {"downloads": {}})
 
 
 class TestSha256Hex(unittest.TestCase):
@@ -533,24 +599,35 @@ class TestFetchFfmpegTempIsolation(unittest.TestCase):
     so a later round can neither collide with nor find an earlier round's
     files."""
 
-    def stub_download(self, content: bytes) -> None:
-        tar_buf = io.BytesIO()
-        with tarfile.open(fileobj=tar_buf, mode="w:xz") as tf:
-            info = tarfile.TarInfo("ffmpeg-archive/bin/ffmpeg")
-            info.size = len(content)
-            tf.addfile(info, io.BytesIO(content))
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w") as zf:
-            zf.writestr("ffmpeg-archive/bin/ffmpeg.exe", content)
-        tar_payload = tar_buf.getvalue()
-        zip_payload = zip_buf.getvalue()
+    def stub_download(self) -> None:
+        def tar_payload(member: str, content: bytes) -> bytes:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:xz") as tf:
+                info = tarfile.TarInfo(member)
+                info.size = len(content)
+                tf.addfile(info, io.BytesIO(content))
+            return buf.getvalue()
+
+        def zip_payload(member: str, content: bytes) -> bytes:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr(member, content)
+            return buf.getvalue()
+
+        payloads = {
+            "linux64": tar_payload("ffmpeg-archive/bin/ffmpeg", elf_header(0x3E)),
+            "linuxarm64": tar_payload("ffmpeg-archive/bin/ffmpeg", elf_header(0xB7)),
+            "win64": zip_payload("ffmpeg-archive/bin/ffmpeg.exe", pe_header(0x8664)),
+        }
 
         def fake_download(
             url: str, dest: Path, pins: dict, artifact: str | None = None
         ) -> None:
-            Path(dest).write_bytes(
-                zip_payload if url.endswith(".zip") else tar_payload
-            )
+            for token, payload in payloads.items():
+                if f"-{token}-gpl" in url:
+                    Path(dest).write_bytes(payload)
+                    return
+            raise AssertionError(f"unexpected url: {url}")
 
         original = fetch_sidecars.download_and_verify
         self.addCleanup(
@@ -559,7 +636,7 @@ class TestFetchFfmpegTempIsolation(unittest.TestCase):
         fetch_sidecars.download_and_verify = fake_download
 
     def test_each_call_works_in_a_private_temp_dir(self) -> None:
-        self.stub_download(b"payload")
+        self.stub_download()
         with tempfile.TemporaryDirectory() as tmp_s:
             tmp = Path(tmp_s)
             work_dirs: list[Path] = []
@@ -580,15 +657,15 @@ class TestFetchFfmpegTempIsolation(unittest.TestCase):
 
             out_dir = tmp / "out"
             out_dir.mkdir()
-            for system, machine, name in (
-                ("Linux", "x86_64", "ffmpeg-linux64"),
-                ("Linux", "aarch64", "ffmpeg-linuxarm64"),
-                ("Windows", "x86_64", "ffmpeg-win64.exe"),
+            for system, machine, name, want in (
+                ("Linux", "x86_64", "ffmpeg-linux64", elf_header(0x3E)),
+                ("Linux", "aarch64", "ffmpeg-linuxarm64", elf_header(0xB7)),
+                ("Windows", "x86_64", "ffmpeg-win64.exe", pe_header(0x8664)),
             ):
                 with self.subTest(platform=f"{system}/{machine}"):
                     out = out_dir / name
                     fetch_sidecars.fetch_ffmpeg(system, machine, out, {"downloads": {}})
-                    self.assertEqual(out.read_bytes(), b"payload")
+                    self.assertEqual(out.read_bytes(), want)
 
             self.assertEqual(len(work_dirs), 3, "each call needs its own temp dir")
             self.assertEqual(len(set(work_dirs)), 3)
@@ -622,6 +699,23 @@ def thin_x86_64_header() -> bytes:
         + (0x01000007).to_bytes(4, "little")
         + b"\x00" * 8
     )
+
+
+def elf_header(machine: int) -> bytes:
+    return (
+        b"\x7fELF"
+        + bytes([2, 1])  # EI_CLASS 64-bit, EI_DATA little-endian
+        + b"\x00" * 12  # offsets 6..17
+        + machine.to_bytes(2, "little")
+        + b"\x00" * 32
+    )
+
+
+def pe_header(machine: int) -> bytes:
+    stub = bytearray(0x40)
+    stub[0:2] = b"MZ"
+    stub[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    return bytes(stub) + b"PE\0\0" + machine.to_bytes(2, "little") + b"\x00" * 32
 
 
 class TestMachoParser(unittest.TestCase):
@@ -673,6 +767,122 @@ class TestFfmpegMacosUrl(unittest.TestCase):
             ffmpeg_macos_artifact(),
             f"ffmpeg-macos-arm64-{FFMPEG_MACOS_BUILD}.zip",
         )
+
+
+class TestElfParser(unittest.TestCase):
+    def test_x86_64_header(self) -> None:
+        self.assertEqual(elf_machine(elf_header(0x3E)), 0x3E)
+
+    def test_aarch64_header(self) -> None:
+        self.assertEqual(elf_machine(elf_header(0xB7)), 0xB7)
+
+    def test_big_endian_header(self) -> None:
+        data = bytearray(elf_header(0x3E))
+        data[5] = 2
+        data[18:20] = (0x3E).to_bytes(2, "big")
+        self.assertEqual(elf_machine(bytes(data)), 0x3E)
+
+    def test_32_bit_elf_raises(self) -> None:
+        data = bytearray(elf_header(0x3E))
+        data[4] = 1
+        with self.assertRaises(ValueError):
+            elf_machine(bytes(data))
+
+    def test_pe_bytes_raise(self) -> None:
+        with self.assertRaises(ValueError):
+            elf_machine(pe_header(0x8664))
+
+    def test_truncated_header_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            elf_machine(b"\x7fELF\x02\x01")
+
+
+class TestPeParser(unittest.TestCase):
+    def test_x86_64_header(self) -> None:
+        self.assertEqual(pe_machine(pe_header(0x8664)), 0x8664)
+
+    def test_arm64_header(self) -> None:
+        self.assertEqual(pe_machine(pe_header(0xAA64)), 0xAA64)
+
+    def test_signature_offset_is_honoured(self) -> None:
+        data = bytearray(pe_header(0x8664) + b"\x00" * 0x40)
+        data[0x3C:0x40] = (0x80).to_bytes(4, "little")
+        data[0x80:0x84] = b"PE\0\0"
+        data[0x84:0x86] = (0xAA64).to_bytes(2, "little")
+        self.assertEqual(pe_machine(bytes(data)), 0xAA64)
+
+    def test_elf_bytes_raise(self) -> None:
+        with self.assertRaises(ValueError):
+            pe_machine(elf_header(0x3E))
+
+    def test_signature_offset_past_the_end_raises(self) -> None:
+        data = bytearray(pe_header(0x8664))
+        data[0x3C:0x40] = (0x4000).to_bytes(4, "little")
+        with self.assertRaises(ValueError):
+            pe_machine(bytes(data))
+
+    def test_missing_signature_raises(self) -> None:
+        data = bytearray(pe_header(0x8664))
+        data[0x40:0x44] = b"XXXX"
+        with self.assertRaises(ValueError):
+            pe_machine(bytes(data))
+
+    def test_truncated_dos_header_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            pe_machine(b"MZ" + b"\x00" * 8)
+
+
+class TestVerifyBtbnFfmpegArch(TmpDirTestCase):
+    def write(self, header: bytes) -> Path:
+        path = self.tmpdir() / "ffmpeg"
+        path.write_bytes(header)
+        return path
+
+    def test_linux_x64_elf_passes(self) -> None:
+        verify_btbn_ffmpeg_arch(self.write(elf_header(0x3E)), "Linux", "x86_64")
+
+    def test_linux_arm64_elf_passes(self) -> None:
+        verify_btbn_ffmpeg_arch(self.write(elf_header(0xB7)), "Linux", "aarch64")
+
+    def test_windows_x64_pe_passes(self) -> None:
+        verify_btbn_ffmpeg_arch(self.write(pe_header(0x8664)), "Windows", "AMD64")
+
+    def test_windows_arm64_pe_passes(self) -> None:
+        verify_btbn_ffmpeg_arch(self.write(pe_header(0xAA64)), "Windows", "ARM64")
+
+    def test_x64_elf_under_an_arm64_asset_dies(self) -> None:
+        with self.assertRaises(SystemExit):
+            verify_btbn_ffmpeg_arch(self.write(elf_header(0x3E)), "Linux", "aarch64")
+
+    def test_pe_under_a_linux_asset_dies(self) -> None:
+        with self.assertRaises(SystemExit):
+            verify_btbn_ffmpeg_arch(self.write(pe_header(0x8664)), "Linux", "x86_64")
+
+    def test_a_non_binary_dies(self) -> None:
+        with self.assertRaises(SystemExit):
+            verify_btbn_ffmpeg_arch(self.write(b"not a binary\n"), "Linux", "x86_64")
+
+    def test_unsupported_platform_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            verify_btbn_ffmpeg_arch(self.write(elf_header(0x3E)), "Linux", "riscv64")
+
+    def test_an_uncovered_asset_class_dies(self) -> None:
+        # A platform added to BTBN_ARCHES without an assertion entry must
+        # fail loudly rather than ship unchecked.
+        arches = {"Linux": dict(BTBN_ARCHES["Linux"], riscv64="linuxriscv64")}
+        with mock.patch.object(fetch_sidecars, "BTBN_ARCHES", arches):
+            with self.assertRaises(SystemExit):
+                verify_btbn_ffmpeg_arch(
+                    self.write(elf_header(0x3E)), "Linux", "riscv64"
+                )
+
+
+class TestBtbnArchAssertionCoverage(unittest.TestCase):
+    def test_every_asset_class_has_an_assertion(self) -> None:
+        for system, arches in BTBN_ARCHES.items():
+            for machine, token in arches.items():
+                with self.subTest(platform=f"{system}/{machine}"):
+                    self.assertIn(token, fetch_sidecars._BTBN_ARCH_MACHINES)
 
 
 class TestVerifyMacosFfmpeg(TmpDirTestCase):
