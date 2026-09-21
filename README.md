@@ -106,7 +106,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 
 ```bash
 npm install
-python scripts/fetch_sidecars.py
+python3 scripts/fetch_sidecars.py
 npm run tauri dev
 ```
 
@@ -140,7 +140,7 @@ scripts/                sidecar 拉取与校验、发版辅助脚本
 ### 发版与 sidecar
 
 - 推 `v*.*.*` 标签触发 `.github/workflows/release.yml`，构建 macOS（Apple 芯片）、Windows x64 / arm64、Linux x86_64 / arm64 五个平台的安装包
-- yt-dlp 版本钉在 `scripts/requirements-sidecars.txt`，ffmpeg 版本钉在 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`；升级后跑 `python scripts/fetch_sidecars.py --update-pins` 更新 `scripts/sidecar_pins.json` 里的 SHA-256
+- yt-dlp 版本钉在 `scripts/requirements-sidecars.txt`，ffmpeg 版本钉在 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`；升级后跑 `python3 scripts/fetch_sidecars.py --update-pins` 更新 `scripts/sidecar_pins.json` 里的 SHA-256
 - `scripts/verify_evermeet.py` 校验 macOS 那一份 ffmpeg 包确实出自 evermeet：先核对 PGP 签名，再比对 SHA-256，两项都过才输出 OK
 
 ## 许可证
