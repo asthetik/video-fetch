@@ -40,6 +40,32 @@ fn has_output_ext(name: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
+/// Media files in a finished download's work dir, counted recursively (the
+/// output template may put files in a subdirectory). A completed yt-dlp run
+/// leaves exactly one; two or more means separate streams stayed as fragments
+/// because the merge never ran, even though yt-dlp exited 0.
+pub fn count_media_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+                && !name.ends_with(".part")
+                && has_output_ext(&name)
+                && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            {
+                count += 1;
+            }
+        } else if path.is_dir() {
+            count += count_media_files(&path);
+        }
+    }
+    count
+}
+
 pub fn find_work_product(work: &Path) -> Option<PathBuf> {
     // First pass prefers real media containers (a thumbnail/subtitle written into the
     // work dir must not be relocated as the download product); fall back to any
@@ -157,6 +183,32 @@ mod tests {
         fs::write(work.join("cover.jpg"), b"thumb").unwrap();
         fs::write(work.join("clip.mp4"), b"video").unwrap();
         assert_eq!(find_work_product(&work), Some(work.join("clip.mp4")));
+    }
+
+    #[test]
+    fn count_media_files_counts_containers_only() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("clip.mp4"), b"video").unwrap();
+        fs::write(dir.path().join("clip.f30280.m4a"), b"audio").unwrap();
+        fs::write(dir.path().join("clip.mp4.part"), b"x").unwrap();
+        fs::write(dir.path().join("cover.jpg"), b"thumb").unwrap();
+        fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        fs::write(dir.path().join("empty.mp4"), b"").unwrap();
+        assert_eq!(count_media_files(dir.path()), 2);
+    }
+
+    #[test]
+    fn count_media_files_walks_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("uploader");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("clip.mp4"), b"video").unwrap();
+        assert_eq!(count_media_files(dir.path()), 1);
+    }
+
+    #[test]
+    fn count_media_files_zero_when_dir_missing() {
+        assert_eq!(count_media_files(Path::new("virtual/missing-dir")), 0);
     }
 
     #[test]

@@ -89,11 +89,39 @@ pub fn resolve_yt_dlp_path(app: &AppHandle) -> PathBuf {
     pick_tool_path(bundled, from_env, from_system, cfg!(debug_assertions)).unwrap_or_default()
 }
 
+/// A candidate that cannot execute `-version` is broken as a sidecar: an
+/// Intel-only ffmpeg on Apple silicon fails here (exec format error), which
+/// is exactly how the 0.4.0 macOS build shipped a downloader that could not
+/// merge. Filtering candidates keeps the debug-mode system fallback working:
+/// a broken bundled binary falls through to PATH in dev and to the missing
+/// sidecar error in release. Candidates are probed lazily in preference
+/// order, so a working bundled binary never spawns the discarded candidates.
+fn tool_runs(path: &std::path::Path) -> bool {
+    let mut cmd = StdCommand::new(path);
+    cmd.arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
 pub fn resolve_ffmpeg_path(app: &AppHandle) -> Option<PathBuf> {
-    let bundled = resolve_bundled(app, FFMPEG_SIDECAR, "ffmpeg");
-    let from_env = path_from_env("FFMPEG_PATH");
-    let from_system = path_from_which("ffmpeg");
-    pick_tool_path(bundled, from_env, from_system, cfg!(debug_assertions))
+    resolve_bundled(app, FFMPEG_SIDECAR, "ffmpeg")
+        .filter(|p| tool_runs(p))
+        .or_else(|| path_from_env("FFMPEG_PATH").filter(|p| tool_runs(p)))
+        .or_else(|| {
+            if cfg!(debug_assertions) {
+                path_from_which("ffmpeg").filter(|p| tool_runs(p))
+            } else {
+                None
+            }
+        })
 }
 
 pub fn resolve_ytdlp_config(app: &AppHandle) -> crate::ytdlp::YtDlpConfig {
@@ -158,5 +186,27 @@ mod tests {
     fn sidecar_in_dir_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(sidecar_in_dir(dir.path(), "yt-dlp"), None);
+    }
+
+    #[test]
+    fn tool_runs_rejects_missing_path() {
+        assert!(!tool_runs(std::path::Path::new("virtual/missing/ffmpeg")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_runs_probes_execution() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let write_exec = |name: &str, script: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let ok = write_exec("ffmpeg-ok", "#!/bin/sh\nexit 0\n");
+        let broken = write_exec("ffmpeg-broken", "#!/bin/sh\nexit 3\n");
+        assert!(tool_runs(&ok));
+        assert!(!tool_runs(&broken));
     }
 }
