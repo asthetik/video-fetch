@@ -20,18 +20,39 @@ const TOKENS_CSS = join(import.meta.dirname, "..", "styles", "tokens.css");
 const tokens = readFileSync(TOKENS_CSS, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 function cssBlock(source: string, selector: string): string {
-  const start = source.indexOf(selector);
-  assert.notEqual(start, -1, `shell.css is missing the ${selector} block`);
-  const open = source.indexOf("{", start);
+  // The selector has to be a whole member of a top-level rule's selector
+  // list. A substring search finds `.nav-btn` inside `.nav-btn-label`, and
+  // taking the first hit can land on a media-query override instead of the
+  // base rule the assertions are about.
   let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") {
+  let ruleStart = 0;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "{") {
+      const wanted =
+        depth === 0 &&
+        source
+          .slice(ruleStart, i)
+          .split(",")
+          .some((part) => part.trim() === selector);
+      depth++;
+      if (!wanted) continue;
+      let end = i + 1;
+      let inner = 1;
+      while (end < source.length && inner > 0) {
+        if (source[end] === "{") inner++;
+        else if (source[end] === "}") inner--;
+        end++;
+      }
+      assert.equal(inner, 0, `unterminated ${selector} block`);
+      return source.slice(i + 1, end - 1);
+    }
+    if (ch === "}") {
       depth--;
-      if (depth === 0) return source.slice(open + 1, i);
+      if (depth === 0) ruleStart = i + 1;
     }
   }
-  throw new Error(`unterminated ${selector} block`);
+  throw new Error(`no top-level ${selector} rule in the stylesheet`);
 }
 
 test(".nav-indicator carries the selected fill", () => {
