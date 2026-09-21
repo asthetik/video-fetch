@@ -7,6 +7,7 @@
 ### Added
 
 - 新增 `scripts/verify_evermeet.py`，离线补上 macOS 侧载的信任缺口：ffmpeg 的 macOS 包取自 evermeet 直链，而 evermeet 不发布校验和文件，`fetch_sidecars.py` 只能首次下载时「信任并固定」它，构建链路里没有任何一步能证明这些字节确实出自 evermeet。该脚本把随包发布的 `.sig` 对着 evermeet 公布的公钥在临时钥匙串中验证——先核对公钥指纹再核对签名链到该主密钥，全程不触碰你自己的 GnuPG 钥匙串——随后比对下载内容的 SHA-256 是否等于 `sidecar_pins.json` 中的固定值；两项都过才输出 OK。产物名取自 `FFMPEG_VERSION`，升级 ffmpeg 后无需改动此脚本。
+- CI 的 scripts 任务改为自动发现测试模块（`python -m unittest discover`），新增测试文件不必再同步修改工作流。
 
 ### Changed
 
