@@ -10,7 +10,8 @@
 # (GitHub tag 2026.08.19 -> PyPI 2026.8.19); fetch_sidecars.py
 # zero-pads it back to the GitHub release tag.
 #
-# ffmpeg: BtbN / evermeet ship raw binaries with no package-registry
-# ecosystem for Dependabot to track — it is pinned as FFMPEG_VERSION
-# and FFMPEG_BTBN_TAG in scripts/fetch_sidecars.py and bumped manually.
+# ffmpeg: BtbN (Linux/Windows) and martin-riedl (macOS arm64) ship raw
+# binaries with no package-registry ecosystem for Dependabot to track —
+# pinned as FFMPEG_VERSION, FFMPEG_BTBN_TAG and FFMPEG_MACOS_BUILD in
+# scripts/fetch_sidecars.py and bumped manually.
 yt-dlp==2026.8.19

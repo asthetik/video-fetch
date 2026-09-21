@@ -6,9 +6,9 @@ Versions are pinned, not floating:
             auto-upgraded by Dependabot; zero-padded back to the GitHub
             release tag here)
   ffmpeg  — FFMPEG_VERSION + FFMPEG_BTBN_TAG below: a specific BtbN
-            autobuild snapshot for Linux/Windows, evermeet x.y.z build for
-            macOS; no package registry exists for Dependabot to track, so
-            bump it manually
+            autobuild snapshot for Linux/Windows, the martin-riedl arm64
+            build FFMPEG_MACOS_BUILD for macOS; no package registry exists
+            for Dependabot to track, so bump it manually
 
 Integrity:
   Every downloaded artifact is checked against a SHA-256 digest pinned in
@@ -20,14 +20,18 @@ Integrity:
   To bump yt-dlp: let Dependabot edit requirements-sidecars.txt, then add
   the new artifacts' digests:
       python scripts/fetch_sidecars.py --update-pins
-  To bump ffmpeg: set FFMPEG_VERSION and FFMPEG_BTBN_TAG, then run the
-  same --update-pins. New assets are appended; existing digests are never
-  overwritten unless --force is passed, so a digest failure cannot be
-  waved away by re-running the update (a human must look at the diff).
-  yt-dlp and BtbN publish checksum files that --update-pins cross-checks;
-  evermeet publishes none, so its macOS zip is pinned on first sight.
-  Run scripts/verify_evermeet.py out-of-band to confirm that zip is really
-  evermeet's (PGP signature) and still matches its pin.
+  To bump ffmpeg: set FFMPEG_VERSION, FFMPEG_BTBN_TAG and
+  FFMPEG_MACOS_BUILD, then run the same --update-pins. New assets are
+  appended; existing digests are never overwritten unless --force is
+  passed, so a digest failure cannot be waved away by re-running the
+  update (a human must look at the diff). yt-dlp, BtbN and martin-riedl
+  all publish checksum files that --update-pins cross-checks.
+  The macOS binary is additionally asserted to be an arm64 Mach-O and,
+  on macOS, a Developer ID-signed binary: evermeet's Intel-only build was
+  shipped as the macOS sidecar in 0.4.0 and could not run on Apple
+  silicon, silently leaving every video unmerged. Run
+  scripts/verify_macos_ffmpeg.py out-of-band to re-confirm the pinned zip
+  against upstream's checksum, architecture and signature.
 
 Naming:
   binaries/yt-dlp-{TARGET_TRIPLE}[.exe]
@@ -60,12 +64,22 @@ FFMPEG_BTBN_TAG = "autobuild-2026-09-20-13-11"
 FFMPEG_BTBN_BASE = (
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/" + FFMPEG_BTBN_TAG
 )
-FFMPEG_EVERMEET = "https://evermeet.cx/ffmpeg"
+FFMPEG_MACOS_BASE = "https://ffmpeg.martin-riedl.de/download/macos/arm64"
+# Immutable build id (timestamp_version) in the path. Never the
+# /redirect/latest/... endpoint: it floats to whatever upstream published
+# last, which would silently invalidate the pinned digest.
+FFMPEG_MACOS_BUILD = "1789931890_9.0.2"
+FFMPEG_MACOS_SIGNER = "Martin Riedl"
+FFMPEG_MACOS_TEAM_ID = "KU3N25YGLU"
+
+# martin-riedl.de answers Python-urllib's default User-Agent with 403.
+HTTP_USER_AGENT = "videofetch-fetch-sidecars/1.0"
 
 # FFmpeg release branch to ship (x.y.z). Linux/Windows use the pinned BtbN
-# snapshot's matching release-branch builds (n<x.y>); macOS uses evermeet's
-# x.y.z build. Bumped manually — see the module docstring.
-FFMPEG_VERSION = "9.0.1"
+# snapshot's matching release-branch builds (n<x.y>); macOS uses the
+# martin-riedl arm64 build pinned as FFMPEG_MACOS_BUILD. Bumped manually —
+# see the module docstring.
+FFMPEG_VERSION = "9.0.2"
 
 REQUIREMENTS_FILE = Path(__file__).resolve().parent / "requirements-sidecars.txt"
 PINS_FILE = Path(__file__).resolve().parent / "sidecar_pins.json"
@@ -130,6 +144,112 @@ def verify_sha256(what: str, expected: str, actual: str) -> None:
             "rebuilt it, inspect the change and refresh the pin with "
             "`python scripts/fetch_sidecars.py --update-pins --force`."
         )
+
+
+_MH_MAGIC_64 = 0xFEEDFACF
+_FAT_MAGIC = 0xCAFEBABE
+_FAT_MAGIC_64 = 0xCAFEBABF
+_CPU_TYPE_ARM64 = 0x0100000C
+
+
+def macho_cpu_types(data: bytes) -> set[int]:
+    """CPU-type constants from Mach-O header bytes (thin 64-bit or universal).
+
+    Raises ValueError when the bytes are not a 64-bit Mach-O file. Fat
+    headers are big-endian; a thin header is accepted in the little-endian
+    MH_MAGIC_64 form Apple toolchains emit.
+    """
+    if len(data) < 8:
+        raise ValueError("too small to hold a Mach-O header")
+    magic = int.from_bytes(data[0:4], "big")
+    if magic in (_FAT_MAGIC, _FAT_MAGIC_64):
+        count = int.from_bytes(data[4:8], "big")
+        stride = 20 if magic == _FAT_MAGIC else 32
+        types: set[int] = set()
+        for index in range(count):
+            offset = 8 + index * stride
+            if offset + 4 > len(data):
+                raise ValueError("fat header truncated")
+            types.add(int.from_bytes(data[offset : offset + 4], "big"))
+        return types
+    if int.from_bytes(data[0:4], "little") == _MH_MAGIC_64:
+        return {int.from_bytes(data[4:8], "little")}
+    raise ValueError("not a 64-bit Mach-O file")
+
+
+def verify_macos_ffmpeg(path: Path) -> None:
+    """Assert the macOS sidecar is an arm64 binary signed by our builder.
+
+    The header check runs on every host; codesign needs macOS tooling; the
+    execute probe needs an arm64 host to mean anything (GitHub's arm64
+    runners carry Rosetta, so running an Intel binary there proves
+    nothing — the Mach-O header is the check).
+    """
+    with path.open("rb") as f:
+        header = f.read(4096)
+    try:
+        cpu_types = macho_cpu_types(header)
+    except ValueError as e:
+        die(f"{path} is not a usable macOS ffmpeg binary: {e}")
+    if _CPU_TYPE_ARM64 not in cpu_types:
+        die(
+            f"{path} carries CPU types {sorted(hex(t) for t in cpu_types)}, "
+            "not arm64.\nThis is the 0.4.0 failure mode (an Intel-only "
+            "binary shipped as the macOS sidecar): it cannot run on Apple "
+            "silicon, so yt-dlp cannot merge and downloads come out as "
+            "silent fragments. Refusing to bundle it."
+        )
+    print("  ok       Mach-O arm64")
+
+    if detect_system() != "Darwin":
+        return
+    codesign = shutil.which("codesign")
+    if codesign is None:
+        die("codesign not found; cannot verify the macOS ffmpeg signature")
+    verified = subprocess.run(
+        [codesign, "--verify", "--strict", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if verified.returncode != 0:
+        die(f"codesign --verify failed for {path}:\n{verified.stderr.strip()}")
+    details = subprocess.run(
+        [codesign, "-dvvv", str(path)], capture_output=True, text=True
+    )
+    # `--verify --strict` above proves the seal; the Authority lines prove
+    # *whose* seal: a leaf certificate issued to our builder, chained up to
+    # Apple. Matching TeamIdentifier alone would also pass for any signature
+    # that merely carries that string.
+    chain = [
+        f"Authority=Developer ID Application: {FFMPEG_MACOS_SIGNER} "
+        f"({FFMPEG_MACOS_TEAM_ID})",
+        "Authority=Developer ID Certification Authority",
+        "Authority=Apple Root CA",
+    ]
+    signature = details.stdout + details.stderr
+    missing = [line for line in chain if line not in signature]
+    if missing:
+        die(
+            f"{path} does not carry a Developer ID signature chain from "
+            f"{FFMPEG_MACOS_SIGNER} (team {FFMPEG_MACOS_TEAM_ID}) up to "
+            f"Apple; missing {missing}; refusing to bundle it"
+        )
+    print(
+        f"  ok       Developer ID signature "
+        f"({FFMPEG_MACOS_SIGNER}, team {FFMPEG_MACOS_TEAM_ID})"
+    )
+
+    if detect_machine() in {"arm64", "aarch64"}:
+        try:
+            probe = subprocess.run(
+                [str(path), "-version"], capture_output=True, text=True
+            )
+        except OSError as e:
+            die(f"{path} could not be executed: {e}")
+        if probe.returncode != 0:
+            die(f"{path} failed to run: {probe.stderr.strip()}")
+        first_line = probe.stdout.splitlines()[0] if probe.stdout else ""
+        print(f"  ok       runs ({first_line})")
 
 
 def load_pins(path: Path | None = None) -> dict:
@@ -218,10 +338,15 @@ def parse_shasums(text: str) -> dict[str, str]:
     return entries
 
 
+def _open_url(url: str):
+    request = urllib.request.Request(url, headers={"User-Agent": HTTP_USER_AGENT})
+    return urllib.request.urlopen(request)
+
+
 def fetch_bytes(url: str) -> bytes:
     print(f"  GET {url}")
     try:
-        with urllib.request.urlopen(url) as resp:
+        with _open_url(url) as resp:
             return resp.read()
     except (urllib.error.URLError, OSError) as e:
         die(f"failed to fetch {url}: {e}")
@@ -242,25 +367,29 @@ def btbn_upstream_shasums() -> dict[str, str]:
 def download(url: str, dest: Path) -> None:
     print(f"  GET {url}")
     try:
-        with urllib.request.urlopen(url) as resp, dest.open("wb") as f:
+        with _open_url(url) as resp, dest.open("wb") as f:
             shutil.copyfileobj(resp, f)
     except (urllib.error.URLError, OSError) as e:
         die(f"failed to download {url}: {e}")
 
 
-def download_and_verify(url: str, dest: Path, pins: dict) -> None:
+def download_and_verify(
+    url: str, dest: Path, pins: dict, artifact: str | None = None
+) -> None:
     """Download the artifact and record or check it against its digest.
 
     In update mode (`PinsRecorder`) the digest was recorded from the pinned
     release's published checksums a moment earlier; the download is compared
-    against it before the entry is trusted.
+    against it before the entry is trusted. `artifact` overrides the pins
+    key when the URL basename is too generic to be one (the macOS zip is
+    `ffmpeg.zip` on every build).
     """
     if isinstance(pins, PinsRecorder):
-        pins.download_and_record(url, dest)
+        pins.download_and_record(url, dest, artifact)
         return
-    artifact = pin_key_from_url(url)
+    key = artifact or pin_key_from_url(url)
     download(url, dest)
-    verify_sha256(artifact, pinned_digest(pins, artifact), sha256_file(dest))
+    verify_sha256(key, pinned_digest(pins, key), sha256_file(dest))
 
 
 def make_executable(path: Path) -> None:
@@ -384,10 +513,21 @@ def btbn_asset_name(system: str, machine: str) -> str:
 
 
 def ffmpeg_download_url(system: str, machine: str) -> str | None:
-    """Return archive URL, or None for Darwin (evermeet handled separately)."""
+    """Return archive URL, or None for Darwin (macOS handled separately)."""
     if system == "Darwin":
         return None
     return f"{FFMPEG_BTBN_BASE}/{btbn_asset_name(system, machine)}"
+
+
+def ffmpeg_macos_url() -> str:
+    """Immutable download URL of the pinned macOS arm64 build."""
+    return f"{FFMPEG_MACOS_BASE}/{FFMPEG_MACOS_BUILD}/ffmpeg.zip"
+
+
+def ffmpeg_macos_artifact() -> str:
+    """Pins key for the macOS zip: its URL basename (`ffmpeg.zip`) collides
+    across builds, so the key carries platform and build id."""
+    return f"ffmpeg-macos-arm64-{FFMPEG_MACOS_BUILD}.zip"
 
 
 def fetch_ytdlp(
@@ -438,7 +578,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
         if system == "Darwin":
             zip_path = work / "ffmpeg.zip"
             download_and_verify(
-                f"{FFMPEG_EVERMEET}/ffmpeg-{FFMPEG_VERSION}.zip", zip_path, pins
+                ffmpeg_macos_url(), zip_path, pins, artifact=ffmpeg_macos_artifact()
             )
             extract_dir = work / "extract"
             extract_dir.mkdir()
@@ -449,6 +589,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
                 src = find_one(extract_dir, "ffmpeg")
             shutil.copy2(src, out)
             make_executable(out)
+            verify_macos_ffmpeg(out)
             return
 
         if system == "Linux":
@@ -553,15 +694,20 @@ class PinsRecorder:
     A digest that differs from the file is only replaced when --force is
     passed, so a mismatch cannot be cleared by re-running the update; stale
     stays set and the run fails at the end with instructions. Filenames that
-    embed a version (evermeet's zip, BtbN's build-tagged assets) are meant to
+    embed a version (the macOS zip, BtbN's build-tagged assets) are meant to
     be deleted and re-added when the version is bumped, which is why a
     missing entry is recorded without --force.
+
+    Digests recorded from an upstream checksum file also pin every later
+    download of that artifact for the rest of the run: what gets extracted
+    and executed must be the same bytes the upstream file described.
     """
 
     def __init__(self, pins: dict, force: bool) -> None:
         self.pins = pins
         self.force = force
         self.stale = False
+        self.upstream_digests: dict[str, str] = {}
 
     def _apply(self, table: dict, name: str, digest: str, note: str = "") -> None:
         old = table.get(name)
@@ -582,13 +728,34 @@ class PinsRecorder:
             )
 
     def record(self, artifact: str, digest: str, note: str = "") -> None:
+        self.upstream_digests[artifact] = digest
         self._apply(self.pins["downloads"], artifact, digest, note)
 
-    def download_and_record(self, url: str, dest: Path) -> None:
-        """Download the artifact and record its digest in the pins file."""
-        artifact = pin_key_from_url(url)
+    def download_and_record(
+        self, url: str, dest: Path, artifact: str | None = None
+    ) -> None:
+        """Download the artifact and record its digest in the pins file.
+
+        In the --update-pins flow the digest is recorded from upstream's
+        published checksum before any download, and `download_and_verify`
+        skips its usual check in recorder mode — so this guard is what keeps
+        the archive that gets extracted and executed in sync with the digest
+        that gets pinned. A mismatch is an incident, not a pin to refresh.
+        """
+        artifact = artifact or pin_key_from_url(url)
         download(url, dest)
-        self.record(artifact, sha256_file(dest), f" ({dest.stat().st_size} bytes)")
+        digest = sha256_file(dest)
+        expected = self.upstream_digests.get(artifact)
+        if expected is not None and expected != digest:
+            die(
+                f"{artifact} downloaded from {url} does not match the digest "
+                "recorded from upstream earlier in this run:\n"
+                f"  upstream  {expected}\n"
+                f"  served    {digest}\n"
+                "Treat this as a supply-chain incident: the pin and the "
+                "archive that is about to be extracted disagree."
+            )
+        self.record(artifact, digest, f" ({dest.stat().st_size} bytes)")
 
     def record_binary(self, kind: str, triple: str, out: Path) -> None:
         self._apply(self.pins["binaries"].setdefault(kind, {}), triple, sha256_file(out))
@@ -602,11 +769,11 @@ class PinsRecorder:
 def update_pins(force: bool) -> None:
     """Refresh scripts/sidecar_pins.json from the pinned upstream releases.
 
-    Digests come from the checksum files yt-dlp and BtbN publish for the
-    pinned release; evermeet publishes none, so its zip is downloaded and
-    pinned on first sight. Every platform's archive is also downloaded once
-    to record the extracted binary's digest, which is what ordinary builds
-    check cached binaries against.
+    Digests come from the checksum files yt-dlp, BtbN and martin-riedl
+    publish for the pinned builds; the macOS zip is cross-checked against
+    upstream's .sha256 before its pin is recorded. Every platform's archive
+    is also downloaded once to record the extracted binary's digest, which
+    is what ordinary builds check cached binaries against.
     """
     pins = load_pins()
     recorder = PinsRecorder(pins, force)
@@ -631,12 +798,20 @@ def update_pins(force: bool) -> None:
     for artifact in select_btbn_assets(btbn_sums):
         recorder.record(artifact, btbn_sums[artifact])
 
-    evermeet = f"ffmpeg-{FFMPEG_VERSION}.zip"
-    print("evermeet (macOS) publishes no checksum file; pinning the downloaded zip")
+    macos_zip = ffmpeg_macos_artifact()
+    sha_url = f"{ffmpeg_macos_url()}.sha256"
+    print(f"martin-riedl macOS build {FFMPEG_MACOS_BUILD} — digest from {sha_url}")
+    published = parse_shasums(fetch_bytes(sha_url).decode("utf-8"))
+    if "ffmpeg.zip" not in published:
+        die(f"{sha_url} does not list ffmpeg.zip")
     with tempfile.TemporaryDirectory(prefix="videofetch-pins-") as tmp_s:
-        zip_path = Path(tmp_s) / evermeet
-        download(f"{FFMPEG_EVERMEET}/{evermeet}", zip_path)
-        recorder.record(evermeet, sha256_file(zip_path), f" ({zip_path.stat().st_size} bytes)")
+        zip_path = Path(tmp_s) / "ffmpeg.zip"
+        download(ffmpeg_macos_url(), zip_path)
+        digest = sha256_file(zip_path)
+        verify_sha256(
+            "the macOS zip (upstream .sha256)", published["ffmpeg.zip"], digest
+        )
+        recorder.record(macos_zip, digest, f" ({zip_path.stat().st_size} bytes)")
 
     print("recording extracted binary digests (downloads every platform's archive)")
     with tempfile.TemporaryDirectory(prefix="videofetch-pins-") as tmp_s:
@@ -676,6 +851,11 @@ def main() -> None:
     triple = host_triple()
     system = detect_system()
     machine = detect_machine()
+    if system == "Darwin" and machine not in {"arm64", "aarch64"}:
+        die(
+            f"no ffmpeg build for macOS/{machine}: the pinned macOS sidecar "
+            "is arm64-only (Apple silicon)"
+        )
     ext = ".exe" if system == "Windows" else ""
 
     ytdlp_out = bin_dir / f"yt-dlp-{triple}{ext}"
