@@ -14,7 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14
+          # Floating on purpose: pinned macOS images retire with no warning short of failing brownouts.
+          - platform: macos-latest
             release_os: macOS
             release_arch: arm64
           - platform: windows-latest
@@ -23,10 +24,10 @@ jobs:
           - platform: windows-11-arm
             release_os: Windows
             release_arch: arm64
-          - platform: ubuntu-22.04
+          - platform: ubuntu-24.04
             release_os: Linux
             release_arch: x86_64
-          - platform: ubuntu-22.04-arm
+          - platform: ubuntu-24.04-arm
             release_os: Linux
             release_arch: arm64
 
