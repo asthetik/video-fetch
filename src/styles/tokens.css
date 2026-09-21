@@ -122,6 +122,13 @@
   --page-exit-ms: 150ms;
   --nav-transition-ms: 150ms;
   --micro-ms: 150ms;
+  /* A nav label's colour rides the sliding indicator, not the click. The
+     deselected label returns to grey fast (ease-in, DESIGN.md's "出"); the
+     selected one waits --in-delay for the pill to get under it before turning
+     white (ease-out, "进"). Whitening on click instead leaves a white label on
+     paper at 1.07:1 for the length of the travel. */
+  --nav-label-ms: 90ms;
+  --nav-label-in-delay: 70ms;
 
   --space-accent: var(--pink);
   --space-hover: rgba(115, 112, 122, 0.08);
