@@ -111,6 +111,15 @@ const CHECKS: Array<[string, string, string, number]> = [
   ["muted-ink on pressed card", "--muted-ink", "--space-selected|--surface", TEXT_MIN],
   ["accent-ink on pressed card", "--accent-ink", "--space-selected|--surface", TEXT_MIN],
   ["celebrate-ink on Hi-Res tag", "--celebrate-ink", "--celebrate-tint|--surface", TEXT_MIN],
+  // Log badges: INFO is neutral (body text on the grey chip), WARN/ERROR are
+  // louder than status chips -- a strong tint paired with a darker ink. The
+  // backdrop is --ctl-bg: .log-view, not the card surface, is what sits under
+  // a badge.
+  ["text on neutral tint (log-badge-info)", "--text", "--muted-tint|--ctl-bg", TEXT_MIN],
+  ["warn-ink-strong on ctl-bg", "--warn-ink-strong", "--ctl-bg", TEXT_MIN],
+  ["warn-ink-strong on strong tint/ctl-bg", "--warn-ink-strong", "--warn-tint-strong|--ctl-bg", TEXT_MIN],
+  ["danger-ink-strong on ctl-bg", "--danger-ink-strong", "--ctl-bg", TEXT_MIN],
+  ["danger-ink-strong on strong tint/ctl-bg", "--danger-ink-strong", "--danger-tint-strong|--ctl-bg", TEXT_MIN],
   // Focus rings are omitted on purpose: they keep the brand pink #FB7299
   // (2.64:1 on white, 2.47:1 on paper), a product decision recorded in
   // tokens.css and CHANGELOG.md rather than a target to assert.
@@ -148,7 +157,7 @@ for (const [themeName, theme] of [
 }
 
 test("every ink token is defined for both themes", () => {
-  for (const name of ["--accent-ink", "--warn-ink", "--danger-ink", "--success-ink", "--muted-ink", "--celebrate-ink"]) {
+  for (const name of ["--accent-ink", "--warn-ink", "--danger-ink", "--success-ink", "--muted-ink", "--celebrate-ink", "--warn-ink-strong", "--danger-ink-strong"]) {
     assert.ok(dark.has(name), `${name} has no dark-theme value`);
   }
 });
@@ -169,9 +178,9 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   [pagesCss, ".queue-badge.done", ["background: var(--success-tint)", "color: var(--success-ink)"]],
   [pagesCss, ".queue-badge.failed", ["background: var(--danger-tint)", "color: var(--danger-ink)"]],
   [pagesCss, ".queue-count", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
-  [pagesCss, ".log-badge-info", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
-  [pagesCss, ".log-badge-warn", ["background: var(--warn-tint)", "color: var(--warn-ink)"]],
-  [pagesCss, ".log-badge-error", ["background: var(--danger-tint)", "color: var(--danger-ink)"]],
+  [pagesCss, ".log-badge-info", ["background: var(--muted-tint)", "color: var(--text)"]],
+  [pagesCss, ".log-badge-warn", ["background: var(--warn-tint-strong)", "color: var(--warn-ink-strong)"]],
+  [pagesCss, ".log-badge-error", ["background: var(--danger-tint-strong)", "color: var(--danger-ink-strong)"]],
   [pagesCss, ".log-badge-debug", ["background: var(--muted-tint)", "color: var(--muted-ink)"]],
   [pagesCss, ".tag.hires", ["background: var(--celebrate-tint)", "color: var(--celebrate-ink)"]],
   [pagesCss, ".tag.fmt", ["background: var(--muted-tint-soft)", "color: var(--muted-ink)"]],

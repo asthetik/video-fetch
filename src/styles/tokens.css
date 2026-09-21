@@ -104,6 +104,15 @@
      stronger so it holds on the night surface (see the dark block). */
   --celebrate-tint: rgba(255, 176, 66, 0.16);
 
+  /* Log badges are louder than status chips: WARN/ERROR pair a strong tint
+     with a darker ink step, while INFO drops accent entirely -- neutral grey
+     with body ink, so the default level stops reading as a primary-action
+     colour next to the coral buttons. */
+  --warn-tint-strong: rgba(217, 138, 43, 0.28);
+  --warn-ink-strong: #7d4f15;
+  --danger-tint-strong: rgba(214, 69, 63, 0.22);
+  --danger-ink-strong: #a2302c;
+
   --seg-track: #efe8de;
   --radius-card: 18px;
   --radius-ctl: 10px;
@@ -151,9 +160,16 @@ html[data-theme="dark"] {
   --danger-tint: rgba(226, 96, 96, 0.15);
   --success-tint: rgba(75, 190, 139, 0.16);
   --celebrate-tint: rgba(255, 176, 66, 0.18);
-  /* Raised from 0.12 to sit in the same band as its siblings, so the three
-     log badges read with equal weight in dark mode. */
+  /* Raised from 0.12 to sit in the same band as its siblings, so the running
+     queue chip reads with equal weight in dark mode. */
   --accent-tint: rgba(242, 89, 111, 0.15);
+
+  /* Log badge strong grades: dark has thin contrast headroom, so the tints
+     step up only slightly and the inks keep their regular dark values. */
+  --warn-tint-strong: rgba(227, 160, 76, 0.24);
+  --warn-ink-strong: #e3a04c;
+  --danger-tint-strong: rgba(226, 96, 96, 0.17);
+  --danger-ink-strong: #f07070;
 
   --seg-track: #2b2e36;
   --space-hover: rgba(160, 163, 174, 0.12);

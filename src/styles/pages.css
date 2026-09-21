@@ -693,18 +693,18 @@
 }
 
 .log-badge-info {
-  background: var(--accent-tint);
-  color: var(--accent-ink);
+  background: var(--muted-tint);
+  color: var(--text);
 }
 
 .log-badge-warn {
-  background: var(--warn-tint);
-  color: var(--warn-ink);
+  background: var(--warn-tint-strong);
+  color: var(--warn-ink-strong);
 }
 
 .log-badge-error {
-  background: var(--danger-tint);
-  color: var(--danger-ink);
+  background: var(--danger-tint-strong);
+  color: var(--danger-ink-strong);
 }
 
 /* Release writes info and above, so DEBUG only appears in debug builds or

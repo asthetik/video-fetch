@@ -6,6 +6,7 @@
 
 ### Changed
 
+- 日志页 INFO/WARN/ERROR 徽章重新配色：INFO 不再用与主按钮同色相的珊瑚 tint，改为中性灰底（`--muted-tint`）＋正文墨，常态级别不再读作主操作色；WARN 与 ERROR 新增强档 token（`--warn-tint-strong`／`--danger-tint-strong` 底，配 `--warn-ink-strong`／`--danger-ink-strong` 字），底色加浓、浅色墨各深一档，比状态胶囊更醒目。四个徽章在浅色与深色主题下文字对底均 ≥ 4.5:1（WCAG AA），对比度守卫测试改为对准 `.log-view` 实际渲染徽章的 `--ctl-bg` 背景并覆盖新 token。
 - 「关于」页的作者、版本、许可证、源码四行改为整行可点的卡片：点击分别打开作者 GitHub 主页、当前版本的发行说明（`releases/tag/v{版本}`）、许可证全文与仓库首页，卡片右侧标出去向说明（GitHub 主页 / 发行说明 / 许可证全文 / GitHub 仓库）并配外链图标，让去处一眼可见；悬停、键盘聚焦（取粉 2px 环）与按下均有状态反馈，源码行的展示值由完整 URL 收敛为 `asthetik/video-fetch`。
 - 构建与测试所用的 Python 由 3.12 升级到 3.14.7：版本号集中固定在新文件 `.python-version`，CI（frontend 之外的 rust / scripts 两个 job）与发布流程的三处 `setup-python` 统一改为读取该文件，今后升级只需改这一处。
 - 侧载脚本的 tar 解压改为显式声明 `filter="data"`：Python 3.14 已把该过滤器变成默认值，显式传参让路径穿越防护不再随解释器版本变化（3.12–3.14 行为一致，更老的解释器会直接报错而非无防护解压）；同时 Linux 分支的解压目标改为独立子目录，不再写回压缩包自身所在目录，并补齐了对应的单元测试。
