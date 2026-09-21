@@ -75,13 +75,13 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
       - name: Cache sidecar binaries
         uses: actions/cache@v6
         with:
           path: src-tauri/binaries
-          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/requirements-sidecars.txt', 'scripts/fetch_sidecars.py') }}
+          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/requirements-sidecars.txt', 'scripts/fetch_sidecars.py', 'scripts/sidecar_pins.json') }}
 
       - name: Fetch sidecar binaries
         run: python scripts/fetch_sidecars.py
