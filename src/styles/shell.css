@@ -29,6 +29,7 @@
 }
 
 .nav-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
@@ -39,12 +40,29 @@
   color: var(--muted);
   font-size: 0.9rem;
   cursor: pointer;
-  transition: color var(--nav-transition-ms) ease, background-color var(--nav-transition-ms) ease;
+  transition: color var(--nav-label-ms) ease-in, background-color var(--nav-transition-ms) ease;
+}
+
+/* Lifted above .nav-indicator: the pill is absolutely positioned, so it
+   would otherwise paint over the icon and label. */
+.nav-btn svg,
+.nav-btn-label {
+  position: relative;
 }
 
 .nav-btn svg {
   width: 16px;
   height: 16px;
+}
+
+/* One shared element that travels between buttons (motion layoutId in
+   App.tsx) rather than two backgrounds cross-fading, so a selection change
+   reads as the selection moving instead of blinking twice. */
+.nav-indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
 }
 
 .nav-btn:hover {
@@ -54,12 +72,16 @@
 
 .nav-btn.active {
   color: #fff;
-  /* The active menu button keeps the full-strength brand coral: button fills
-     stay as designed. Consequence: white on #F2596F is 3.26:1, below the
-     4.5:1 small-text bar -- a deliberate, documented exception (see the
+  /* Held back until the pill is under the label: whitening on click puts a
+     white label on paper at 1.07:1 for the whole travel. This rule outranks
+     the base one, so prefers-reduced-motion must name it too (see below). */
+  transition: color var(--nav-label-ms) ease-out var(--nav-label-in-delay),
+    background-color var(--nav-transition-ms) ease;
+  /* The selected menu button keeps the full-strength brand coral: button
+     fills stay as designed. Consequence: white on #F2596F is 3.26:1, below
+     the 4.5:1 small-text bar -- a deliberate, documented exception (see the
      CHANGELOG "Unreleased" entry and the comment above --accent-ink in
-     tokens.css). */
-  background: var(--accent);
+     tokens.css). The fill itself lives on .nav-indicator. */
   font-weight: 600;
 }
 
@@ -129,6 +151,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .nav-btn,
+  .nav-btn.active,
   .space-row {
     transition: none;
   }

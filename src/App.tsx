@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { House, History, Settings2, FileText, Info } from "lucide-react";
-import { MotionConfig } from "motion/react";
+import { motion, MotionConfig } from "motion/react";
 import { Toaster } from "sonner";
 import { AuthChip } from "./components/AuthChip";
 import { PageTransition, type AppPage } from "./components/PageTransition";
@@ -26,6 +26,10 @@ const NAV_ITEMS: {
   { id: "about", label: "关于", icon: Info },
 ];
 
+// DESIGN.md motion rules: a moving element reads as ease-in-out, and
+// micro-interactions stay inside the 90-160ms band, so this sits at the cap.
+const NAV_INDICATOR_S = 0.16;
+
 function App() {
   const { resolved } = useTheme();
   const [page, setPage] = useState<Page>("home");
@@ -39,21 +43,31 @@ function App() {
       <div className="app">
         <header className="app-header">
           <nav className="app-nav" aria-label="主导航">
-            {NAV_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`nav-btn${page === item.id ? " active" : ""}`}
-                data-action={`nav-${item.id}`}
-                onClick={() => {
-                  setPage(item.id);
-                }}
-                aria-current={page === item.id ? "page" : undefined}
-              >
-                <item.icon strokeWidth={2} />
-                {item.label}
-              </button>
-            ))}
+            {NAV_ITEMS.map((item) => {
+              const active = page === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`nav-btn${active ? " active" : ""}`}
+                  data-action={`nav-${item.id}`}
+                  onClick={() => {
+                    setPage(item.id);
+                  }}
+                  aria-current={active ? "page" : undefined}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="nav-indicator"
+                      className="nav-indicator"
+                      transition={{ duration: NAV_INDICATOR_S, ease: "easeInOut" }}
+                    />
+                  )}
+                  <item.icon strokeWidth={2} />
+                  <span className="nav-btn-label">{item.label}</span>
+                </button>
+              );
+            })}
           </nav>
           <div className="app-header-end">
             <AuthChip />
