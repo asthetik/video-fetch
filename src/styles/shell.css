@@ -43,8 +43,10 @@
   transition: color var(--nav-label-ms) ease-in, background-color var(--nav-transition-ms) ease;
 }
 
-/* Lifted above .nav-indicator: the pill is absolutely positioned, so it
-   would otherwise paint over the icon and label. */
+/* Lifted above .nav-indicator so the active label paints on the coral fill
+   rather than under it. Document order decides the rest: the pill is its own
+   button's first child, so on a jump the buttons ahead of it paint under the
+   pill while the ones behind it paint over. */
 .nav-btn svg,
 .nav-btn-label {
   position: relative;
