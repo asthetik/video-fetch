@@ -14,19 +14,44 @@ import { join } from "node:path";
 
 const TOKENS_CSS = join(import.meta.dirname, "..", "styles", "tokens.css");
 
-function cssBlock(css: string, selector: string): string {
-  const start = css.indexOf(selector);
-  assert.notEqual(start, -1, `tokens.css is missing the ${selector} block`);
-  const open = css.indexOf("{", start);
+function cssBlock(source: string, selector: string): string {
+  // Comments are dropped first: they sit between rules, carry commas, and
+  // name selectors in prose, any of which would otherwise land in the slice
+  // that gets read as the next rule's selector list.
+  const css = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  // The selector has to be a whole member of a top-level rule's selector
+  // list. A substring search finds `.about-card-hint` inside a longer name,
+  // and taking the first hit can hand back a dark-theme override instead of
+  // the base rule the assertions are about.
   let depth = 0;
-  for (let i = open; i < css.length; i++) {
-    if (css[i] === "{") depth++;
-    else if (css[i] === "}") {
+  let ruleStart = 0;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (ch === "{") {
+      const wanted =
+        depth === 0 &&
+        css
+          .slice(ruleStart, i)
+          .split(",")
+          .some((part) => part.trim() === selector);
+      depth++;
+      if (!wanted) continue;
+      let end = i + 1;
+      let inner = 1;
+      while (end < css.length && inner > 0) {
+        if (css[end] === "{") inner++;
+        else if (css[end] === "}") inner--;
+        end++;
+      }
+      assert.equal(inner, 0, `unterminated ${selector} block`);
+      return css.slice(i + 1, end - 1);
+    }
+    if (ch === "}") {
       depth--;
-      if (depth === 0) return css.slice(open + 1, i);
+      if (depth === 0) ruleStart = i + 1;
     }
   }
-  throw new Error(`unterminated ${selector} block`);
+  throw new Error(`no top-level ${selector} rule in the stylesheet`);
 }
 
 function readTokens(block: string): Map<string, string> {
