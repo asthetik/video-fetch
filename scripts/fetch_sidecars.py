@@ -25,8 +25,9 @@ Integrity:
   overwritten unless --force is passed, so a digest failure cannot be
   waved away by re-running the update (a human must look at the diff).
   yt-dlp and BtbN publish checksum files that --update-pins cross-checks;
-  evermeet publishes none, so its macOS zip is pinned on first sight
-  (verify that one out-of-band).
+  evermeet publishes none, so its macOS zip is pinned on first sight.
+  Run scripts/verify_evermeet.py out-of-band to confirm that zip is really
+  evermeet's (PGP signature) and still matches its pin.
 
 Naming:
   binaries/yt-dlp-{TARGET_TRIPLE}[.exe]

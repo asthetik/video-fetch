@@ -59,4 +59,4 @@ jobs:
           python-version-file: ".python-version"
       - name: Unit test release helpers
         working-directory: scripts
-        run: python -m unittest test_release_asset_name.py test_fetch_sidecars.py -v
+        run: python -m unittest discover -p "test_*.py" -v
