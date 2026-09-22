@@ -73,6 +73,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 YTDLP_DOWNLOAD_BASE = "https://github.com/yt-dlp/yt-dlp/releases/download"
@@ -124,6 +125,22 @@ def die_unverified(dest: Path, msg: str) -> None:
     """
     dest.unlink(missing_ok=True)
     die(msg)
+
+
+def verify_written(path: Path, verify: Callable[..., None], *args: object) -> None:
+    """Run `verify(path, *args)`; if it dies, remove the bytes it rejected.
+
+    fetch_ffmpeg copies the extracted binary to its final sidecar path and
+    only then checks arch or signature. A die() from that check must not
+    leave the rejected bytes there: the next `tauri build` would bundle
+    them. The verifiers stay pure — this wrapper owns the cleanup, the
+    same way download_and_verify does on the download paths.
+    """
+    try:
+        verify(path, *args)
+    except SystemExit:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def host_triple() -> str:
@@ -743,7 +760,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
                 src = find_one(extract_dir, "ffmpeg")
             shutil.copy2(src, out)
             make_executable(out)
-            verify_macos_ffmpeg(out)
+            verify_written(out, verify_macos_ffmpeg)
             return
 
         if system == "Linux":
@@ -767,7 +784,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
                 die("ffmpeg binary not found in archive")
             shutil.copy2(candidates[0], out)
             make_executable(out)
-            verify_btbn_ffmpeg_arch(out, system, machine)
+            verify_written(out, verify_btbn_ffmpeg_arch, system, machine)
             return
 
         if system == "Windows":
@@ -782,7 +799,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
                 zf.extractall(work)
             src = find_one(work, "ffmpeg.exe")
             shutil.copy2(src, out)
-            verify_btbn_ffmpeg_arch(out, system, machine)
+            verify_written(out, verify_btbn_ffmpeg_arch, system, machine)
             return
 
         die(f"Unsupported OS for ffmpeg: {system}")

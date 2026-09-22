@@ -703,6 +703,22 @@ class TestFetchFfmpegLinux(TmpDirTestCase):
         with self.assertRaises(SystemExit):
             fetch_ffmpeg("Linux", "aarch64", out, load_pins())
 
+    def test_x64_payload_under_the_arm64_asset_is_removed(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-unknown-linux-gnu"
+        self.install_fake_download(
+            [
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-linuxarm64-gpl-9.0/bin/ffmpeg",
+                    elf_header(0x3E),
+                )
+            ]
+        )
+        with self.assertRaises(SystemExit):
+            fetch_ffmpeg("Linux", "aarch64", out, load_pins())
+        self.assertFalse(
+            out.exists(), "rejected bytes must not stay at the sidecar path"
+        )
+
 
 class TestFetchFfmpegWindows(TmpDirTestCase):
     def install_fake_download(self, members: list[tuple[str, bytes]]) -> None:
@@ -748,6 +764,22 @@ class TestFetchFfmpegWindows(TmpDirTestCase):
         )
         with self.assertRaises(SystemExit):
             fetch_ffmpeg("Windows", "ARM64", out, load_pins())
+
+    def test_x64_payload_under_the_arm64_asset_is_removed(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-pc-windows-msvc.exe"
+        self.install_fake_download(
+            [
+                (
+                    "ffmpeg-n9.0.2-3-ga5923073bf-winarm64-gpl-9.0/bin/ffmpeg.exe",
+                    pe_header(0x8664),
+                )
+            ]
+        )
+        with self.assertRaises(SystemExit):
+            fetch_ffmpeg("Windows", "ARM64", out, load_pins())
+        self.assertFalse(
+            out.exists(), "rejected bytes must not stay at the sidecar path"
+        )
 
 
 class TestSha256Hex(unittest.TestCase):
@@ -1568,6 +1600,27 @@ class TestFetchFfmpegMacos(TmpDirTestCase):
         self.install_fake_verify()
         fetch_ffmpeg("Darwin", "arm64", out, load_pins())
         self.assertTrue(out.read_bytes().startswith(thin_arm64_header()[:4]))
+
+    def test_intel_payload_is_removed(self) -> None:
+        out = self.tmpdir() / "ffmpeg-aarch64-apple-darwin"
+
+        def fake_download(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("ffmpeg", thin_x86_64_header() + b"\x00" * 64)
+            Path(dest).write_bytes(buf.getvalue())
+
+        original = fetch_sidecars.download_and_verify
+        fetch_sidecars.download_and_verify = fake_download
+        self.addCleanup(setattr, fetch_sidecars, "download_and_verify", original)
+
+        with self.assertRaises(SystemExit):
+            fetch_ffmpeg("Darwin", "arm64", out, load_pins())
+        self.assertFalse(
+            out.exists(), "rejected bytes must not stay at the sidecar path"
+        )
 
 
 if __name__ == "__main__":
