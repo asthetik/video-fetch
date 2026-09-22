@@ -168,6 +168,63 @@ class TestYtdlpPinKeys(unittest.TestCase):
                     )
 
 
+class TestYtdlpCacheAnchor(TmpDirTestCase):
+    """A warm cache must not outlive the release it was fetched for.
+
+    `binaries.yt-dlp` is keyed by target triple, so bumping the version pin
+    alone leaves a cache that still matches it. The versioned downloads pin
+    is what ties the cache to the pinned release.
+    """
+
+    TRIPLE = "x86_64-unknown-linux-gnu"
+    RELEASE_KEY = "yt-dlp_linux@2026.08.19"
+
+    def pins(self, release: str | None, binary: str | None = BLOB_SHA256) -> dict:
+        return {
+            "downloads": {} if release is None else {self.RELEASE_KEY: release},
+            "binaries": {} if binary is None else {"yt-dlp": {self.TRIPLE: binary}},
+        }
+
+    def cached(self, payload: bytes = BLOB) -> Path:
+        path = self.tmpdir() / f"yt-dlp-{self.TRIPLE}"
+        path.write_bytes(payload)
+        return path
+
+    def needs_fetch(self, path: Path, pins: dict) -> bool:
+        return fetch_sidecars.ytdlp_needs_fetch(
+            path, pins, self.TRIPLE, "Linux", "x86_64", TAG
+        )
+
+    def test_cache_matching_the_pinned_release_is_kept(self) -> None:
+        self.assertFalse(self.needs_fetch(self.cached(), self.pins(BLOB_SHA256)))
+
+    def test_cache_missing_its_release_pin_is_refetched(self) -> None:
+        # requirements-sidecars.txt bumped and committed without
+        # --update-pins: the new release has no key, while the cached binary
+        # still matches the superseded release's binaries pin. Cold release
+        # runners would fail loudly; a warm cache must not ship the old one.
+        self.assertTrue(self.needs_fetch(self.cached(), self.pins(release=None)))
+
+    def test_cache_pinned_to_another_release_is_refetched(self) -> None:
+        self.assertTrue(self.needs_fetch(self.cached(), self.pins("9" * 64)))
+
+    def test_cache_holding_other_bytes_is_refetched(self) -> None:
+        self.assertTrue(
+            self.needs_fetch(self.cached(b"substituted bytes"), self.pins(BLOB_SHA256))
+        )
+
+    def test_cache_without_a_binary_pin_is_refetched(self) -> None:
+        self.assertTrue(
+            self.needs_fetch(self.cached(), self.pins(BLOB_SHA256, binary=None))
+        )
+
+    def test_unsupported_platform_dies(self) -> None:
+        with self.assertRaises(SystemExit):
+            fetch_sidecars.ytdlp_needs_fetch(
+                self.cached(), self.pins(BLOB_SHA256), self.TRIPLE, "Linux", "riscv64", TAG
+            )
+
+
 class TestPinsRecorderPolicy(unittest.TestCase):
     """What the versioned key buys: a bump is recorded, a rewrite is not."""
 
@@ -255,6 +312,108 @@ class TestUpdatePinsRecordsVersionedKeys(unittest.TestCase):
         self.assertNotIn("yt-dlp_macos", recorded)
         self.assertFalse(set(sums) & set(recorded))
         self.assertNotIn("yt-dlp", created[0].pins["binaries"])
+
+
+class TestUpdatePinsPrunesSupersededFfmpegAssets(unittest.TestCase):
+    """A build bump rewrites the asset names the ffmpeg keys carry. Left
+    behind, the superseded keys make btbn_asset_name ambiguous and turn the
+    binary re-record into CHANGED/--force. The update prunes them and drops
+    binaries.ffmpeg, the way the yt-dlp pass does. Runs are stopped at the
+    macOS checksum fetch: after the prune, before any download."""
+
+    def btbn_name(self, build: str, arch: str) -> str:
+        ext = "zip" if arch.startswith("win") else "tar.xz"
+        return f"ffmpeg-n9.0.2-{build}-{arch}-gpl-{ffmpeg_branch()}.{ext}"
+
+    def btbn_sums(self, build: str = "9-gcafebabe") -> dict[str, str]:
+        return {
+            self.btbn_name(build, arch): "a" * 64
+            for arch in ("linux64", "linuxarm64", "win64", "winarm64")
+        }
+
+    def ytdlp_sums(self) -> dict[str, str]:
+        return {
+            name: "b" * 64
+            for name in (
+                "yt-dlp_linux",
+                "yt-dlp_linux_aarch64",
+                "yt-dlp_macos",
+                "yt-dlp.exe",
+                "yt-dlp_arm64.exe",
+            )
+        }
+
+    def run_update(
+        self, pins: dict, btbn_sums: dict, ytdlp_sums: dict
+    ) -> PinsRecorder:
+        created: list[PinsRecorder] = []
+
+        class Spy(PinsRecorder):
+            def __init__(self, table: dict, force: bool) -> None:
+                super().__init__(table, force)
+                created.append(self)
+
+        with (
+            mock.patch.object(fetch_sidecars, "load_pins", return_value=pins),
+            mock.patch.object(fetch_sidecars, "PinsRecorder", Spy),
+            mock.patch.object(fetch_sidecars, "load_ytdlp_version", return_value=TAG),
+            mock.patch.object(
+                fetch_sidecars, "ytdlp_upstream_shasums", return_value=ytdlp_sums
+            ),
+            mock.patch.object(
+                fetch_sidecars, "btbn_upstream_shasums", return_value=btbn_sums
+            ),
+            mock.patch.object(fetch_sidecars, "fetch_bytes", side_effect=SystemExit),
+        ):
+            with self.assertRaises(SystemExit):
+                fetch_sidecars.update_pins(force=False)
+        return created[0]
+
+    def test_prunes_superseded_assets_and_drops_binaries(self) -> None:
+        sums = self.btbn_sums()
+        ytdlp_sums = self.ytdlp_sums()
+        old_btbn = self.btbn_name("3-ga5923073bf", "linux64")
+        old_macos = "ffmpeg-macos-arm64-1111_9.0.1.zip"
+        ytdlp_key = ytdlp_pin_key("yt-dlp_linux", TAG)
+        pins = {
+            "downloads": {
+                old_btbn: "c" * 64,
+                old_macos: "d" * 64,
+                ytdlp_key: ytdlp_sums["yt-dlp_linux"],
+            },
+            # The triple-keyed ffmpeg digests describe the superseded build:
+            # re-recording the new one under those unchanged keys is the
+            # CHANGED/--force routine the prune exists to prevent.
+            "binaries": {
+                "ffmpeg": {"x86_64-unknown-linux-gnu": "e" * 64},
+                "yt-dlp": {"x86_64-unknown-linux-gnu": ytdlp_sums["yt-dlp_linux"]},
+            },
+        }
+        recorder = self.run_update(pins, sums, ytdlp_sums)
+
+        downloads = recorder.pins["downloads"]
+        for name in sums:
+            self.assertEqual(downloads.get(name), sums[name])
+        self.assertNotIn(old_btbn, downloads)
+        self.assertNotIn(old_macos, downloads)
+        self.assertIn(ytdlp_key, downloads, "the yt-dlp pass must be untouched")
+        self.assertNotIn("ffmpeg", recorder.pins["binaries"])
+        self.assertIn("yt-dlp", recorder.pins["binaries"])
+        self.assertFalse(recorder.stale, "a build bump must not need --force")
+
+    def test_a_rebuilt_asset_under_an_unchanged_name_still_demands_force(
+        self,
+    ) -> None:
+        # The prune must not launder a rebuild: bytes served under a name
+        # this run still pins are CHANGED, and that stays an incident until
+        # a human passes --force.
+        sums = self.btbn_sums()
+        rebuilt = self.btbn_name("9-gcafebabe", "linux64")
+        pins = {"downloads": {rebuilt: "c" * 64}, "binaries": {}}
+        recorder = self.run_update(pins, sums, self.ytdlp_sums())
+
+        self.assertTrue(recorder.stale)
+        self.assertEqual(recorder.pins["downloads"][rebuilt], "c" * 64)
 
 
 class TestNormalizeYtdlpVersion(unittest.TestCase):
@@ -386,6 +545,67 @@ class TestFfmpegUrl(unittest.TestCase):
         self.assertRegex(FFMPEG_VERSION, r"^\d+\.\d+\.\d+$")
 
 
+class TestBtbnAssetResolution(unittest.TestCase):
+    """--update-pins resolves each platform's asset against the run's
+    in-memory table: the file the run has not written yet still holds the
+    superseded build's names, so the recording loop would otherwise fetch
+    the old build (or die on two matches under the same branch)."""
+
+    def new_name(self, arch: str) -> str:
+        ext = "zip" if arch.startswith("win") else "tar.xz"
+        return f"ffmpeg-n9.0.2-9-gcafebabe-{arch}-gpl-{ffmpeg_branch()}.{ext}"
+
+    def no_disk_reads(self):
+        return mock.patch.object(
+            fetch_sidecars,
+            "load_pins",
+            side_effect=AssertionError("read the pins file"),
+        )
+
+    def test_asset_name_comes_from_the_passed_downloads(self) -> None:
+        downloads = {self.new_name("linux64"): "a" * 64}
+        with self.no_disk_reads():
+            self.assertEqual(
+                fetch_sidecars.btbn_asset_name("Linux", "x86_64", downloads),
+                self.new_name("linux64"),
+            )
+
+    def test_url_comes_from_the_passed_downloads(self) -> None:
+        downloads = {self.new_name("win64"): "a" * 64}
+        with self.no_disk_reads():
+            url = fetch_sidecars.ffmpeg_download_url("Windows", "x86_64", downloads)
+        assert url is not None
+        self.assertTrue(url.endswith(self.new_name("win64")), url)
+
+
+class TestFetchFfmpegUpdateResolution(TmpDirTestCase):
+    """The --update-pins recording loop must resolve the URL from the
+    recorder's table — this run's pruned superseded keys and newly recorded
+    names — not from the on-disk file, which is written only at the end."""
+
+    def test_url_is_resolved_from_the_recorder_table(self) -> None:
+        name = f"ffmpeg-n9.0.2-9-gcafebabe-linux64-gpl-{ffmpeg_branch()}.tar.xz"
+        recorder = PinsRecorder({"downloads": {name: "a" * 64}, "binaries": {}}, False)
+        seen: list[str] = []
+
+        def fake(url, dest, pins, artifact=None):
+            seen.append(url)
+            raise SystemExit
+
+        with (
+            mock.patch.object(fetch_sidecars, "download_and_verify", fake),
+            mock.patch.object(
+                fetch_sidecars,
+                "load_pins",
+                side_effect=AssertionError("read the pins file"),
+            ),
+        ):
+            with self.assertRaises(SystemExit):
+                fetch_ffmpeg("Linux", "x86_64", self.tmpdir() / "ffmpeg", recorder)
+        self.assertTrue(seen, "download_and_verify was never reached")
+        self.assertTrue(seen[0].endswith(name), seen)
+
+
 class TestExtractTarXz(TmpDirTestCase):
     def write_archive(self, name: str, data: bytes = b"binary\n") -> Path:
         archive = self.tmpdir() / "ffmpeg.tar.xz"
@@ -459,7 +679,7 @@ class TestFetchFfmpegLinux(TmpDirTestCase):
                 ("ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0/share/ffmpeg", b"decoy\n"),
             ]
         )
-        fetch_ffmpeg("Linux", "x86_64", out, {"downloads": {}})
+        fetch_ffmpeg("Linux", "x86_64", out, load_pins())
         self.assertEqual(out.read_bytes(), elf_header(0x3E))
 
     def test_archive_without_bin_ffmpeg_dies(self) -> None:
@@ -468,7 +688,7 @@ class TestFetchFfmpegLinux(TmpDirTestCase):
             [("ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0/share/ffmpeg", b"decoy\n")]
         )
         with self.assertRaises(SystemExit):
-            fetch_ffmpeg("Linux", "x86_64", out, {"downloads": {}})
+            fetch_ffmpeg("Linux", "x86_64", out, load_pins())
 
     def test_x64_payload_under_the_arm64_asset_dies(self) -> None:
         out = self.tmpdir() / "ffmpeg-aarch64-unknown-linux-gnu"
@@ -481,7 +701,7 @@ class TestFetchFfmpegLinux(TmpDirTestCase):
             ]
         )
         with self.assertRaises(SystemExit):
-            fetch_ffmpeg("Linux", "aarch64", out, {"downloads": {}})
+            fetch_ffmpeg("Linux", "aarch64", out, load_pins())
 
 
 class TestFetchFfmpegWindows(TmpDirTestCase):
@@ -513,7 +733,7 @@ class TestFetchFfmpegWindows(TmpDirTestCase):
                 ),
             ]
         )
-        fetch_ffmpeg("Windows", "AMD64", out, {"downloads": {}})
+        fetch_ffmpeg("Windows", "AMD64", out, load_pins())
         self.assertEqual(out.read_bytes(), pe_header(0x8664))
 
     def test_x64_payload_under_the_arm64_asset_dies(self) -> None:
@@ -527,7 +747,7 @@ class TestFetchFfmpegWindows(TmpDirTestCase):
             ]
         )
         with self.assertRaises(SystemExit):
-            fetch_ffmpeg("Windows", "ARM64", out, {"downloads": {}})
+            fetch_ffmpeg("Windows", "ARM64", out, load_pins())
 
 
 class TestSha256Hex(unittest.TestCase):
@@ -749,6 +969,21 @@ class TestPinCoverage(unittest.TestCase):
         pins = load_pins()
         self.assertIn(ffmpeg_macos_artifact(), pins["downloads"])
 
+    def test_no_superseded_ffmpeg_keys(self) -> None:
+        # BtbN's names embed the build, so a bump adds keys. For the pinned
+        # branch btbn_asset_name already dies on two matches, but a key from
+        # another branch or a superseded macOS build would linger unnoticed.
+        downloads = load_pins()["downloads"]
+        self.assertEqual(
+            [n for n in downloads if n.startswith("ffmpeg-macos-")],
+            [ffmpeg_macos_artifact()],
+        )
+        btbn = [n for n in downloads if n.startswith("ffmpeg-n")]
+        self.assertTrue(btbn, "the pinned BtbN assets must be in the pins file")
+        for name in btbn:
+            with self.subTest(name=name):
+                self.assertIn(f"-gpl-{ffmpeg_branch()}.", name)
+
     def test_no_superseded_ytdlp_keys(self) -> None:
         # ffmpeg enforces one asset per arch (btbn_asset_name dies on two);
         # yt-dlp's equivalent is this guard: only the pinned release's keys.
@@ -838,7 +1073,7 @@ class TestFetchFfmpegTempIsolation(unittest.TestCase):
             ):
                 with self.subTest(platform=f"{system}/{machine}"):
                     out = out_dir / name
-                    fetch_sidecars.fetch_ffmpeg(system, machine, out, {"downloads": {}})
+                    fetch_sidecars.fetch_ffmpeg(system, machine, out, load_pins())
                     self.assertEqual(out.read_bytes(), want)
 
             self.assertEqual(len(work_dirs), 3, "each call needs its own temp dir")
@@ -1208,6 +1443,89 @@ class TestPinsRecorderDownloadGuard(TmpDirTestCase):
             )
 
 
+class TestFailedDownloadsLeaveNoBytes(TmpDirTestCase):
+    """A failed download or verification must not leave its bytes at the
+    destination. fetch_sidecars re-checks the digest on its next run, but a
+    `tauri build` in between would bundle whatever sits there — for yt-dlp,
+    the destination is the final sidecar path."""
+
+    def stub_download(self, payload: bytes) -> None:
+        patcher = mock.patch.object(
+            fetch_sidecars,
+            "download",
+            lambda url, dest: Path(dest).write_bytes(payload),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_mismatched_download_is_removed(self) -> None:
+        dest = self.tmpdir() / "yt-dlp-x86_64-unknown-linux-gnu"
+        self.stub_download(b"substituted bytes")
+        with self.assertRaises(SystemExit):
+            fetch_sidecars.download_and_verify(
+                "https://example.invalid/yt-dlp_linux",
+                dest,
+                {"downloads": {"yt-dlp_linux": "a" * 64}, "binaries": {}},
+            )
+        self.assertFalse(dest.exists(), "unverified bytes must be removed")
+
+    def test_a_missing_pin_dies_before_any_download(self) -> None:
+        dest = self.tmpdir() / "yt-dlp-x86_64-unknown-linux-gnu"
+        urls: list[str] = []
+        patcher = mock.patch.object(
+            fetch_sidecars, "download", lambda url, dest: urls.append(url)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with self.assertRaises(SystemExit):
+            fetch_sidecars.download_and_verify(
+                "https://example.invalid/yt-dlp_linux",
+                dest,
+                {"downloads": {}, "binaries": {}},
+            )
+        self.assertEqual(urls, [], "an unpinned artifact must not be downloaded")
+        self.assertFalse(dest.exists())
+
+    def test_recorder_without_an_upstream_digest_removes_the_bytes(self) -> None:
+        recorder = PinsRecorder({"downloads": {}, "binaries": {}}, force=False)
+        self.stub_download(b"bytes no checksum file described")
+        dest = self.tmpdir() / "ffmpeg.zip"
+        with self.assertRaises(SystemExit):
+            recorder.download_and_record(
+                "https://example.invalid/ffmpeg.zip", dest, "ffmpeg.zip"
+            )
+        self.assertFalse(dest.exists())
+
+    def test_a_download_that_fails_midway_removes_the_partial_file(self) -> None:
+        dest = self.tmpdir() / "yt-dlp-x86_64-unknown-linux-gnu"
+
+        class ResetAfterFirstRead:
+            reads = 0
+
+            def read(self, size: int = -1) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    return b"partial bytes"
+                raise OSError("connection reset")
+
+            def __enter__(self) -> "ResetAfterFirstRead":
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        patcher = mock.patch.object(
+            fetch_sidecars,
+            "_open_url",
+            lambda url, headers=None: ResetAfterFirstRead(),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with self.assertRaises(SystemExit):
+            fetch_sidecars.download("https://example.invalid/yt-dlp_linux", dest)
+        self.assertFalse(dest.exists())
+
+
 class TestFetchFfmpegMacos(TmpDirTestCase):
     def write_zip(self, dest: Path) -> None:
         buf = io.BytesIO()
@@ -1240,7 +1558,7 @@ class TestFetchFfmpegMacos(TmpDirTestCase):
         out = self.tmpdir() / "ffmpeg-aarch64-apple-darwin"
         calls = self.install_fake_download()
         seen = self.install_fake_verify()
-        fetch_ffmpeg("Darwin", "arm64", out, {"downloads": {}})
+        fetch_ffmpeg("Darwin", "arm64", out, load_pins())
         self.assertEqual(calls, [(ffmpeg_macos_url(), ffmpeg_macos_artifact())])
         self.assertEqual(seen, [out])
 
@@ -1248,7 +1566,7 @@ class TestFetchFfmpegMacos(TmpDirTestCase):
         out = self.tmpdir() / "ffmpeg-aarch64-apple-darwin"
         self.install_fake_download()
         self.install_fake_verify()
-        fetch_ffmpeg("Darwin", "arm64", out, {"downloads": {}})
+        fetch_ffmpeg("Darwin", "arm64", out, load_pins())
         self.assertTrue(out.read_bytes().startswith(thin_arm64_header()[:4]))
 
 
