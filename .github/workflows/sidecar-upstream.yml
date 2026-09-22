@@ -65,7 +65,7 @@ jobs:
             echo "yt-dlp 的摘要变化要用 \`--force\`——它的 pin 键是不带版本号的资产名，"
             echo "所以「版本升级」和「上游被篡改」在工具眼里一样，必须人工确认。"
           } > body.md
-          existing=$(gh issue list --state open --search "$marker in:title" \
+          existing=$(gh issue list --state open --search "sidecar-upstream in:title" \
             --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body-file body.md
