@@ -31,8 +31,10 @@ Integrity:
   martin-riedl's asset names embed the build, and yt-dlp's
   version-independent names get the release tag appended
   (`yt-dlp_linux@2026.08.19`). A bump therefore adds keys, which
-  --update-pins records without --force, while a digest that changes under
-  an unchanged key stays an incident.
+  --update-pins records without --force while pruning the superseded
+  release's keys, and a digest that changes under an unchanged key stays
+  an incident.
+
   The macOS binary is additionally asserted to be an arm64 Mach-O and,
   on macOS, a Developer ID-signed binary: evermeet's Intel-only build was
   shipped as the macOS sidecar in 0.4.0 and could not run on Apple
@@ -656,7 +658,6 @@ def fetch_ytdlp(
     out: Path,
     version: str,
     pins: dict,
-    recorder: "PinsRecorder | None" = None,
 ) -> None:
     print(f"Downloading yt-dlp {version}...")
     try:
@@ -664,10 +665,10 @@ def fetch_ytdlp(
         url = ytdlp_download_url(system, machine, version)
     except ValueError as e:
         die(str(e))
-    if recorder is None:
-        download_and_verify(url, out, pins, artifact=ytdlp_pin_key(artifact, version))
-    else:
-        download(url, out)  # digest recorded in the update pass
+    # In update mode `pins` is the PinsRecorder, and download_and_verify's
+    # isinstance dispatch checks the downloaded bytes against the digest
+    # recorded from SHA2-256SUMS — there is deliberately no unverified path.
+    download_and_verify(url, out, pins, artifact=ytdlp_pin_key(artifact, version))
     make_executable(out)
 
 
@@ -870,7 +871,13 @@ class PinsRecorder:
         download(url, dest)
         digest = sha256_file(dest)
         expected = self.upstream_digests.get(artifact)
-        if expected is not None and expected != digest:
+        if expected is None:
+            die(
+                f"no upstream digest was recorded for {artifact!r} before "
+                f"downloading {url}; refusing to pin bytes no checksum "
+                "file described"
+            )
+        if expected != digest:
             die(
                 f"{artifact} downloaded from {url} does not match the digest "
                 "recorded from upstream earlier in this run:\n"
@@ -913,6 +920,35 @@ def update_pins(force: bool) -> None:
         if artifact not in ytdlp_sums:
             die(f"{artifact} missing from yt-dlp {ytdlp_version} SHA2-256SUMS")
         recorder.record(ytdlp_pin_key(artifact, ytdlp_version), ytdlp_sums[artifact])
+
+    # The versioned keys are namespaced by release tag, so a bump leaves the
+    # superseded release's keys behind; ffmpeg needs no equivalent because
+    # btbn_asset_name dies unless exactly one asset per arch is pinned.
+    current = {
+        ytdlp_pin_key(ytdlp_asset_name(system, machine), ytdlp_version)
+        for system, machine in ALL_PLATFORMS
+    }
+    asset_names = {key.split("@", 1)[0] for key in current}
+    superseded = [
+        n
+        for n in pins["downloads"]
+        if n.split("@", 1)[0] in asset_names and n not in current
+    ]
+    for name in superseded:
+        del pins["downloads"][name]
+        print(f"  pruned   {name} (superseded by yt-dlp {ytdlp_version})")
+    if superseded:
+        # binaries.yt-dlp holds the same bytes as the versioned downloads,
+        # keyed by target triple: left in place, a bump would land as
+        # CHANGED under unchanged keys and demand --force — the routine the
+        # versioned keys exist to eliminate. The recording loop below
+        # re-adds the triples from the new release.
+        dropped = pins["binaries"].pop("yt-dlp", {})
+        if dropped:
+            print(
+                f"  pruned   binaries.yt-dlp ({len(dropped)} triples, "
+                f"re-recorded from yt-dlp {ytdlp_version} below)"
+            )
 
     print(
         f"ffmpeg {FFMPEG_VERSION} branch {ffmpeg_branch()} — "
