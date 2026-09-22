@@ -32,8 +32,8 @@ Integrity:
   version-independent names get the release tag appended
   (`yt-dlp_linux@2026.08.19`). A bump therefore adds keys, which
   --update-pins records without --force while pruning the superseded
-  release's keys, and a digest that changes under an unchanged key stays
-  an incident.
+  build's keys; a digest that changes under an unchanged key stays an
+  incident.
 
   The macOS binary is additionally asserted to be an arm64 Mach-O and,
   on macOS, a Developer ID-signed binary: evermeet's Intel-only build was
@@ -112,6 +112,18 @@ USAGE = """usage: fetch_sidecars.py [--update-pins [--force]]
 def die(msg: str, code: int = 1) -> None:
     print(msg, file=sys.stderr)
     raise SystemExit(code)
+
+
+def die_unverified(dest: Path, msg: str) -> None:
+    """Delete the failed artifact at `dest`, then die with `msg`.
+
+    fetch_sidecars re-checks digests on its next run, but a `tauri build` in
+    between bundles whatever sits at the destination — for yt-dlp that is the
+    final sidecar path — so bytes that failed their checksum, were served
+    without one, or arrived only partially must not survive the failure.
+    """
+    dest.unlink(missing_ok=True)
+    die(msg)
 
 
 def host_triple() -> str:
@@ -433,7 +445,7 @@ def download(url: str, dest: Path) -> None:
         with _open_url(url) as resp, dest.open("wb") as f:
             shutil.copyfileobj(resp, f)
     except (urllib.error.URLError, OSError) as e:
-        die(f"failed to download {url}: {e}")
+        die_unverified(dest, f"failed to download {url}: {e}")
 
 
 def download_and_verify(
@@ -451,8 +463,14 @@ def download_and_verify(
         pins.download_and_record(url, dest, artifact)
         return
     key = artifact or pin_key_from_url(url)
+    expected = pinned_digest(pins, key)
     download(url, dest)
-    verify_sha256(key, pinned_digest(pins, key), sha256_file(dest))
+    try:
+        verify_sha256(key, expected, sha256_file(dest))
+    except SystemExit:
+        # verify_sha256 reported why; only the cleanup belongs here.
+        dest.unlink(missing_ok=True)
+        raise
 
 
 def make_executable(path: Path) -> None:
@@ -565,19 +583,24 @@ def btbn_arch_token(system: str, machine: str) -> str:
         raise ValueError(f"Unsupported OS/arch for ffmpeg: {system}/{machine}")
 
 
-def btbn_asset_name(system: str, machine: str) -> str:
+def btbn_asset_name(system: str, machine: str, downloads: dict | None = None) -> str:
     """The pinned BtbN asset name for a platform.
 
     The snapshot is pinned in sidecar_pins.json by asset name (BtbN embeds
     the exact build, e.g. ffmpeg-n9.0.2-3-ga5923073bf-..., in the file name,
     which is why the frozen autobuild tag alone is not enough).
+
+    `downloads` overrides the on-disk table, which --update-pins needs: the
+    file still holds the superseded build's names until the run writes it,
+    so resolving against the run's own (pruned, freshly recorded) table is
+    what makes a build bump converge in one pass.
     """
     branch = ffmpeg_branch()
     arch = btbn_arch_token(system, machine)
     ext = "zip" if system == "Windows" else "tar.xz"
     names = [
         name
-        for name in load_pins()["downloads"]
+        for name in (load_pins()["downloads"] if downloads is None else downloads)
         if name.startswith("ffmpeg-n")
         and name.endswith(f"-{arch}-gpl-{branch}.{ext}")
         and "-shared-" not in name
@@ -634,11 +657,16 @@ def verify_btbn_ffmpeg_arch(path: Path, system: str, machine: str) -> None:
     print(f"  ok       {name} ({token})")
 
 
-def ffmpeg_download_url(system: str, machine: str) -> str | None:
-    """Return archive URL, or None for Darwin (macOS handled separately)."""
+def ffmpeg_download_url(
+    system: str, machine: str, downloads: dict | None = None
+) -> str | None:
+    """Return archive URL, or None for Darwin (macOS handled separately).
+
+    `downloads` is passed through to `btbn_asset_name`.
+    """
     if system == "Darwin":
         return None
-    return f"{FFMPEG_BTBN_BASE}/{btbn_asset_name(system, machine)}"
+    return f"{FFMPEG_BTBN_BASE}/{btbn_asset_name(system, machine, downloads)}"
 
 
 def ffmpeg_macos_url() -> str:
@@ -692,6 +720,10 @@ def extract_tar_xz(archive: Path, dest: Path) -> None:
 
 def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
     print(f"Downloading ffmpeg {FFMPEG_VERSION}...")
+    # In --update-pins `pins` is the PinsRecorder: resolve the asset name
+    # against its table, which holds this run's pruned superseded keys and
+    # newly recorded names. The on-disk file still has the old state.
+    downloads = pins.downloads if isinstance(pins, PinsRecorder) else pins["downloads"]
     # A private work dir per call: --update-pins extracts five platforms in
     # one process, and a shared dir would let one platform's leftovers be
     # picked up by the next.
@@ -716,7 +748,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
 
         if system == "Linux":
             try:
-                url = ffmpeg_download_url(system, machine)
+                url = ffmpeg_download_url(system, machine, downloads)
             except ValueError as e:
                 die(str(e))
             assert url is not None
@@ -740,7 +772,7 @@ def fetch_ffmpeg(system: str, machine: str, out: Path, pins: dict) -> None:
 
         if system == "Windows":
             try:
-                url = ffmpeg_download_url(system, machine)
+                url = ffmpeg_download_url(system, machine, downloads)
             except ValueError as e:
                 die(str(e))
             assert url is not None
@@ -818,10 +850,11 @@ class PinsRecorder:
     A digest that differs from the file is only replaced when --force is
     passed, so a mismatch cannot be cleared by re-running the update; stale
     stays set and the run fails at the end with instructions. Filenames that
-    embed a version (the macOS zip, BtbN's build-tagged assets) are meant to
-    be deleted and re-added when the version is bumped, which is why a
-    missing entry is recorded without --force; yt-dlp's names carry no
-    version, so its pin key appends the release tag for the same reason.
+    embed a version (the macOS zip, BtbN's build-tagged assets) are replaced
+    wholesale when the build is bumped — update_pins prunes the superseded
+    keys — which is why a missing entry is recorded without --force; yt-dlp's
+    names carry no version, so its pin key appends the release tag for the
+    same reason.
 
     Digests recorded from an upstream checksum file also pin every later
     download of that artifact for the rest of the run: what gets extracted
@@ -833,6 +866,11 @@ class PinsRecorder:
         self.force = force
         self.stale = False
         self.upstream_digests: dict[str, str] = {}
+
+    @property
+    def downloads(self) -> dict[str, str]:
+        """The run's downloads table, for asset names resolved mid-run."""
+        return self.pins["downloads"]
 
     def _apply(self, table: dict, name: str, digest: str, note: str = "") -> None:
         old = table.get(name)
@@ -872,19 +910,21 @@ class PinsRecorder:
         digest = sha256_file(dest)
         expected = self.upstream_digests.get(artifact)
         if expected is None:
-            die(
+            die_unverified(
+                dest,
                 f"no upstream digest was recorded for {artifact!r} before "
                 f"downloading {url}; refusing to pin bytes no checksum "
-                "file described"
+                "file described",
             )
         if expected != digest:
-            die(
+            die_unverified(
+                dest,
                 f"{artifact} downloaded from {url} does not match the digest "
                 "recorded from upstream earlier in this run:\n"
                 f"  upstream  {expected}\n"
                 f"  served    {digest}\n"
                 "Treat this as a supply-chain incident: the pin and the "
-                "archive that is about to be extracted disagree."
+                "archive that is about to be extracted disagree.",
             )
         self.record(artifact, digest, f" ({dest.stat().st_size} bytes)")
 
@@ -922,8 +962,8 @@ def update_pins(force: bool) -> None:
         recorder.record(ytdlp_pin_key(artifact, ytdlp_version), ytdlp_sums[artifact])
 
     # The versioned keys are namespaced by release tag, so a bump leaves the
-    # superseded release's keys behind; ffmpeg needs no equivalent because
-    # btbn_asset_name dies unless exactly one asset per arch is pinned.
+    # superseded release's keys behind; the ffmpeg pass prunes its own
+    # superseded keys below, once the pinned snapshot is known.
     current = {
         ytdlp_pin_key(ytdlp_asset_name(system, machine), ytdlp_version)
         for system, machine in ALL_PLATFORMS
@@ -955,10 +995,35 @@ def update_pins(force: bool) -> None:
         f"digests from BtbN {FFMPEG_BTBN_TAG}/checksums.sha256"
     )
     btbn_sums = btbn_upstream_shasums()
-    for artifact in select_btbn_assets(btbn_sums):
+    current_btbn = select_btbn_assets(btbn_sums)
+    for artifact in current_btbn:
         recorder.record(artifact, btbn_sums[artifact])
 
     macos_zip = ffmpeg_macos_artifact()
+    # Same policy as the yt-dlp pass: a build bump rewrites the names the
+    # keys carry (BtbN embeds the build, the macOS key carries the build id),
+    # so the superseded build's keys would linger. Left in place they make
+    # btbn_asset_name ambiguous for the recording loop, and a stale
+    # binaries.ffmpeg would turn that loop's re-record into CHANGED/--force.
+    # The loop resolves names against the recorder's table and re-adds the
+    # triples from the pinned build.
+    superseded_ffmpeg = [
+        name
+        for name in pins["downloads"]
+        if name.startswith(("ffmpeg-n", "ffmpeg-macos-"))
+        and name not in {*current_btbn, macos_zip}
+    ]
+    for name in superseded_ffmpeg:
+        del pins["downloads"][name]
+        print(f"  pruned   {name} (superseded by the pinned ffmpeg build)")
+    if superseded_ffmpeg:
+        dropped = pins["binaries"].pop("ffmpeg", {})
+        if dropped:
+            print(
+                f"  pruned   binaries.ffmpeg ({len(dropped)} triples, "
+                "re-recorded from the pinned build below)"
+            )
+
     sha_url = f"{ffmpeg_macos_url()}.sha256"
     print(f"martin-riedl macOS build {FFMPEG_MACOS_BUILD} — digest from {sha_url}")
     published = parse_shasums(fetch_bytes(sha_url).decode("utf-8"))
@@ -1025,9 +1090,12 @@ def main() -> None:
 
     # A cached binary is reused only if it still matches its pinned digest;
     # anything else, a missing pin included, is re-fetched and re-verified.
-    cached_ytdlp = pins["binaries"].get("yt-dlp", {}).get(triple)
+    # yt-dlp's binary pin is keyed by target triple and survives a version
+    # bump on its own, so it is checked against the pinned release as well.
     cached_ffmpeg = pins["binaries"].get("ffmpeg", {}).get(triple)
-    need_ytdlp = _needs_fetch(ytdlp_out, cached_ytdlp, "yt-dlp")
+    need_ytdlp = ytdlp_needs_fetch(
+        ytdlp_out, pins, triple, system, machine, ytdlp_version
+    )
     need_ffmpeg = _needs_fetch(ffmpeg_out, cached_ffmpeg, "ffmpeg")
 
     if not need_ytdlp and not need_ffmpeg:
@@ -1059,6 +1127,41 @@ def _needs_fetch(path: Path, expected: str | None, kind: str) -> bool:
         return True
     if sha256_file(path).lower() != expected.lower():
         print(f"cached {kind} {path.name} does not match its pinned digest; re-fetching")
+        return True
+    return False
+
+
+def ytdlp_needs_fetch(
+    out: Path, pins: dict, triple: str, system: str, machine: str, version: str
+) -> bool:
+    """Whether the cached yt-dlp binary at `out` must be (re-)fetched.
+
+    `binaries.yt-dlp` is keyed by target triple, so on its own it cannot tell
+    that requirements-sidecars.txt was bumped: the cache still matches the
+    superseded release's pin. A cached binary is trusted only when the
+    versioned downloads pin for the *pinned release* agrees with it; a
+    mismatch is re-fetched, which dies loudly on the missing versioned pin
+    instead of silently bundling the old release from a warm cache.
+    """
+    expected = pins["binaries"].get("yt-dlp", {}).get(triple)
+    if _needs_fetch(out, expected, "yt-dlp"):
+        return True
+    try:
+        asset = ytdlp_asset_name(system, machine)
+    except ValueError as e:
+        die(str(e))
+    release = pins["downloads"].get(ytdlp_pin_key(asset, version))
+    if release is None:
+        print(
+            f"no pinned digest for yt-dlp {version}'s {asset}; "
+            "re-fetching to verify"
+        )
+        return True
+    if release != expected:
+        print(
+            f"cached yt-dlp {out.name} was pinned for another release than "
+            f"yt-dlp {version}; re-fetching"
+        )
         return True
     return False
 
