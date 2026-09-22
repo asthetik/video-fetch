@@ -173,7 +173,8 @@ class TestYtdlpPinKeys(unittest.TestCase):
 
 
 class TestYtdlpCacheAnchor(TmpDirTestCase):
-    """A warm cache must not outlive the release it was fetched for.
+    """A warm cache must not outlive the release it was fetched for, and an
+    untrusted cache must not survive the failed re-fetch either.
 
     `binaries.yt-dlp` is keyed by target triple, so bumping the version pin
     alone leaves a cache that still matches it. The versioned downloads pin
@@ -200,27 +201,36 @@ class TestYtdlpCacheAnchor(TmpDirTestCase):
         )
 
     def test_cache_matching_the_pinned_release_is_kept(self) -> None:
-        self.assertFalse(self.needs_fetch(self.cached(), self.pins(BLOB_SHA256)))
+        path = self.cached()
+        self.assertFalse(self.needs_fetch(path, self.pins(BLOB_SHA256)))
+        self.assertTrue(path.exists(), "a trusted cache must be left alone")
 
     def test_cache_missing_its_release_pin_is_refetched(self) -> None:
         # requirements-sidecars.txt bumped and committed without
         # --update-pins: the new release has no key, while the cached binary
         # still matches the superseded release's binaries pin. Cold release
         # runners would fail loudly; a warm cache must not ship the old one.
-        self.assertTrue(self.needs_fetch(self.cached(), self.pins(release=None)))
+        path = self.cached()
+        self.assertTrue(self.needs_fetch(path, self.pins(release=None)))
+        self.assertFalse(
+            path.exists(),
+            "the superseded binary must not survive for a build to bundle",
+        )
 
     def test_cache_pinned_to_another_release_is_refetched(self) -> None:
-        self.assertTrue(self.needs_fetch(self.cached(), self.pins("9" * 64)))
+        path = self.cached()
+        self.assertTrue(self.needs_fetch(path, self.pins("9" * 64)))
+        self.assertFalse(path.exists())
 
     def test_cache_holding_other_bytes_is_refetched(self) -> None:
-        self.assertTrue(
-            self.needs_fetch(self.cached(b"substituted bytes"), self.pins(BLOB_SHA256))
-        )
+        path = self.cached(b"substituted bytes")
+        self.assertTrue(self.needs_fetch(path, self.pins(BLOB_SHA256)))
+        self.assertFalse(path.exists())
 
     def test_cache_without_a_binary_pin_is_refetched(self) -> None:
-        self.assertTrue(
-            self.needs_fetch(self.cached(), self.pins(BLOB_SHA256, binary=None))
-        )
+        path = self.cached()
+        self.assertTrue(self.needs_fetch(path, self.pins(BLOB_SHA256, binary=None)))
+        self.assertFalse(path.exists())
 
     def test_unsupported_platform_dies(self) -> None:
         with self.assertRaises(SystemExit):

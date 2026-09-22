@@ -1258,28 +1258,35 @@ def ytdlp_needs_fetch(
     versioned downloads pin for the *pinned release* agrees with it; a
     mismatch is re-fetched, which dies loudly on the missing versioned pin
     instead of silently bundling the old release from a warm cache.
+
+    An untrusted cache is deleted as well as re-fetched: the re-fetch can
+    die (missing pin, network), and bytes left at the final sidecar path for
+    a later `tauri build` to bundle are exactly what a loud failure is
+    supposed to prevent.
     """
     expected = pins["binaries"].get("yt-dlp", {}).get(triple)
-    if _needs_fetch(out, expected, "yt-dlp"):
-        return True
-    try:
-        asset = ytdlp_asset_name(system, machine)
-    except ValueError as e:
-        die(str(e))
-    release = pins["downloads"].get(ytdlp_pin_key(asset, version))
-    if release is None:
-        print(
-            f"no pinned digest for yt-dlp {version}'s {asset}; "
-            "re-fetching to verify"
-        )
-        return True
-    if release != expected:
-        print(
-            f"cached yt-dlp {out.name} was pinned for another release than "
-            f"yt-dlp {version}; re-fetching"
-        )
-        return True
-    return False
+    untrusted = _needs_fetch(out, expected, "yt-dlp")
+    if not untrusted:
+        try:
+            asset = ytdlp_asset_name(system, machine)
+        except ValueError as e:
+            die(str(e))
+        release = pins["downloads"].get(ytdlp_pin_key(asset, version))
+        if release is None:
+            print(
+                f"no pinned digest for yt-dlp {version}'s {asset}; "
+                "re-fetching to verify"
+            )
+            untrusted = True
+        elif release != expected:
+            print(
+                f"cached yt-dlp {out.name} was pinned for another release "
+                f"than yt-dlp {version}; re-fetching"
+            )
+            untrusted = True
+    if untrusted:
+        out.unlink(missing_ok=True)
+    return untrusted
 
 
 if __name__ == "__main__":
