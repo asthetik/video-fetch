@@ -35,6 +35,15 @@ Integrity:
   build's keys; a digest that changes under an unchanged key stays an
   incident.
 
+  The pins file also records the ffmpeg snapshot it was generated from
+  (FFMPEG_VERSION / FFMPEG_BTBN_TAG / FFMPEG_MACOS_BUILD), and every fetch
+  compares the recorded values against the constants before touching a
+  byte, dying with the --update-pins instruction on a mismatch. That is
+  what makes a forgotten ffmpeg bump fail loudly instead of silently
+  fetching the superseded build: the asset names and digests come from the
+  file itself, so no re-fetch can pick a bump up — regenerating the pins
+  is the only fix.
+
   The macOS binary is additionally asserted to be an arm64 Mach-O and,
   on macOS, a Developer ID-signed binary: evermeet's Intel-only build was
   shipped as the macOS sidecar in 0.4.0 and could not run on Apple
@@ -99,6 +108,14 @@ FFMPEG_VERSION = "9.0.2"
 
 REQUIREMENTS_FILE = Path(__file__).resolve().parent / "requirements-sidecars.txt"
 PINS_FILE = Path(__file__).resolve().parent / "sidecar_pins.json"
+
+# Schema 2 records the ffmpeg snapshot the file was generated from
+# (`ffmpeg_snapshot`). Schema 1 files still load so --update-pins can
+# regenerate them; the fetch path refuses them until then.
+PINS_SCHEMA = 2
+
+# The snapshot anchor's members: the constants the pins were generated from.
+_FFMPEG_SNAPSHOT_KEYS = ("version", "btbn_tag", "macos_build")
 
 USAGE = """usage: fetch_sidecars.py [--update-pins [--force]]
 
@@ -333,8 +350,32 @@ def load_pins(path: Path | None = None) -> dict:
         die(f"{file} is not valid JSON: {e}")
     if not isinstance(data, dict):
         die(f"{file} must contain a JSON object")
-    if data.get("schema", 1) != 1:
-        die(f"{file}: unsupported schema version {data.get('schema')!r}")
+    schema = data.get("schema", 1)
+    if schema not in (1, PINS_SCHEMA):
+        die(
+            f"{file}: unsupported schema version {schema!r}; this script "
+            f"writes schema {PINS_SCHEMA}"
+        )
+    snapshot = data.get("ffmpeg_snapshot")
+    if snapshot is None:
+        if schema >= PINS_SCHEMA:
+            die(
+                f"{file}: schema {PINS_SCHEMA} must record the ffmpeg "
+                "snapshot it was generated from; regenerate it with:\n"
+                "  python scripts/fetch_sidecars.py --update-pins"
+            )
+    elif (
+        not isinstance(snapshot, dict)
+        or set(snapshot) != set(_FFMPEG_SNAPSHOT_KEYS)
+        or not all(
+            isinstance(snapshot[key], str) and snapshot[key]
+            for key in _FFMPEG_SNAPSHOT_KEYS
+        )
+    ):
+        die(
+            f"{file}: 'ffmpeg_snapshot' must be an object with the string "
+            f"members {sorted(_FFMPEG_SNAPSHOT_KEYS)}"
+        )
     downloads = data.get("downloads")
     if not isinstance(downloads, dict):
         die(f"{file}: 'downloads' must be an object of digest strings")
@@ -356,17 +397,74 @@ def load_pins(path: Path | None = None) -> dict:
 def write_pins(pins: dict, path: Path | None = None) -> None:
     file = path or PINS_FILE
     payload = {
-        "schema": 1,
+        "schema": PINS_SCHEMA,
         "//": (
             "SHA-256 pins for artifacts downloaded by fetch_sidecars.py. "
             "Update with --update-pins; see the script docstring."
         ),
+        # Stamped from the constants, not from `pins`: the digests written
+        # here were resolved from them, and it is what lets --update-pins
+        # migrate a schema-1 file (which load_pins still accepts) in one run.
+        "ffmpeg_snapshot": ffmpeg_snapshot(),
         "downloads": dict(sorted(pins["downloads"].items())),
     }
     if pins.get("binaries"):
         payload["binaries"] = dict(sorted(pins["binaries"].items()))
     file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {file}")
+
+
+def ffmpeg_snapshot() -> dict:
+    """The pinned ffmpeg snapshot's identity, as recorded in the pins file."""
+    return {
+        "version": FFMPEG_VERSION,
+        "btbn_tag": FFMPEG_BTBN_TAG,
+        "macos_build": FFMPEG_MACOS_BUILD,
+    }
+
+
+def _describe_ffmpeg_snapshot(snapshot: dict | None) -> str:
+    if snapshot is None:
+        return "(none recorded)"
+    return (
+        f"version {snapshot['version']}, BtbN {snapshot['btbn_tag']}, "
+        f"macOS build {snapshot['macos_build']}"
+    )
+
+
+def verify_ffmpeg_snapshot(pins: dict) -> None:
+    """Fail loudly when the pins file was not regenerated for the pinned
+    ffmpeg snapshot.
+
+    FFMPEG_VERSION / FFMPEG_BTBN_TAG / FFMPEG_MACOS_BUILD are constants in
+    this script, but the pinned asset names and their digests are read from
+    the pins file: after a bump the file still names the superseded build,
+    so a forgotten --update-pins would leave every environment — clean CI
+    runners included — silently fetching it. The recorded identity is what
+    turns that into a failure, the way the versioned yt-dlp pin keys do
+    for a requirements bump. It is deliberately not a re-fetch trigger:
+    only regenerating the file can move off the old snapshot.
+    """
+    recorded = pins.get("ffmpeg_snapshot")
+    current = ffmpeg_snapshot()
+    if recorded == current:
+        return
+    if recorded is None:
+        what = (
+            f"{PINS_FILE} does not record which ffmpeg snapshot it was "
+            "generated from"
+        )
+    else:
+        what = f"{PINS_FILE} was generated for another ffmpeg snapshot"
+    die(
+        f"{what}:\n"
+        f"  recorded  {_describe_ffmpeg_snapshot(recorded)}\n"
+        f"  current   {_describe_ffmpeg_snapshot(current)}\n"
+        "The pinned asset names and digests are taken from the file itself, "
+        "so re-fetching cannot pick up a snapshot bump; regenerate the "
+        "pins:\n"
+        "  python scripts/fetch_sidecars.py --update-pins"
+    )
 
 
 def pinned_digest(pins: dict, artifact: str) -> str:
@@ -1066,6 +1164,7 @@ def main() -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     pins = load_pins()
+    verify_ffmpeg_snapshot(pins)
     ytdlp_version = load_ytdlp_version()
     print(f"yt-dlp version: {ytdlp_version} (pinned in requirements-sidecars.txt)")
     print(
