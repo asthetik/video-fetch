@@ -1,6 +1,11 @@
 {
-  "schema": 1,
+  "schema": 2,
   "//": "SHA-256 pins for artifacts downloaded by fetch_sidecars.py. Update with --update-pins; see the script docstring.",
+  "ffmpeg_snapshot": {
+    "version": "9.0.2",
+    "btbn_tag": "autobuild-2026-09-20-13-11",
+    "macos_build": "1789931890_9.0.2"
+  },
   "downloads": {
     "ffmpeg-macos-arm64-1789931890_9.0.2.zip": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
     "ffmpeg-n9.0.2-3-ga5923073bf-linux64-gpl-9.0.tar.xz": "7569c7c00a421d4fb4636925a126e96e051bb5cdd0b0e0a91576ddfadddd9bff",

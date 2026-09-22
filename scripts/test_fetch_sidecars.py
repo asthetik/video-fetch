@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -31,6 +32,7 @@ from fetch_sidecars import (
     ffmpeg_download_url,
     ffmpeg_macos_artifact,
     ffmpeg_macos_url,
+    ffmpeg_snapshot,
     load_pins,
     load_ytdlp_version,
     macho_cpu_types,
@@ -40,8 +42,10 @@ from fetch_sidecars import (
     pin_key_from_url,
     sha256_hex,
     verify_btbn_ffmpeg_arch,
+    verify_ffmpeg_snapshot,
     verify_macos_ffmpeg,
     verify_sha256,
+    write_pins,
     ytdlp_download_url,
     ytdlp_pin_key,
 )
@@ -959,6 +963,53 @@ class TestLoadPins(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     load_pins(path)
 
+    def test_schema_2_requires_the_ffmpeg_snapshot_anchor(self) -> None:
+        path = _write_pins(json.dumps({"schema": 2, "downloads": {}}))
+        self.addCleanup(path.unlink)
+        with self.assertRaises(SystemExit):
+            load_pins(path)
+
+    def test_schema_2_with_a_wellformed_anchor_loads(self) -> None:
+        text = json.dumps(
+            {"schema": 2, "downloads": {}, "ffmpeg_snapshot": ffmpeg_snapshot()}
+        )
+        path = _write_pins(text)
+        self.addCleanup(path.unlink)
+        self.assertEqual(load_pins(path)["ffmpeg_snapshot"], ffmpeg_snapshot())
+
+    def test_legacy_schema_1_without_an_anchor_still_loads(self) -> None:
+        # --update-pins loads the file before it writes it, so schema-1
+        # files stay loadable: that run is what migrates them to schema 2.
+        # The fetch path refuses them until then (verify_ffmpeg_snapshot).
+        text = json.dumps({"schema": 1, "downloads": {"yt-dlp_linux": "a" * 64}})
+        path = _write_pins(text)
+        self.addCleanup(path.unlink)
+        self.assertNotIn("ffmpeg_snapshot", load_pins(path))
+
+    def test_malformed_anchor_dies(self) -> None:
+        for anchor in (
+            [],
+            "9.0.2",
+            {"version": "9.0.2", "btbn_tag": "autobuild-x"},  # member missing
+            {
+                "version": "9.0.2",
+                "btbn_tag": "autobuild-x",
+                "macos_build": "1_9.0.2",
+                "extra": "x",
+            },
+            {"version": 902, "btbn_tag": "autobuild-x", "macos_build": "1_9.0.2"},
+            {"version": "9.0.2", "btbn_tag": "", "macos_build": "1_9.0.2"},
+        ):
+            with self.subTest(anchor=anchor):
+                path = _write_pins(
+                    json.dumps(
+                        {"schema": 2, "downloads": {}, "ffmpeg_snapshot": anchor}
+                    )
+                )
+                self.addCleanup(path.unlink)
+                with self.assertRaises(SystemExit):
+                    load_pins(path)
+
 
 class TestPinCoverage(unittest.TestCase):
     """Every artifact the script can download must be pinned; a missing pin
@@ -1032,6 +1083,95 @@ class TestPinCoverage(unittest.TestCase):
             )
         }
         self.assertEqual(ytdlp_keys, expected, "superseded yt-dlp pin keys linger")
+
+
+class TestFfmpegSnapshotAnchor(TmpDirTestCase):
+    """Bumping FFMPEG_VERSION / FFMPEG_BTBN_TAG / FFMPEG_MACOS_BUILD without
+    --update-pins must fail loudly, the way a yt-dlp bump does.
+
+    The constants live in this script, but the pinned asset names and their
+    digests come from sidecar_pins.json: after a bump the file still names
+    the superseded build, so every environment — clean CI runners included —
+    would silently fetch it. The snapshot identity recorded in the file is
+    what turns a forgotten update into a build failure, and it is not a
+    re-fetch trigger: only regenerating the file can move off the old
+    snapshot.
+    """
+
+    def stale(self) -> dict:
+        return {
+            "version": "9.0.1",
+            "btbn_tag": "autobuild-2026-01-01-00-00",
+            "macos_build": "1111111111_9.0.1",
+        }
+
+    def verify_stderr(self, pins: dict) -> str:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                verify_ffmpeg_snapshot(pins)
+        return stderr.getvalue()
+
+    def test_the_current_snapshot_is_the_constants(self) -> None:
+        self.assertEqual(
+            ffmpeg_snapshot(),
+            {
+                "version": FFMPEG_VERSION,
+                "btbn_tag": FFMPEG_BTBN_TAG,
+                "macos_build": FFMPEG_MACOS_BUILD,
+            },
+        )
+
+    def test_matching_snapshot_passes(self) -> None:
+        self.assertIsNone(
+            verify_ffmpeg_snapshot({"ffmpeg_snapshot": ffmpeg_snapshot()})
+        )
+
+    def test_a_snapshot_recorded_for_another_build_dies_with_the_instruction(
+        self,
+    ) -> None:
+        stderr = self.verify_stderr({"ffmpeg_snapshot": self.stale()})
+        self.assertIn("--update-pins", stderr)
+        self.assertIn("autobuild-2026-01-01-00-00", stderr)  # the recorded one
+        self.assertIn(FFMPEG_BTBN_TAG, stderr)  # the constants it disagrees with
+
+    def test_no_recorded_snapshot_dies_with_the_instruction(self) -> None:
+        stderr = self.verify_stderr({})
+        self.assertIn("--update-pins", stderr)
+
+    def test_repo_pins_file_matches_the_pinned_snapshot(self) -> None:
+        self.assertIsNone(verify_ffmpeg_snapshot(load_pins()))
+
+    def test_repo_pins_file_is_a_fixpoint_of_write_pins(self) -> None:
+        # The committed file must be exactly what write_pins emits — the
+        # anchor, schema and ordering included. Regenerating the pins is the
+        # only supported repair, so code and file may never drift apart.
+        repo_file = Path(__file__).resolve().parent / "sidecar_pins.json"
+        out = self.tmpdir() / "sidecar_pins.json"
+        write_pins(load_pins(repo_file), out)
+        self.assertEqual(out.read_bytes(), repo_file.read_bytes())
+
+    def test_main_refuses_a_stale_pins_file(self) -> None:
+        stale = _write_pins(
+            json.dumps({"schema": 2, "downloads": {}, "ffmpeg_snapshot": self.stale()})
+        )
+        self.addCleanup(stale.unlink)
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(fetch_sidecars, "PINS_FILE", stale),
+            mock.patch.object(
+                fetch_sidecars, "host_triple", return_value="x86_64-unknown-linux-gnu"
+            ),
+            mock.patch.object(
+                fetch_sidecars,
+                "download_and_verify",
+                side_effect=AssertionError("main() must die before fetching"),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            with self.assertRaises(SystemExit):
+                fetch_sidecars.main()
+        self.assertIn("--update-pins", stderr.getvalue())
 
 
 class TestFetchFfmpegTempIsolation(unittest.TestCase):
