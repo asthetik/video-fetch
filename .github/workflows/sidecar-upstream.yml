@@ -1,0 +1,74 @@
+# Monthly upstream check for the sidecar pins (yt-dlp, BtbN ffmpeg for
+# Linux/Windows, martin-riedl ffmpeg for macOS). Detection only: it never
+# edits a pin. When upstream has something newer it opens (or comments on) a
+# `[sidecar-upstream]` issue; when the check itself fails — network, upstream
+# response shape — the job fails instead, so an unreachable upstream can never
+# be mistaken for "nothing to do".
+#
+# scripts/check_sidecar_upstream.py owns the exit-code contract:
+#   0 current, 3 outdated, anything else is a broken check.
+
+name: Sidecar upstream
+
+on:
+  schedule:
+    # Monthly, off the hour: there is nothing urgent about this, so it can
+    # stay out of the way of every other cron on the platform.
+    - cron: "17 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Check upstream sidecar versions
+        id: check
+        env:
+          # Raised quota for the two api.github.com calls, so a shared runner
+          # IP cannot turn a rate limit into a failed check.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/check_sidecar_upstream.py | tee report.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" != "0" ] && [ "$code" != "3" ]; then
+            echo "sidecar upstream check failed (exit $code)" >&2
+            exit "$code"
+          fi
+
+      - name: Report on the tracking issue
+        if: steps.check.outputs.exit == '3'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          marker="[sidecar-upstream]"
+          {
+            echo "上游 sidecar 有新版本（每月 1 号自动检测，本次报告如下）。"
+            echo
+            cat report.txt
+            echo
+            echo "升级步骤见 README「发版与 sidecar」一节：改版本号后跑"
+            echo "\`python3 scripts/fetch_sidecars.py --update-pins\` 更新摘要。"
+            echo "yt-dlp 的摘要变化要用 \`--force\`——它的 pin 键是不带版本号的资产名，"
+            echo "所以「版本升级」和「上游被篡改」在工具眼里一样，必须人工确认。"
+          } > body.md
+          existing=$(gh issue list --state open --search "$marker in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$marker 上游 sidecar 有新版本" --body-file body.md
+          fi

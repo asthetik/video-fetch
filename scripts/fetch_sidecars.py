@@ -383,15 +383,24 @@ def parse_shasums(text: str) -> dict[str, str]:
     return entries
 
 
-def _open_url(url: str):
-    request = urllib.request.Request(url, headers={"User-Agent": HTTP_USER_AGENT})
+def request_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Headers every request carries: our own User-Agent (martin-riedl 403s
+    urllib's default) plus anything the caller adds, such as an API token."""
+    headers = {"User-Agent": HTTP_USER_AGENT}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _open_url(url: str, headers: dict[str, str] | None = None):
+    request = urllib.request.Request(url, headers=request_headers(headers))
     return urllib.request.urlopen(request)
 
 
-def fetch_bytes(url: str) -> bytes:
+def fetch_bytes(url: str, headers: dict[str, str] | None = None) -> bytes:
     print(f"  GET {url}")
     try:
-        with _open_url(url) as resp:
+        with _open_url(url, headers) as resp:
             return resp.read()
     except (urllib.error.URLError, OSError) as e:
         die(f"failed to fetch {url}: {e}")
