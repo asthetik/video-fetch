@@ -3,7 +3,9 @@
 # Any version bump here also needs new SHA-256 digests in
 # sidecar_pins.json. Run `python scripts/fetch_sidecars.py --update-pins`
 # right after a bump (digests are cross-checked against upstream's own
-# checksum files); see the fetch_sidecars.py module docstring.
+# checksum files). The new version is a new pin key — `yt-dlp_linux`
+# becomes `yt-dlp_linux@<tag>` — so it is recorded without --force, which
+# stays reserved for a digest that changed under an unchanged key.
 #
 # yt-dlp: auto-upgraded by Dependabot (pip ecosystem, see
 # .github/dependabot.yml). PyPI normalizes the version string

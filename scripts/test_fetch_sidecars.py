@@ -22,9 +22,11 @@ from fetch_sidecars import (
     FFMPEG_MACOS_SIGNER,
     FFMPEG_MACOS_TEAM_ID,
     FFMPEG_VERSION,
+    PinsRecorder,
     elf_machine,
     extract_tar_xz,
     fetch_ffmpeg,
+    fetch_ytdlp,
     ffmpeg_branch,
     ffmpeg_download_url,
     ffmpeg_macos_artifact,
@@ -41,6 +43,7 @@ from fetch_sidecars import (
     verify_macos_ffmpeg,
     verify_sha256,
     ytdlp_download_url,
+    ytdlp_pin_key,
 )
 
 PIN = "2026.8.19"
@@ -112,6 +115,146 @@ class TestYtdlpUrl(unittest.TestCase):
             ytdlp_download_url("Windows", "ARM64", TAG)
             .endswith(f"/download/{TAG}/yt-dlp_arm64.exe")
         )
+
+
+class TestYtdlpPinKeys(unittest.TestCase):
+    def test_key_appends_the_release_tag(self) -> None:
+        self.assertEqual(
+            ytdlp_pin_key("yt-dlp_linux", "2026.08.19"), "yt-dlp_linux@2026.08.19"
+        )
+
+    def test_fetch_verifies_against_the_versioned_key(self) -> None:
+        seen: list[str | None] = []
+
+        def spy(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
+            seen.append(artifact)
+            Path(dest).write_bytes(b"stub")
+
+        original = fetch_sidecars.download_and_verify
+        fetch_sidecars.download_and_verify = spy
+        self.addCleanup(
+            lambda: setattr(fetch_sidecars, "download_and_verify", original)
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_s:
+            fetch_ytdlp(
+                "Linux",
+                "x86_64",
+                Path(tmp_s) / "yt-dlp",
+                "2026.08.19",
+                {"downloads": {}},
+            )
+
+        self.assertEqual(seen, ["yt-dlp_linux@2026.08.19"])
+
+    def test_fetch_dies_when_only_the_legacy_unversioned_key_is_pinned(self) -> None:
+        # The versioned key is mandatory: the download path must not
+        # silently fall back to the pre-@tag asset name.
+        with tempfile.TemporaryDirectory() as tmp_s:
+            with mock.patch.object(
+                fetch_sidecars,
+                "download",
+                lambda url, dest: Path(dest).write_bytes(b"stub"),
+            ):
+                with self.assertRaises(SystemExit):
+                    fetch_ytdlp(
+                        "Linux",
+                        "x86_64",
+                        Path(tmp_s) / "yt-dlp",
+                        TAG,
+                        {"downloads": {"yt-dlp_linux": "a" * 64}},
+                    )
+
+
+class TestPinsRecorderPolicy(unittest.TestCase):
+    """What the versioned key buys: a bump is recorded, a rewrite is not."""
+
+    def recorder(self, force: bool = False) -> PinsRecorder:
+        return PinsRecorder({"downloads": {}, "binaries": {}}, force)
+
+    def test_a_new_key_is_recorded_without_force(self) -> None:
+        recorder = self.recorder()
+        recorder.record("yt-dlp_linux@2026.09.20", "a" * 64)
+        self.assertFalse(recorder.stale)
+        self.assertEqual(
+            recorder.pins["downloads"]["yt-dlp_linux@2026.09.20"], "a" * 64
+        )
+
+    def test_a_changed_digest_under_the_same_key_needs_force(self) -> None:
+        recorder = self.recorder()
+        recorder.record("yt-dlp_linux@2026.08.19", "a" * 64)
+        recorder.record("yt-dlp_linux@2026.08.19", "b" * 64)
+        self.assertTrue(recorder.stale)
+        self.assertEqual(
+            recorder.pins["downloads"]["yt-dlp_linux@2026.08.19"], "a" * 64
+        )
+
+    def test_force_repins_a_changed_digest(self) -> None:
+        recorder = self.recorder(force=True)
+        recorder.record("yt-dlp_linux@2026.08.19", "a" * 64)
+        recorder.record("yt-dlp_linux@2026.08.19", "b" * 64)
+        self.assertFalse(recorder.stale)
+        self.assertEqual(
+            recorder.pins["downloads"]["yt-dlp_linux@2026.08.19"], "b" * 64
+        )
+
+
+class TestUpdatePinsRecordsVersionedKeys(unittest.TestCase):
+    """The wiring in update_pins: yt-dlp digests land under versioned keys,
+    and keys from a superseded release (including pre-@tag legacy ones) are
+    pruned by the same run. The run is stopped right after the yt-dlp pass
+    (btbn_upstream_shasums exits), before any network download."""
+
+    def test_records_versioned_keys_and_prunes_superseded_ones(self) -> None:
+        pins = {
+            "downloads": {
+                "yt-dlp_linux@2026.01.01": "c" * 64,
+                "yt-dlp_macos": "d" * 64,  # legacy pre-@tag key
+            },
+            # The triple-keyed binary digests must go with the release they
+            # describe, or the re-record below lands as CHANGED/--force.
+            "binaries": {"yt-dlp": {"x86_64-unknown-linux-gnu": "e" * 64}},
+        }
+        created: list[PinsRecorder] = []
+
+        class Spy(PinsRecorder):
+            def __init__(self, table: dict, force: bool) -> None:
+                super().__init__(table, force)
+                created.append(self)
+
+        sums = {
+            name: "a" * 64
+            for name in (
+                "yt-dlp_linux",
+                "yt-dlp_linux_aarch64",
+                "yt-dlp_macos",
+                "yt-dlp.exe",
+                "yt-dlp_arm64.exe",
+            )
+        }
+        with (
+            mock.patch.object(fetch_sidecars, "load_pins", return_value=pins),
+            mock.patch.object(fetch_sidecars, "PinsRecorder", Spy),
+            mock.patch.object(fetch_sidecars, "load_ytdlp_version", return_value=TAG),
+            mock.patch.object(
+                fetch_sidecars, "ytdlp_upstream_shasums", return_value=sums
+            ),
+            mock.patch.object(
+                fetch_sidecars, "btbn_upstream_shasums", side_effect=SystemExit
+            ),
+        ):
+            with self.assertRaises(SystemExit):
+                fetch_sidecars.update_pins(force=False)
+
+        recorded = created[0].pins["downloads"]
+        for artifact in sums:
+            self.assertIn(f"{artifact}@{TAG}", recorded)
+        self.assertNotIn("yt-dlp_linux@2026.01.01", recorded)
+        self.assertNotIn("yt-dlp_macos", recorded)
+        self.assertFalse(set(sums) & set(recorded))
+        self.assertNotIn("yt-dlp", created[0].pins["binaries"])
 
 
 class TestNormalizeYtdlpVersion(unittest.TestCase):
@@ -494,15 +637,26 @@ class TestLoadPins(unittest.TestCase):
         self.assertTrue(downloads, "pins file must pin at least one download")
         for name, digest in downloads.items():
             with self.subTest(name=name):
-                self.assertRegex(
-                    name,
-                    r"^(yt-dlp(_macos|_linux|_linux_aarch64|_arm64)?\.exe"
-                    r"|yt-dlp_(macos|linux|linux_aarch64)"
-                    r"|ffmpeg-.*-(linux64|linuxarm64|win64|winarm64)-gpl-.*"
-                    r"|ffmpeg-macos-arm64-\S+\.zip)$",
-                    "unexpected sidecar artifact name",
-                )
                 self.assertRegex(digest, r"^[0-9a-f]{64}$")
+                if name.startswith("yt-dlp"):
+                    # yt-dlp's asset names are version-independent, so its
+                    # pin key must append the release tag.
+                    self.assertRegex(
+                        name,
+                        r"^(yt-dlp(_macos|_linux|_linux_aarch64|_arm64)?\.exe"
+                        r"|yt-dlp_(macos|linux|linux_aarch64))"
+                        r"@\d{4}\.\d{2}\.\d{2}$",
+                        "unexpected yt-dlp pin key",
+                    )
+                else:
+                    # ffmpeg's names already embed the build, so theirs
+                    # must not.
+                    self.assertRegex(
+                        name,
+                        r"^(ffmpeg-.*-(linux64|linuxarm64|win64|winarm64)-gpl-.*"
+                        r"|ffmpeg-macos-arm64-\S+\.zip)$",
+                        "unexpected ffmpeg pin key",
+                    )
 
     def test_missing_file_dies(self) -> None:
         with self.assertRaises(SystemExit):
@@ -569,7 +723,10 @@ class TestPinCoverage(unittest.TestCase):
             ("Windows", "ARM64", TAG),
         ):
             with self.subTest(platform=f"{system}/{machine}"):
-                key = pin_key_from_url(ytdlp_download_url(system, machine, version))
+                # The pin key is the downloaded URL's basename plus the release
+                # tag: the basename alone is version-independent.
+                url = ytdlp_download_url(system, machine, version)
+                key = ytdlp_pin_key(pin_key_from_url(url), version)
                 self.assertIn(key, downloads)
 
     def test_btbn_archives_are_pinned(self) -> None:
@@ -591,6 +748,23 @@ class TestPinCoverage(unittest.TestCase):
     def test_macos_zip_is_pinned(self) -> None:
         pins = load_pins()
         self.assertIn(ffmpeg_macos_artifact(), pins["downloads"])
+
+    def test_no_superseded_ytdlp_keys(self) -> None:
+        # ffmpeg enforces one asset per arch (btbn_asset_name dies on two);
+        # yt-dlp's equivalent is this guard: only the pinned release's keys.
+        downloads = load_pins()["downloads"]
+        ytdlp_keys = {name for name in downloads if name.startswith("yt-dlp")}
+        expected = {
+            ytdlp_pin_key(pin_key_from_url(ytdlp_download_url(system, machine, version)), version)
+            for system, machine, version in (
+                ("Darwin", "arm64", TAG),
+                ("Linux", "x86_64", TAG),
+                ("Linux", "aarch64", TAG),
+                ("Windows", "AMD64", TAG),
+                ("Windows", "ARM64", TAG),
+            )
+        }
+        self.assertEqual(ytdlp_keys, expected, "superseded yt-dlp pin keys linger")
 
 
 class TestFetchFfmpegTempIsolation(unittest.TestCase):
