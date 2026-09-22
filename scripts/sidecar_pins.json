@@ -7,11 +7,11 @@
     "ffmpeg-n9.0.2-3-ga5923073bf-linuxarm64-gpl-9.0.tar.xz": "031d4336d6a9fab8c0bc26c3bca4fab0c09fcfdd405a7ef6ce2aa4b535fddce9",
     "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip": "2304b4ad6a5d9660b163c8a42d15433327d1ff4a57cae79a8e2d122c5af0f491",
     "ffmpeg-n9.0.2-3-ga5923073bf-winarm64-gpl-9.0.zip": "6f6fcd5b12dea77454079e7135c43444461b15bee85d5537cdb56a1731c0d8ea",
-    "yt-dlp.exe": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
-    "yt-dlp_arm64.exe": "05b438997bafc3affdfda9d041353c9d73e04dc842207254b655b0887c4445b0",
-    "yt-dlp_linux": "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a",
-    "yt-dlp_linux_aarch64": "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc",
-    "yt-dlp_macos": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
+    "yt-dlp.exe@2026.08.19": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
+    "yt-dlp_arm64.exe@2026.08.19": "05b438997bafc3affdfda9d041353c9d73e04dc842207254b655b0887c4445b0",
+    "yt-dlp_linux@2026.08.19": "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a",
+    "yt-dlp_linux_aarch64@2026.08.19": "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc",
+    "yt-dlp_macos@2026.08.19": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
   },
   "binaries": {
     "ffmpeg": {

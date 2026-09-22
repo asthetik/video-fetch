@@ -26,6 +26,13 @@ Integrity:
   passed, so a digest failure cannot be waved away by re-running the
   update (a human must look at the diff). yt-dlp, BtbN and martin-riedl
   all publish checksum files that --update-pins cross-checks.
+
+  Pin keys carry what identifies the upstream release: BtbN's and
+  martin-riedl's asset names embed the build, and yt-dlp's
+  version-independent names get the release tag appended
+  (`yt-dlp_linux@2026.08.19`). A bump therefore adds keys, which
+  --update-pins records without --force, while a digest that changes under
+  an unchanged key stays an incident.
   The macOS binary is additionally asserted to be an arm64 Mach-O and,
   on macOS, a Developer ID-signed binary: evermeet's Intel-only build was
   shipped as the macOS sidecar in 0.4.0 and could not run on Apple
@@ -435,8 +442,8 @@ def download_and_verify(
     In update mode (`PinsRecorder`) the digest was recorded from the pinned
     release's published checksums a moment earlier; the download is compared
     against it before the entry is trusted. `artifact` overrides the pins
-    key when the URL basename is too generic to be one (the macOS zip is
-    `ffmpeg.zip` on every build).
+    key when the URL basename cannot serve as one: the macOS zip is
+    `ffmpeg.zip` on every build, and yt-dlp's names carry no version.
     """
     if isinstance(pins, PinsRecorder):
         pins.download_and_record(url, dest, artifact)
@@ -499,7 +506,8 @@ def load_ytdlp_version(path: Path | None = None) -> str:
 
 
 def ytdlp_asset_name(system: str, machine: str) -> str:
-    """yt-dlp release asset for a platform (names are version-independent)."""
+    """yt-dlp release asset for a platform (names are version-independent; the
+    pin key appends the release tag — see `ytdlp_pin_key`)."""
     m = machine.lower()
     if system == "Darwin":
         return "yt-dlp_macos"
@@ -520,6 +528,17 @@ def ytdlp_asset_name(system: str, machine: str) -> str:
 
 def ytdlp_download_url(system: str, machine: str, version: str) -> str:
     return f"{YTDLP_DOWNLOAD_BASE}/{version}/{ytdlp_asset_name(system, machine)}"
+
+
+def ytdlp_pin_key(artifact: str, version: str) -> str:
+    """The pins key for a yt-dlp asset: the version-independent asset name plus
+    the release tag (`yt-dlp_linux@2026.08.19`).
+
+    Embedding the version is what lets a bump add a key instead of rewriting
+    one, which is how --update-pins records it without --force; a digest that
+    changes under an unchanged key stays an incident.
+    """
+    return f"{artifact}@{version}"
 
 
 def ffmpeg_branch(version: str = FFMPEG_VERSION) -> str:
@@ -641,11 +660,12 @@ def fetch_ytdlp(
 ) -> None:
     print(f"Downloading yt-dlp {version}...")
     try:
+        artifact = ytdlp_asset_name(system, machine)
         url = ytdlp_download_url(system, machine, version)
     except ValueError as e:
         die(str(e))
     if recorder is None:
-        download_and_verify(url, out, pins)
+        download_and_verify(url, out, pins, artifact=ytdlp_pin_key(artifact, version))
     else:
         download(url, out)  # digest recorded in the update pass
     make_executable(out)
@@ -799,7 +819,8 @@ class PinsRecorder:
     stays set and the run fails at the end with instructions. Filenames that
     embed a version (the macOS zip, BtbN's build-tagged assets) are meant to
     be deleted and re-added when the version is bumped, which is why a
-    missing entry is recorded without --force.
+    missing entry is recorded without --force; yt-dlp's names carry no
+    version, so its pin key appends the release tag for the same reason.
 
     Digests recorded from an upstream checksum file also pin every later
     download of that artifact for the rest of the run: what gets extracted
@@ -891,7 +912,7 @@ def update_pins(force: bool) -> None:
         artifact = ytdlp_asset_name(system, machine)
         if artifact not in ytdlp_sums:
             die(f"{artifact} missing from yt-dlp {ytdlp_version} SHA2-256SUMS")
-        recorder.record(artifact, ytdlp_sums[artifact])
+        recorder.record(ytdlp_pin_key(artifact, ytdlp_version), ytdlp_sums[artifact])
 
     print(
         f"ffmpeg {FFMPEG_VERSION} branch {ffmpeg_branch()} — "

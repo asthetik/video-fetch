@@ -62,8 +62,8 @@ jobs:
             echo
             echo "升级步骤见 README「发版与 sidecar」一节：改版本号后跑"
             echo "\`python3 scripts/fetch_sidecars.py --update-pins\` 更新摘要。"
-            echo "yt-dlp 的摘要变化要用 \`--force\`——它的 pin 键是不带版本号的资产名，"
-            echo "所以「版本升级」和「上游被篡改」在工具眼里一样，必须人工确认。"
+            echo "yt-dlp 的新版本会以新键记录（\`yt-dlp_linux@<tag>\`），直接加进去、不需要 \`--force\`；"
+            echo "只有同一个版本键的摘要变了才要 \`--force\`——那是投毒信号，先查清再决定。"
           } > body.md
           existing=$(gh issue list --state open --search "sidecar-upstream in:title" \
             --json number --jq '.[0].number // empty')

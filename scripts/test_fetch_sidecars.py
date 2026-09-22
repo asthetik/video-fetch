@@ -22,9 +22,11 @@ from fetch_sidecars import (
     FFMPEG_MACOS_SIGNER,
     FFMPEG_MACOS_TEAM_ID,
     FFMPEG_VERSION,
+    PinsRecorder,
     elf_machine,
     extract_tar_xz,
     fetch_ffmpeg,
+    fetch_ytdlp,
     ffmpeg_branch,
     ffmpeg_download_url,
     ffmpeg_macos_artifact,
@@ -41,6 +43,7 @@ from fetch_sidecars import (
     verify_macos_ffmpeg,
     verify_sha256,
     ytdlp_download_url,
+    ytdlp_pin_key,
 )
 
 PIN = "2026.8.19"
@@ -111,6 +114,72 @@ class TestYtdlpUrl(unittest.TestCase):
         self.assertTrue(
             ytdlp_download_url("Windows", "ARM64", TAG)
             .endswith(f"/download/{TAG}/yt-dlp_arm64.exe")
+        )
+
+
+class TestYtdlpPinKeys(unittest.TestCase):
+    def test_key_appends_the_release_tag(self) -> None:
+        self.assertEqual(
+            ytdlp_pin_key("yt-dlp_linux", "2026.08.19"), "yt-dlp_linux@2026.08.19"
+        )
+
+    def test_fetch_verifies_against_the_versioned_key(self) -> None:
+        seen: list[str | None] = []
+
+        def spy(
+            url: str, dest: Path, pins: dict, artifact: str | None = None
+        ) -> None:
+            seen.append(artifact)
+            Path(dest).write_bytes(b"stub")
+
+        original = fetch_sidecars.download_and_verify
+        fetch_sidecars.download_and_verify = spy
+        self.addCleanup(
+            lambda: setattr(fetch_sidecars, "download_and_verify", original)
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_s:
+            fetch_ytdlp(
+                "Linux",
+                "x86_64",
+                Path(tmp_s) / "yt-dlp",
+                "2026.08.19",
+                {"downloads": {}},
+            )
+
+        self.assertEqual(seen, ["yt-dlp_linux@2026.08.19"])
+
+
+class TestPinsRecorderPolicy(unittest.TestCase):
+    """What the versioned key buys: a bump is recorded, a rewrite is not."""
+
+    def recorder(self, force: bool = False) -> PinsRecorder:
+        return PinsRecorder({"downloads": {}, "binaries": {}}, force)
+
+    def test_a_new_key_is_recorded_without_force(self) -> None:
+        recorder = self.recorder()
+        recorder.record("yt-dlp_linux@2026.09.20", "a" * 64)
+        self.assertFalse(recorder.stale)
+        self.assertEqual(
+            recorder.pins["downloads"]["yt-dlp_linux@2026.09.20"], "a" * 64
+        )
+
+    def test_a_changed_digest_under_the_same_key_needs_force(self) -> None:
+        recorder = self.recorder()
+        recorder.record("yt-dlp_linux@2026.08.19", "a" * 64)
+        recorder.record("yt-dlp_linux@2026.08.19", "b" * 64)
+        self.assertTrue(recorder.stale)
+        self.assertEqual(
+            recorder.pins["downloads"]["yt-dlp_linux@2026.08.19"], "a" * 64
+        )
+
+    def test_force_repins_a_changed_digest(self) -> None:
+        recorder = self.recorder(force=True)
+        recorder.record("yt-dlp_linux@2026.08.19", "a" * 64)
+        recorder.record("yt-dlp_linux@2026.08.19", "b" * 64)
+        self.assertFalse(recorder.stale)
+        self.assertEqual(
+            recorder.pins["downloads"]["yt-dlp_linux@2026.08.19"], "b" * 64
         )
 
 
@@ -494,11 +563,14 @@ class TestLoadPins(unittest.TestCase):
         self.assertTrue(downloads, "pins file must pin at least one download")
         for name, digest in downloads.items():
             with self.subTest(name=name):
+                # yt-dlp's asset names are version-independent, so its pin key
+                # appends the release tag; ffmpeg's names already embed the
+                # build, so theirs must not.
                 self.assertRegex(
                     name,
                     r"^(yt-dlp(_macos|_linux|_linux_aarch64|_arm64)?\.exe"
-                    r"|yt-dlp_(macos|linux|linux_aarch64)"
-                    r"|ffmpeg-.*-(linux64|linuxarm64|win64|winarm64)-gpl-.*"
+                    r"|yt-dlp_(macos|linux|linux_aarch64))@\d{4}\.\d{2}\.\d{2}$"
+                    r"|^(ffmpeg-.*-(linux64|linuxarm64|win64|winarm64)-gpl-.*"
                     r"|ffmpeg-macos-arm64-\S+\.zip)$",
                     "unexpected sidecar artifact name",
                 )
@@ -569,7 +641,10 @@ class TestPinCoverage(unittest.TestCase):
             ("Windows", "ARM64", TAG),
         ):
             with self.subTest(platform=f"{system}/{machine}"):
-                key = pin_key_from_url(ytdlp_download_url(system, machine, version))
+                # The pin key is the downloaded URL's basename plus the release
+                # tag: the basename alone is version-independent.
+                url = ytdlp_download_url(system, machine, version)
+                key = ytdlp_pin_key(pin_key_from_url(url), version)
                 self.assertIn(key, downloads)
 
     def test_btbn_archives_are_pinned(self) -> None:
