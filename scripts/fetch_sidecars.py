@@ -109,6 +109,8 @@ FFMPEG_VERSION = "9.0.2"
 
 REQUIREMENTS_FILE = Path(__file__).resolve().parent / "requirements-sidecars.txt"
 PINS_FILE = Path(__file__).resolve().parent / "sidecar_pins.json"
+# Tauri's externalBin directory, where the fetched sidecars land.
+SIDECAR_DIR = Path(__file__).resolve().parent.parent / "src-tauri" / "binaries"
 
 # Schema 2 records the ffmpeg snapshot the file was generated from
 # (`ffmpeg_snapshot`). Schema 1 files still load so --update-pins can
@@ -1176,12 +1178,10 @@ def update_pins(force: bool) -> None:
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent.parent
-    bin_dir = root / "src-tauri" / "binaries"
+    bin_dir = SIDECAR_DIR
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     pins = load_pins()
-    verify_ffmpeg_snapshot(pins)
     ytdlp_version = load_ytdlp_version()
     print(f"yt-dlp version: {ytdlp_version} (pinned in requirements-sidecars.txt)")
     print(
@@ -1202,17 +1202,26 @@ def main() -> None:
     ytdlp_out = bin_dir / f"yt-dlp-{triple}{ext}"
     ffmpeg_out = bin_dir / f"ffmpeg-{triple}{ext}"
 
+    # Checked after the paths are known, not at load time: a mismatch
+    # invalidates the cached ffmpeg binary, and those bytes must not stay at
+    # the sidecar path for the next `tauri build` to bundle.
+    try:
+        verify_ffmpeg_snapshot(pins)
+    except SystemExit:
+        ffmpeg_out.unlink(missing_ok=True)
+        raise
+
     print(f"Fetching sidecars for {triple} ({system}/{machine}) -> {bin_dir}")
 
     # A cached binary is reused only if it still matches its pinned digest;
-    # anything else, a missing pin included, is re-fetched and re-verified.
-    # yt-dlp's binary pin is keyed by target triple and survives a version
-    # bump on its own, so it is checked against the pinned release as well.
-    cached_ffmpeg = pins["binaries"].get("ffmpeg", {}).get(triple)
+    # anything else, a missing pin included, is re-fetched, re-verified and
+    # removed first so a failed re-fetch cannot leave it behind. yt-dlp's
+    # binary pin is keyed by target triple and survives a version bump on
+    # its own, so it is checked against the pinned release as well.
     need_ytdlp = ytdlp_needs_fetch(
         ytdlp_out, pins, triple, system, machine, ytdlp_version
     )
-    need_ffmpeg = _needs_fetch(ffmpeg_out, cached_ffmpeg, "ffmpeg")
+    need_ffmpeg = ffmpeg_needs_fetch(ffmpeg_out, pins, triple)
 
     if not need_ytdlp and not need_ffmpeg:
         print("Sidecars already present and verified, skipping download:")
@@ -1284,6 +1293,23 @@ def ytdlp_needs_fetch(
                 f"than yt-dlp {version}; re-fetching"
             )
             untrusted = True
+    if untrusted:
+        out.unlink(missing_ok=True)
+    return untrusted
+
+
+def ffmpeg_needs_fetch(out: Path, pins: dict, triple: str) -> bool:
+    """Whether the cached ffmpeg binary at `out` must be (re-)fetched.
+
+    Same fail-closed rule as the yt-dlp cache: the binary is trusted only
+    when it matches `binaries.ffmpeg[triple]`, and anything else — a digest
+    that disagrees, no pin at all — is deleted before the re-fetch, so a
+    failed re-fetch cannot leave it at the final sidecar path. The release
+    identity that would make a stale binary look valid is covered separately
+    by `verify_ffmpeg_snapshot`.
+    """
+    expected = pins["binaries"].get("ffmpeg", {}).get(triple)
+    untrusted = _needs_fetch(out, expected, "ffmpeg")
     if untrusted:
         out.unlink(missing_ok=True)
     return untrusted

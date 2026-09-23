@@ -239,6 +239,51 @@ class TestYtdlpCacheAnchor(TmpDirTestCase):
             )
 
 
+class TestFfmpegCacheFailClosed(TmpDirTestCase):
+    """The same rule as yt-dlp's cache: an untrusted ffmpeg binary is
+    deleted, not just re-fetched. The re-fetch can die, and bytes left at
+    the final sidecar path are what a later `tauri build` bundles.
+
+    The release side is guarded by the snapshot anchor; these are the
+    per-file cases (`binaries.ffmpeg` is keyed by target triple).
+    """
+
+    TRIPLE = "x86_64-unknown-linux-gnu"
+
+    def pins(self, expected: str | None) -> dict:
+        return {
+            "downloads": {},
+            "binaries": {} if expected is None else {"ffmpeg": {self.TRIPLE: expected}},
+        }
+
+    def cached(self, payload: bytes = BLOB) -> Path:
+        path = self.tmpdir() / f"ffmpeg-{self.TRIPLE}"
+        path.write_bytes(payload)
+        return path
+
+    def needs_fetch(self, path: Path, pins: dict) -> bool:
+        return fetch_sidecars.ffmpeg_needs_fetch(path, pins, self.TRIPLE)
+
+    def test_cache_matching_its_pin_is_kept(self) -> None:
+        path = self.cached()
+        self.assertFalse(self.needs_fetch(path, self.pins(BLOB_SHA256)))
+        self.assertTrue(path.exists(), "a trusted cache must be left alone")
+
+    def test_cache_with_other_bytes_is_removed(self) -> None:
+        path = self.cached(b"substituted bytes")
+        self.assertTrue(self.needs_fetch(path, self.pins(BLOB_SHA256)))
+        self.assertFalse(path.exists(), "unverified bytes must not survive")
+
+    def test_cache_without_a_pin_is_removed(self) -> None:
+        path = self.cached()
+        self.assertTrue(self.needs_fetch(path, self.pins(expected=None)))
+        self.assertFalse(path.exists())
+
+    def test_a_missing_cache_needs_a_fetch(self) -> None:
+        missing = self.tmpdir() / f"ffmpeg-{self.TRIPLE}"
+        self.assertTrue(self.needs_fetch(missing, self.pins(BLOB_SHA256)))
+
+
 class TestPinsRecorderPolicy(unittest.TestCase):
     """What the versioned key buys: a bump is recorded, a rewrite is not."""
 
@@ -1166,9 +1211,16 @@ class TestFfmpegSnapshotAnchor(TmpDirTestCase):
             json.dumps({"schema": 2, "downloads": {}, "ffmpeg_snapshot": self.stale()})
         )
         self.addCleanup(stale.unlink)
+        # The sidecar directory is redirected: a snapshot mismatch now
+        # removes the cached binary, and the test must not touch the real
+        # src-tauri/binaries.
+        bin_dir = self.tmpdir()
+        cached = bin_dir / "ffmpeg-x86_64-unknown-linux-gnu"
+        cached.write_bytes(b"the superseded build's ffmpeg")
         stderr = io.StringIO()
         with (
             mock.patch.object(fetch_sidecars, "PINS_FILE", stale),
+            mock.patch.object(fetch_sidecars, "SIDECAR_DIR", bin_dir),
             mock.patch.object(
                 fetch_sidecars, "host_triple", return_value="x86_64-unknown-linux-gnu"
             ),
@@ -1182,6 +1234,11 @@ class TestFfmpegSnapshotAnchor(TmpDirTestCase):
             with self.assertRaises(SystemExit):
                 fetch_sidecars.main()
         self.assertIn("--update-pins", stderr.getvalue())
+        self.assertFalse(
+            cached.exists(),
+            "a binary pinned against the superseded snapshot must not stay "
+            "where a build would bundle it",
+        )
 
 
 class TestFetchFfmpegTempIsolation(unittest.TestCase):
