@@ -836,6 +836,14 @@ impl DownloadManager {
                     {
                         let mut running = job;
                         running.status = JobStatus::Running;
+                        // Bake datetime tokens once and persist the result: a
+                        // resume/retry re-runs this same path, and re-baking
+                        // with a fresh clock would rename the target file and
+                        // restart the transfer instead of continuing the .part.
+                        running.output_template = naming::bake_local_datetime_tokens(
+                            &running.output_template,
+                            &chrono::Local::now(),
+                        );
                         if let Err(e) = db.update_job(&running) {
                             tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
                         }
@@ -3030,6 +3038,90 @@ mod tests {
         );
         assert!(!save_dir.join("demo.f30016.mp4").exists());
         assert!(!work_root.join(job_id).exists());
+    }
+
+    /// A resume must reuse the exact output name the paused run was writing.
+    /// A `%(timestamp>…)s`-style token is baked once and persisted with the
+    /// Running write; re-baking on resume would rename the target and restart
+    /// the download instead of continuing the .part files.
+    ///
+    /// Value: protects=the baked-template persistence in run_job (resume and
+    /// retry target the same work-dir names); fails_when=the bake result is
+    /// not persisted — the mock receives the raw token on the first run, and a
+    /// resume re-bakes different bytes (the 1.1s gap forces a new second);
+    /// why_new=every other test template is token-free, while timestamp
+    /// templates are a supported, user-visible settings shape; seam=none
+    #[tokio::test]
+    async fn resume_reuses_the_baked_output_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        struct TemplateCapturingDownloader {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl Downloader for TemplateCapturingDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                if let Ok(mut seen) = self.seen.lock() {
+                    seen.push(job.output_template.clone());
+                }
+                sleep(Duration::from_millis(5000)).await;
+                Err("unreachable".into())
+            }
+        }
+
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(TemplateCapturingDownloader {
+                seen: Arc::clone(&seen),
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let job_id = "job-token-template";
+        let mut job = sample_job(job_id);
+        job.output_template = "%(timestamp>%Y-%m-%dT%H-%M-%S)s_demo [%(id)s].%(ext)s".into();
+        manager.enqueue(job, false).unwrap();
+        wait_for_status(&manager, job_id, JobStatus::Running).await;
+
+        for _ in 0..200 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        manager.pause(job_id).unwrap();
+
+        // Cross a wall-clock second so any re-bake at resume produces different bytes.
+        sleep(Duration::from_millis(1100)).await;
+        manager.resume(job_id).unwrap();
+        for _ in 0..200 {
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "the resume must re-run the downloader");
+        assert!(
+            !seen[0].contains("timestamp"),
+            "the token must be baked before the downloader sees it: {}",
+            seen[0]
+        );
+        assert_eq!(
+            seen[0], seen[1],
+            "resume must reuse the baked name from the paused run"
+        );
+        let jobs = manager.list().unwrap();
+        let row = jobs.iter().find(|j| j.id == job_id).unwrap();
+        assert_eq!(
+            row.output_template, seen[0],
+            "the baked template must be persisted on the job row"
+        );
     }
 
     /// Queue-level pause/resume: pause_all covers exactly Pending|Running and
