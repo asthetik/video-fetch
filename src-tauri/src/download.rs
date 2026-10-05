@@ -690,6 +690,26 @@ impl DownloadManager {
         Ok(job)
     }
 
+    /// Rows left Running when the app quit have no runner after a relaunch;
+    /// surface them as Paused (progress and .part files are kept, 继续 resumes
+    /// them) instead of leaving a zombie 下载中 row with a frozen progress bar.
+    pub fn reconcile_interrupted_runs(&self) -> AppResult<u64> {
+        self.db.lock().map_err(lock_err)?.mark_running_as_paused()
+    }
+
+    /// Best-effort teardown for app exit: kill every live download's whole
+    /// process group so no yt-dlp second stage (or its ffmpeg) outlives the
+    /// app — dropping the Child alone only reaps the direct stage.
+    pub fn kill_all_children(&self) {
+        let ids: Vec<String> = match self.children.lock() {
+            Ok(guard) => guard.keys().cloned().collect(),
+            Err(_) => return,
+        };
+        for id in ids {
+            kill_download(&self.children, &id);
+        }
+    }
+
     /// Pause every Pending/Running job. Counts only jobs whose status actually
     /// changed (same rule as cancel_all).
     pub fn pause_all(&self) -> AppResult<PauseAllResult> {
@@ -2876,6 +2896,90 @@ mod tests {
             stop_kind_of(&flags, "job-done-cancel").is_none(),
             "a no-op cancel on a done row must not leak its marker"
         );
+    }
+
+    /// A relaunch must not leave zombie 下载中 rows: interrupted runs come back
+    /// as 已暂停 with their progress kept, and only Running rows are touched.
+    ///
+    /// Value: protects=the startup reconciliation build_app_state runs, and its
+    /// status filter; fails_when=mark_running_as_paused widens or narrows its
+    /// WHERE (pending/paused/done rows flipped, or the running row left
+    /// behind); why_new=quit-while-running previously left a frozen
+    /// 下载中 row with no runner and had no coverage; seam=none
+    #[test]
+    fn reconcile_interrupted_runs_turns_only_running_into_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::slow_success(50)) as Arc<dyn Downloader>,
+        );
+        for (id, status, progress) in [
+            ("run-1", JobStatus::Running, 0.42),
+            ("pending-1", JobStatus::Pending, 0.0),
+            ("paused-1", JobStatus::Paused, 0.3),
+            ("done-1", JobStatus::Done, 1.0),
+        ] {
+            let mut job = sample_job(id);
+            job.status = status;
+            job.progress = progress;
+            manager.db.lock().unwrap().insert_job(&job).unwrap();
+        }
+
+        assert_eq!(manager.reconcile_interrupted_runs().unwrap(), 1);
+
+        let jobs = manager.list().unwrap();
+        let by_id = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
+        let run = by_id("run-1");
+        assert_eq!(run.status, JobStatus::Paused);
+        assert!(
+            (run.progress - 0.42).abs() < f64::EPSILON,
+            "progress must survive the interrupted-to-paused flip"
+        );
+        assert_eq!(by_id("pending-1").status, JobStatus::Pending);
+        assert_eq!(by_id("paused-1").status, JobStatus::Paused);
+        assert_eq!(by_id("done-1").status, JobStatus::Done);
+    }
+
+    /// App exit must take the whole download process group down with it.
+    ///
+    /// Value: protects=the RunEvent::Exit teardown (kill_all_children) and the
+    /// registry walk; fails_when=the walk is a no-op or misses an id — the
+    /// spawned child survives and the registry stays populated;
+    /// why_new=exit-time teardown had no coverage; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_all_children_empties_the_registry_and_kills_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::slow_success(50)) as Arc<dyn Downloader>,
+        );
+
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30");
+        cmd.process_group(0);
+        let child = cmd.spawn().unwrap();
+        let pid = child.id().unwrap() as i32;
+        manager
+            .children
+            .lock()
+            .unwrap()
+            .insert("job-exit".into(), child);
+
+        manager.kill_all_children();
+        assert!(manager.children.lock().unwrap().is_empty());
+
+        let mut dead = false;
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                dead = true;
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(dead, "the spawned download child must not outlive the app");
     }
 
     /// A merge killed mid-flight leaves yt-dlp's `….temp.<ext>` writer file

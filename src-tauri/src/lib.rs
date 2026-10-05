@@ -109,6 +109,10 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit)
                 && let Some(state) = app_handle.try_state::<commands::AppState>()
             {
+                // Quitting must not leave the download tree behind: the
+                // drop-time kill only reaps the direct stage, so the
+                // PyInstaller second stage (and ffmpeg) can keep writing.
+                state.downloads.kill_all_children();
                 state.activity_log.flush();
             }
         });

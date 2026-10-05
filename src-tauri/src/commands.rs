@@ -1553,6 +1553,12 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     if removed_orphans > 0 {
         tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed_orphans} 个");
     }
+    // A row left Running by the previous session has no runner: surface it as
+    // Paused so the UI offers 继续 instead of a frozen 下载中 bar.
+    let reconciled = downloads.reconcile_interrupted_runs()?;
+    if reconciled > 0 {
+        tracing::info!(target: "core", "app: 中断的下载已转为暂停 {reconciled} 个");
+    }
 
     let http_client = reqwest::Client::builder()
         .user_agent(bilibili_view::USER_AGENT)
