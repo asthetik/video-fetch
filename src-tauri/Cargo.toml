@@ -6,7 +6,7 @@ authors = ["asthetik"]
 license = "Apache-2.0"
 repository = "https://github.com/asthetik/video-fetch"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -18,32 +18,32 @@ name = "video_fetch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = [] }
-tauri-plugin-opener = "2.5"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2.0"
-url = "2.5"
-rusqlite = { version = "0.40", features = ["bundled"] }
-tokio = { version = "1.53", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
-async-trait = "0.1"
-tauri-plugin-dialog = "2.7"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-which = "8.0"
-tauri-plugin-shell = "2.3"
-tauri-plugin-single-instance = "2.4"
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-md-5 = "0.11"
-percent-encoding = "2.3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time", "local-time"] }
-tracing-appender = "0.2"
+tauri = { version = "2.12.1", features = [] }
+tauri-plugin-opener = "2.7.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+url = "2.5.8"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { version = "1.53.2", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
+async-trait = "0.1.92"
+tauri-plugin-dialog = "2.8.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+which = "8.0.6"
+tauri-plugin-shell = "2.4.0"
+tauri-plugin-single-instance = "2.5.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
+md-5 = "0.11.0"
+percent-encoding = "2.3.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter", "time", "local-time"] }
+tracing-appender = "0.2.5"
 
 [dev-dependencies]
-tempfile = "3.27"
+tempfile = "3.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+objc2 = "0.6.4"
