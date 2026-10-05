@@ -167,7 +167,7 @@ export function VideoCard({
       });
 
       if (conflict.downloading) {
-        setError(`该${mediaLabel}已在下载队列中，请等待完成或取消后再试`);
+        setError(`该${mediaLabel}已在下载队列中，请继续、等待或取消后再试`);
         return;
       }
 

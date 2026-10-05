@@ -202,6 +202,7 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   [pagesCss, ".queue-badge.running", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
   [pagesCss, ".queue-badge.done", ["background: var(--success-tint)", "color: var(--success-ink)"]],
   [pagesCss, ".queue-badge.failed", ["background: var(--danger-tint)", "color: var(--danger-ink)"]],
+  [pagesCss, ".queue-badge.paused", ["background: var(--warn-tint)", "color: var(--warn-ink)"]],
   [pagesCss, ".queue-count", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
   [pagesCss, ".log-badge-info", ["background: var(--muted-tint)", "color: var(--text)"]],
   [pagesCss, ".log-badge-warn", ["background: var(--warn-tint-strong)", "color: var(--warn-ink-strong)"]],

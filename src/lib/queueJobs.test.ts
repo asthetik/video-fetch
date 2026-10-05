@@ -92,6 +92,47 @@ describe("upsertJob", () => {
   });
 });
 
+describe("paused jobs", () => {
+  it("sorts paused after pending and before failed", () => {
+    const input = [
+      job("f", "failed"),
+      job("pa", "paused"),
+      job("r", "running"),
+      job("p", "pending"),
+      job("d", "done"),
+    ];
+    assert.deepEqual(
+      sortJobs(input).map((j) => j.id),
+      ["r", "p", "pa", "f", "d"],
+    );
+  });
+
+  it("keeps paused jobs in the active partition", () => {
+    const jobs = [job("r", "running"), job("pa", "paused"), job("d", "done")];
+    const part = partitionQueueJobs(jobs);
+    assert.deepEqual(
+      part.active.map((j) => j.id),
+      ["r", "pa"],
+    );
+    assert.equal(part.doneFallback, null, "a paused job counts as active");
+  });
+
+  it("a failed upsert does not drop paused rows", () => {
+    const base = [job("r", "running"), job("pa", "paused"), job("f-old", "failed")];
+    const next = upsertJob(base, { ...job("r", "failed"), error: "网络错误" });
+    assert.deepEqual(
+      next.map((j) => `${j.id}:${j.status}`),
+      ["pa:paused", "r:failed", "f-old:failed"],
+    );
+    const part = partitionQueueJobs(next);
+    assert.deepEqual(
+      part.active.map((j) => j.id),
+      ["pa"],
+      "the paused row (and its 继续 button) must survive a peer failure",
+    );
+  });
+});
+
 describe("partitionQueueJobs", () => {
   it("caps recentFailed at 3 preserving order", () => {
     const jobs = [

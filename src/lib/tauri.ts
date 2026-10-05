@@ -13,6 +13,8 @@ import type {
   BatchEnqueueItem,
   BatchEnqueueResult,
   EngineVersions,
+  PauseAllResult,
+  ResumeAllResult,
 } from "../types";
 
 export interface EnqueueArgs {
@@ -76,6 +78,10 @@ export const api = {
   readLogTail: (name: string) => invoke<string[]>("read_log_tail", { name }),
   clearLogs: () => invoke<number>("clear_logs"),
   retryJob: (id: string) => invoke<DownloadJob>("retry_job", { id }),
+  pauseJob: (id: string) => invoke<DownloadJob>("pause_job", { id }),
+  resumeJob: (id: string) => invoke<DownloadJob>("resume_job", { id }),
+  pauseAllJobs: () => invoke<PauseAllResult>("pause_all_jobs"),
+  resumeAllJobs: () => invoke<ResumeAllResult>("resume_all_jobs"),
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),
   getSettings: () => invoke<AppSettings>("get_settings"),

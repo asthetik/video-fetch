@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterHistoryJobs } from "./historyFilter.ts";
+import { filterHistoryJobs, historyVisibleJobs } from "./historyFilter.ts";
 import type { DownloadJob } from "../types.ts";
 
 function job(partial: Partial<DownloadJob>): DownloadJob {
@@ -42,4 +42,14 @@ test("query matches title or output path, case-insensitive, trimmed", () => {
 test("empty query returns everything in input order", () => {
   const jobs = [job({ id: "a" }), job({ id: "b", status: "failed" })];
   assert.equal(filterHistoryJobs(jobs, { query: "", status: "all" }).length, 2);
+});
+
+test("historyVisibleJobs excludes paused (paused lives only in the download queue)", () => {
+  const jobs = [
+    job({ id: "a", status: "done" }),
+    job({ id: "b", status: "paused" }),
+    job({ id: "c", status: "running" }),
+    job({ id: "d", status: "failed" }),
+  ];
+  assert.deepEqual(historyVisibleJobs(jobs).map((j) => j.id), ["a", "c", "d"]);
 });

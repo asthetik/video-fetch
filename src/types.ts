@@ -1,4 +1,4 @@
-export type JobStatus = "pending" | "running" | "done" | "failed";
+export type JobStatus = "pending" | "running" | "done" | "failed" | "paused";
 export type AuthStatus = "logged_out" | "logged_in" | "possibly_expired";
 
 export interface PageItem {
@@ -35,7 +35,8 @@ export interface VideoMeta {
 /**
  * Job record from `list_jobs` / enqueue / cancel / retry.
  * `speed` / `eta` / byte fields are NOT persisted by the backend — they only
- * appear via `download://progress` events and are cleared on reload/done/failed.
+ * appear via `download://progress` events and are cleared on reload/done/failed
+ * (and on paused: a paused row keeps progress but drops the live fields).
  */
 export interface DownloadJob {
   id: string;
@@ -74,6 +75,16 @@ export interface AppSettings {
 
 export interface CancelAllResult {
   cancelled: number;
+  errors?: string[];
+}
+
+export interface PauseAllResult {
+  paused: number;
+  errors?: string[];
+}
+
+export interface ResumeAllResult {
+  resumed: number;
   errors?: string[];
 }
 

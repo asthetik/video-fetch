@@ -9,11 +9,18 @@ function rank(status: JobStatus): number {
       return 0;
     case "pending":
       return 1;
-    case "failed":
+    case "paused":
       return 2;
-    case "done":
+    case "failed":
       return 3;
+    case "done":
+      return 4;
   }
+}
+
+/** Statuses that keep a job in the queue's active area (paused is resumable). */
+export function isActiveStatus(status: JobStatus): boolean {
+  return status === "pending" || status === "running" || status === "paused";
 }
 
 /** Stable status ordering; within the same status, keep input relative order. */
@@ -34,9 +41,7 @@ export function sortJobs(jobs: DownloadJob[]): DownloadJob[] {
 export function upsertJob(jobs: DownloadJob[], job: DownloadJob): DownloadJob[] {
   const without = jobs.filter((j) => j.id !== job.id);
   if (job.status === "failed") {
-    const active = without.filter(
-      (j) => j.status === "pending" || j.status === "running",
-    );
+    const active = without.filter((j) => isActiveStatus(j.status));
     const failed = without.filter((j) => j.status === "failed");
     const done = without.filter((j) => j.status === "done");
     return sortJobs(active).concat([job], failed, done);
@@ -59,9 +64,7 @@ export function partitionQueueJobs(jobs: DownloadJob[]): {
   doneFallback: DownloadJob[] | null;
 } {
   const ordered = sortJobs(jobs);
-  const active = ordered.filter(
-    (j) => j.status === "pending" || j.status === "running",
-  );
+  const active = ordered.filter((j) => isActiveStatus(j.status));
   // After sortJobs, failed keep relative order among themselves from `jobs`
   // except upsertJob already put newest failed first within that group.
   const failed = ordered.filter((j) => j.status === "failed");
