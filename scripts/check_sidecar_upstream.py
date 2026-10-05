@@ -23,7 +23,7 @@ do not share the runner's anonymous quota with everything else on that IP.
 Exit codes:
 
   0   every pin is the newest upstream build
-  3   something is newer; each difference is printed as `组件 X → Y`
+  3   something is newer; each difference is printed as `<component> <pinned> → <upstream>`
   1   a request failed or a response did not parse (fetch_bytes and die) — the
       workflow fails the job instead of opening a "new version" issue, because
       "upstream is unreachable" must never read as "out of date"
@@ -158,8 +158,8 @@ def btbn_finding(assets: list[str], pinned_name: str) -> str | None:
                 return None
             return f"ffmpeg (Linux/Windows) {pinned_token} → {token}"
     return (
-        f"ffmpeg (Linux/Windows)：pin 的变体 {tail} 在最新快照里已不存在，"
-        "需要确认上游是否换了分支"
+        f"ffmpeg (Linux/Windows): the pinned variant {tail} is missing from the "
+        "newest snapshot; check whether upstream switched branches"
     )
 
 
@@ -216,9 +216,9 @@ def main() -> None:
     except (ValueError, KeyError, TypeError) as e:
         die(f"upstream response did not parse: {e}")
     if not findings:
-        print("上游 sidecar 无新版本")
+        print("Upstream sidecar builds are current")
         raise SystemExit(EXIT_CURRENT)
-    print("上游有更新：")
+    print("Newer upstream builds available:")
     for finding in findings:
         print(f"  {finding}")
     raise SystemExit(EXIT_OUTDATED)
