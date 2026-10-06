@@ -577,9 +577,7 @@ impl DownloadManager {
         if let Ok(mut flags) = self.stop_flags.lock() {
             flags.retain(|id, _| !cleared.contains(id.as_str()));
         }
-        if let Ok(mut tokens) = self.runner_tokens.lock() {
-            tokens.retain(|id, _| !cleared.contains(id.as_str()));
-        }
+        lock_tokens(&self.runner_tokens).retain(|id, _| !cleared.contains(id.as_str()));
         Ok(ClearFinishedResult {
             cleared: cleared_ids.len() as u64,
         })
