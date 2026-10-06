@@ -114,3 +114,41 @@ async fn download_completes_and_delivers_a_merged_file() {
     // The work dir is cleaned on completion (gone or empty)
     support::oracles::assert_no_stray_media_files(&h.work_dir_of(&job.id));
 }
+
+/// Value: protects=pause keeps fragments and resume continues from the
+/// breakpoint (per-stream request accounting, playlists excluded, tolerance
+/// +2 for the interrupted fragment's fail+retry); fails_when=resume restarts
+/// the transfer or the pause drops the work dir; why_new=the spike verified
+/// this only by hand; seam=none
+#[tokio::test]
+async fn pause_resume_finishes_without_redownloading() {
+    let h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+
+    h.manager.pause(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+        .await;
+    h.server.release_gate();
+
+    // Pause keeps the work dir (fragments / `.part`)
+    let wd = h.work_dir_of(&job.id);
+    assert!(wd.is_dir(), "pause must keep the work dir");
+
+    h.manager.resume(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+        .await;
+
+    let c = h.server.counts(1);
+    let fx = support::fixture::ensure(&h.ffmpeg);
+    assert!(
+        c.video_fragments <= fx.video_segments + 2,
+        "video re-downloaded: {c:?}"
+    );
+    assert!(
+        c.audio_fragments <= fx.audio_segments + 2,
+        "audio re-downloaded: {c:?}"
+    );
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
+}
