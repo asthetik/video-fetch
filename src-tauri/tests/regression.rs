@@ -289,3 +289,65 @@ async fn cancel_stops_everything_and_drops_the_workdir() {
         "requests continued after cancel"
     );
 }
+
+/// Value: protects=the paused job keeping the active-queue slot
+/// (has_active_job includes Paused) and releasing it on cancel;
+/// fails_when=enqueue accepts a duplicate while one is paused; why_new=the
+/// design doc flagged find_job_conflict/has_active_job as easy to miss;
+/// seam=none
+#[tokio::test]
+async fn a_paused_job_keeps_its_active_slot() {
+    let h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    h.manager.pause(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+        .await;
+    h.server.release_gate();
+
+    // A second attempt with the same video id must be rejected — and each
+    // attempt needs a fresh job: enqueue takes it by value.
+    let err = h.manager.enqueue(h.job_for(1), false).unwrap_err();
+    assert!(err.to_string().contains("已在下载队列中"), "got: {err}");
+
+    h.manager.cancel(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(30))
+        .await;
+    h.manager
+        .enqueue(h.job_for(1), false)
+        .expect("slot released after cancel");
+}
+
+/// Value: protects=pause releasing the semaphore so the next queued job
+/// starts, plus pause_all/resume_all round-tripping the queue; fails_when=
+/// the permit stays held by a paused job or the all-ops miss a state;
+/// why_new=queue-level ops lack real-binary coverage; seam=none
+#[tokio::test]
+async fn pause_all_resume_all_round_trips_the_queue() {
+    let h = support::harness::Harness::new(1); // concurrency 1
+    let a = h.enqueue(1);
+    let b = h.enqueue(2);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+
+    h.manager.pause(&a.id).unwrap();
+    h.wait_status(&a.id, JobStatus::Paused, Duration::from_secs(30))
+        .await;
+    h.server.release_gate();
+    // The permit must be released so b takes over
+    h.wait_status(&b.id, JobStatus::Running, Duration::from_secs(30))
+        .await;
+
+    let paused = h.manager.pause_all().unwrap();
+    assert_eq!(paused.paused, 1, "only b was still active");
+    h.wait_status(&b.id, JobStatus::Paused, Duration::from_secs(30))
+        .await;
+
+    let resumed = h.manager.resume_all().unwrap();
+    assert_eq!(resumed.resumed, 2);
+    h.wait_status(&a.id, JobStatus::Done, Duration::from_secs(60))
+        .await;
+    h.wait_status(&b.id, JobStatus::Done, Duration::from_secs(60))
+        .await;
+}
