@@ -2,6 +2,8 @@ mod support;
 
 use std::time::Duration;
 
+use video_fetch_lib::testing::JobStatus;
+
 /// Value: protects=the keyframe fix (-g) and the fixture's segmentability;
 /// fails_when=-g/-keyint_min/-sc_threshold removed (video collapses to one
 /// segment) or the master manifest stops mapping to numeric-format variants;
@@ -76,4 +78,39 @@ async fn server_tolerates_head_and_range() {
     assert!(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200"));
     let ranged = support::server::request(&srv.url(1, "a0.ts"), "GET", &[("Range", "bytes=0-9")]);
     assert!(ranged.contains(" 200 ") || ranged.contains(" 206 "));
+}
+
+/// Value: protects=the whole download→merge→deliver pipeline over the real
+/// sidecars plus the production fragment naming shape (.f<digits>.<ext>,
+/// has_fragment_infix); fails_when=the pinned pair stops merging, the
+/// delivered file loses a stream, or the engine starts naming fragments in a
+/// shape the unmerged-stream guard cannot match; why_new=no test drives a real
+/// yt-dlp/ffmpeg pair; seam=none. Measured (aarch64-apple-darwin, pinned pair):
+/// the merge lands as `clip-1.mp4`; the harness globs `clip-1.*` instead of
+/// hardcoding the container.
+#[tokio::test]
+async fn download_completes_and_delivers_a_merged_file() {
+    let h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+
+    // Hold the first fragment so the work dir exists mid-flight: this is the
+    // only moment fragments are observable before delivery.
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    support::oracles::assert_fragment_naming(&h.work_dir_of(&job.id));
+    h.server.release_gate();
+
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+        .await;
+
+    let c = h.server.counts(1);
+    let fx = support::fixture::ensure(&h.ffmpeg);
+    assert_eq!(c.video_fragments, fx.video_segments);
+    assert_eq!(c.audio_fragments, fx.audio_segments);
+
+    let delivered = h.delivered_path(1);
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &delivered);
+
+    // The work dir is cleaned on completion (gone or empty)
+    support::oracles::assert_no_stray_media_files(&h.work_dir_of(&job.id));
 }
