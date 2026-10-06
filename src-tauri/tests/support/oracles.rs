@@ -102,12 +102,21 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
     }
     #[cfg(windows)]
     {
-        // Literal `Contains`, not a wildcard pattern: path characters stay safe.
-        let script = format!(
-            "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{marker}') }} | ForEach-Object {{ \"$($_.ProcessId)`t$($_.CommandLine)\" }}"
-        );
+        // The marker rides in VF_MARKER instead of the script text: an
+        // interpolated marker would sit in powershell.exe's own CommandLine,
+        // and the CIM query enumerates every process — caller included — so
+        // the scan would always match at least the caller and could never
+        // report an empty set (wait_no_stray_processes would always time
+        // out, and the positive control would be vacuous). The env var also
+        // removes argv quoting hazards for path characters. Literal
+        // `Contains`, not a wildcard pattern, keeps path characters safe.
         let out = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
+            .env("VF_MARKER", marker)
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:VF_MARKER) } | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
+            ])
             .output()
             .expect("powershell");
         String::from_utf8_lossy(&out.stdout)

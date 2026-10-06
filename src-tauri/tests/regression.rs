@@ -129,8 +129,9 @@ async fn download_completes_and_delivers_a_merged_file() {
 /// Value: protects=pause keeps fragments and resume continues from the
 /// breakpoint (per-stream request accounting, playlists excluded, tolerance
 /// +2 for the interrupted fragment's fail+retry); fails_when=the resume
-/// delivers nothing merged, the pause drops the work dir, or per-stream
-/// requests exceed segments+2; why_new=the spike verified this only by hand;
+/// delivers nothing merged, the pause drops the work dir, the delivered
+/// job's work dir keeps stray media afterwards, or per-stream requests
+/// exceed segments+2; why_new=the spike verified this only by hand;
 /// seam=none
 #[tokio::test]
 async fn pause_resume_finishes_without_redownloading() {
@@ -210,9 +211,10 @@ async fn resume_does_not_refetch_completed_fragments() {
 /// Value: protects=the production restart sequence (kill_all_children →
 /// manager lands → rebuild → orphan cleanup with keep-list → reconcile) and
 /// the paused job's work dir surviving cleanup_orphan_work_dirs;
-/// fails_when=the keep-list or the reconcile drops/cleans a paused job, or
-/// resume restarts from zero; why_new=0.4.1's known-risk area, hand-verified
-/// only; seam=none
+/// fails_when=the restart sequence drops the paused row, orphan cleanup
+/// deletes the paused job's work dir, or the resumed download delivers no
+/// merged file; why_new=0.4.1's known-risk area, hand-verified only;
+/// seam=none
 #[tokio::test]
 async fn paused_job_survives_a_relaunch_and_resumes() {
     let mut h = support::harness::Harness::new(1);

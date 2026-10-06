@@ -222,6 +222,15 @@ fn serve(state: Arc<State>, request: tiny_http::Request) {
         return;
     }
 
+    // Observed request shape, recorded 2026-10-07 with the pinned yt-dlp from
+    // one fresh `download_completes` run (24 requests, aarch64-apple-darwin):
+    // GET only — no HEAD and no Range header appeared; every request carries
+    // Host plus an impersonated Chrome browser User-Agent and
+    // Accept/Accept-Language/Sec-Fetch-Mode (playlists additionally send
+    // `Accept-Encoding: gzip, deflate, br`, fragments `identity`). So the HEAD
+    // branch above and the ignored Range are tolerance for shapes the pinned
+    // pair did not send on the fresh-download path — its resume probing was
+    // not exercised by this observation.
     // Range support is out of scope here: answer 200 with the full body (HTTP allows ignoring Range; yt-dlp tolerates it).
     let mut body = Vec::new();
     std::fs::File::open(&file)

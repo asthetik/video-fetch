@@ -314,6 +314,21 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                 oracles::live_processes_containing(&h.marker())
             );
         }
+        // Cancelled rows' work dirs are deleted. Only Failed+cancelled: an id
+        // we cancelled whose row still ended Done is a race outcome — the
+        // cancel task can land after the download already delivered — not a
+        // contract breach. A Failed row the cancel produced must have had its
+        // work dir dropped with it (cancel removes it and writes the status
+        // under one db lock).
+        if j.status == JobStatus::Failed && cancelled.contains(&j.id) {
+            assert!(
+                !h.work_dir_of(&j.id).exists(),
+                "cancelled job kept its work dir: {}; work dir: {:?}; live processes: {:?}",
+                j.id,
+                work_dir_listing(&h, &j.id),
+                oracles::live_processes_containing(&h.marker())
+            );
+        }
         if j.status == JobStatus::Paused {
             assert!(
                 h.work_dir_of(&j.id).is_dir(),
@@ -322,6 +337,47 @@ async fn soak_churns_downloads_and_asserts_invariants() {
             );
         }
     }
+    // No duplicate products: at most one `clip-<n>.*` per video, and exactly
+    // one when a Done row exists for it (`v<n>`). Delivery refuses to
+    // overwrite (`relocate_file` errors on an existing dest), so a second
+    // match could only come from a second writer delivering under another
+    // name — the drift this pins.
+    let done_videos: HashSet<&str> = jobs
+        .iter()
+        .filter(|j| j.status == JobStatus::Done)
+        .map(|j| j.video_id.as_str())
+        .collect();
+    for n in 1..next_n {
+        let prefix = format!("clip-{n}.");
+        let hits: Vec<String> = std::fs::read_dir(&h.save_dir)
+            .expect("read save dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        assert!(
+            hits.len() <= 1,
+            "duplicate products for video {n}: {hits:?}"
+        );
+        if done_videos.contains(format!("v{n}").as_str()) {
+            assert_eq!(
+                hits.len(),
+                1,
+                "Done row for v{n} without exactly one delivered product: {hits:?}"
+            );
+        }
+    }
+    // No `.temp.` leftovers: a merge killed mid-flight leaves yt-dlp's
+    // `<final>.temp.<ext>` writer file behind (in the work dir, or in the save
+    // dir if it was ever relocated); a drained system must not keep it. The
+    // work root is walked recursively so every remaining work dir is covered.
+    let mut temp_leftovers: Vec<std::path::PathBuf> = Vec::new();
+    collect_temp_files(&h.save_dir, &mut temp_leftovers);
+    collect_temp_files(&h.work_root, &mut temp_leftovers);
+    assert!(
+        temp_leftovers.is_empty(),
+        "`.temp.` leftovers after drain: {temp_leftovers:?}"
+    );
     // After a silence window, request counts must stop growing (auxiliary oracle)
     let snapshot: Vec<_> = (1..next_n).map(|n| h.server.counts(n)).collect();
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -403,6 +459,26 @@ fn work_dir_listing(h: &Harness, id: &str) -> Vec<String> {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect(),
         Err(_) => vec!["gone".into()],
+    }
+}
+
+/// Recursively collect files whose name contains `.temp.` (yt-dlp's in-flight
+/// merge writer file shape) under `dir`; an unreadable dir contributes nothing.
+fn collect_temp_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.filter_map(Result::ok) {
+        let path = ent.path();
+        if path.is_dir() {
+            collect_temp_files(&path, out);
+        } else if path
+            .file_name()
+            .map(|f| f.to_string_lossy().contains(".temp."))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
     }
 }
 
