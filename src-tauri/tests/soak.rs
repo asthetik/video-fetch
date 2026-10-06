@@ -24,6 +24,9 @@ enum Op {
 /// limit is PauseAll (always applicable — a no-op on an empty queue).
 const REROLL_LIMIT: usize = 8;
 
+/// Post-crash quiesce budget: 300ms ticks, ~3.6s total.
+const QUIESCE_TICKS: usize = 12;
+
 #[tokio::test]
 #[ignore = "soak: run locally, never in CI"]
 async fn soak_churns_downloads_and_asserts_invariants() {
@@ -205,6 +208,7 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                     crash_era.insert(j.id.clone());
                 }
                 h.clean_restart();
+                quiesce_crash_era(&h).await;
             }
             Op::CrashRestart => {
                 ledger.push((op, String::new()));
@@ -212,10 +216,10 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                     crash_era.insert(j.id.clone());
                 }
                 h.crash_restart();
-                // Orphans linger the way a real crash leaves them; reap after a
-                // grace period so the drain can converge.
+                // Orphans linger the way a real crash leaves them; grace, then
+                // quiesce so the dropped world is dead before the churn resumes.
                 tokio::time::sleep(Duration::from_millis(400)).await;
-                oracles::kill_processes_containing(&h.marker());
+                quiesce_crash_era(&h).await;
             }
         }
         tokio::time::sleep(Duration::from_millis(50 + rng.below(150))).await;
@@ -351,6 +355,44 @@ fn row_summary(jobs: &[DownloadJob]) -> String {
         .map(|j| format!("{}={:?}", j.id, j.status))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Post-crash quiesce: the simulation must converge to the production
+/// invariant — exactly one live manager world — before the churn resumes,
+/// because a real crash kills every process before the relaunch exists. Reap
+/// marker processes until none are alive AND the rows read the same across two
+/// consecutive ticks: a zombie runner can spawn children after the first scan,
+/// and its terminal write must land while the crash-era exemption still covers
+/// it. Bounded (QUIESCE_TICKS); returns as soon as both hold.
+async fn quiesce_crash_era(h: &Harness) {
+    let mut last_rows: Option<String> = None;
+    let mut stable = 0usize;
+    let mut ticks = 0usize;
+    while ticks < QUIESCE_TICKS {
+        ticks += 1;
+        oracles::kill_processes_containing(&h.marker());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = !oracles::live_processes_containing(&h.marker()).is_empty();
+        let rows = row_summary(&list_retry(h).await);
+        if !alive && last_rows.as_deref() == Some(rows.as_str()) {
+            stable += 1;
+            if stable >= 2 {
+                break;
+            }
+        } else {
+            stable = 0;
+        }
+        last_rows = Some(rows);
+    }
+    // Visible in the run log: how long quiescing took and what survived.
+    let alive = oracles::live_processes_containing(&h.marker());
+    if !alive.is_empty() || stable < 2 {
+        eprintln!(
+            "soak: crash-era quiesce not converged: ticks={ticks} stable_ticks={stable} alive={alive:?}"
+        );
+    } else {
+        eprintln!("soak: crash-era quiesce: ticks={ticks} (clean)");
+    }
 }
 
 /// Entry names of a job's work dir; `["gone"]` when the dir is absent.
