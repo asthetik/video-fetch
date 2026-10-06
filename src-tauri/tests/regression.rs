@@ -260,9 +260,12 @@ async fn cancel_stops_everything_and_drops_the_workdir() {
     assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
 
     // Sanity: the scanner must observe the live downloader while it is mid-flight.
+    // The window is generous: the Windows scan spawns powershell + a CIM query
+    // per poll, which costs seconds on a loaded runner.
     assert!(
-        support::oracles::wait_for_live_processes(&h.marker(), Duration::from_secs(5)).await,
-        "scanner must see the running downloader"
+        support::oracles::wait_for_live_processes(&h.marker(), Duration::from_secs(30)).await,
+        "scanner must see the running downloader; evidence: {}",
+        support::oracles::debug_process_snapshot(&h.marker())
     );
 
     h.manager.cancel(&job.id).unwrap();
@@ -280,7 +283,7 @@ async fn cancel_stops_everything_and_drops_the_workdir() {
     );
 
     // Stray processes: anything still carrying this harness's work root in argv must be gone
-    support::oracles::wait_no_stray_processes(&h.marker(), Duration::from_secs(10)).await;
+    support::oracles::wait_no_stray_processes(&h.marker(), Duration::from_secs(30)).await;
 
     // Silence: no further requests (auxiliary oracle)
     let before = h.server.counts(1);

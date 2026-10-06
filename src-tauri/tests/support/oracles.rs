@@ -106,19 +106,37 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
         // interpolated marker would sit in powershell.exe's own CommandLine,
         // and the CIM query enumerates every process — caller included — so
         // the scan would always match at least the caller and could never
-        // report an empty set (wait_no_stray_processes would always time
-        // out, and the positive control would be vacuous). The env var also
-        // removes argv quoting hazards for path characters. Literal
-        // `Contains`, not a wildcard pattern, keeps path characters safe.
+        // report an empty set. The env var also removes argv quoting hazards
+        // for path characters. Literal `Contains`, not a wildcard pattern,
+        // keeps path characters safe. The name prefilter trims the query to a
+        // handful of rows: the full-table enumeration is seconds-slow on a
+        // loaded CI runner, which starved the scanner's positive control.
         let out = Command::new("powershell")
             .env("VF_MARKER", marker)
             .args([
                 "-NoProfile",
+                "-NonInteractive",
                 "-Command",
-                "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:VF_MARKER) } | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
+                "if (-not $env:VF_MARKER) { Write-Error 'VF_MARKER not set'; exit 2 }\n\
+                 Get-CimInstance Win32_Process -Filter \"Name LIKE 'yt-dlp%' OR Name LIKE 'ffmpeg%'\" | \
+                 Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:VF_MARKER) } | \
+                 ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
             ])
             .output()
             .expect("powershell");
+        if !out.status.success() {
+            let msg = format!(
+                "process scan failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            // Panicking during an unwind aborts the process; Drop-time
+            // cleanup stays best-effort.
+            if std::thread::panicking() {
+                eprintln!("oracles: {msg}");
+                return Vec::new();
+            }
+            panic!("{msg}");
+        }
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -127,6 +145,36 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
                 Some((pid.parse().ok()?, cmd.to_string()))
             })
             .collect()
+    }
+}
+
+/// Best-effort forensic snapshot for failure messages: what the scanner sees
+/// right now, plus (Windows) the downloader processes by name regardless of
+/// the CommandLine marker — distinguishes "process already gone" from "marker
+/// mismatch" without a second CI round trip.
+pub fn debug_process_snapshot(marker: &str) -> String {
+    let scanned = live_processes_containing(marker);
+    #[cfg(unix)]
+    {
+        format!("scan={scanned:?}")
+    }
+    #[cfg(windows)]
+    {
+        let out = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-Process | Where-Object { $_.ProcessName -like 'yt-dlp*' -or $_.ProcessName -like 'ffmpeg*' } | ForEach-Object { \"$($_.Id)`t$($_.ProcessName)\" }",
+            ])
+            .output();
+        match out {
+            Ok(o) => format!(
+                "scan={scanned:?} by-name={:?}",
+                String::from_utf8_lossy(&o.stdout)
+            ),
+            Err(e) => format!("scan={scanned:?} by-name-error={e}"),
+        }
     }
 }
 
