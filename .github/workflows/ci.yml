@@ -88,7 +88,8 @@ jobs:
         shell: bash
         run: |
           # Floor against a silent zero after a rename; platform-gated tests
-          # make the per-OS count differ slightly (244 on macOS today).
+          # make the per-OS count differ slightly (measured 2026-10-07:
+          # 251 macOS, 250 Linux, 246 Windows).
           n=$(cargo test --manifest-path src-tauri/Cargo.toml -- --list | grep -c ': test$')
           echo "unit tests listed: $n"
           [ "$n" -ge 150 ]
