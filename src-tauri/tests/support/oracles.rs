@@ -118,8 +118,9 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
                 "-NonInteractive",
                 "-Command",
                 "if (-not $env:VF_MARKER) { Write-Error 'VF_MARKER not set'; exit 2 }\n\
+                 $needle = $env:VF_MARKER.Replace('/','\\').ToLowerInvariant()\n\
                  Get-CimInstance Win32_Process -Filter \"Name LIKE 'yt-dlp%' OR Name LIKE 'ffmpeg%'\" | \
-                 Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:VF_MARKER) } | \
+                 Where-Object { $_.CommandLine -and $_.CommandLine.Replace('/','\\').ToLowerInvariant().Contains($needle) } | \
                  ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
             ])
             .output()
@@ -149,9 +150,9 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
 }
 
 /// Best-effort forensic snapshot for failure messages: what the scanner sees
-/// right now, plus (Windows) the downloader processes by name regardless of
-/// the CommandLine marker — distinguishes "process already gone" from "marker
-/// mismatch" without a second CI round trip.
+/// right now, plus (Windows) the needle it compared and the CommandLines of
+/// the downloader processes by name — distinguishes "process already gone"
+/// from "marker mismatch" without a second CI round trip.
 pub fn debug_process_snapshot(marker: &str) -> String {
     let scanned = live_processes_containing(marker);
     #[cfg(unix)]
@@ -161,19 +162,24 @@ pub fn debug_process_snapshot(marker: &str) -> String {
     #[cfg(windows)]
     {
         let out = Command::new("powershell")
+            .env("VF_MARKER", marker)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "Get-Process | Where-Object { $_.ProcessName -like 'yt-dlp*' -or $_.ProcessName -like 'ffmpeg*' } | ForEach-Object { \"$($_.Id)`t$($_.ProcessName)\" }",
+                "if (-not $env:VF_MARKER) { Write-Error 'VF_MARKER not set'; exit 2 }\n\
+                 $needle = $env:VF_MARKER.Replace('/','\\').ToLowerInvariant()\n\
+                 $procs = Get-CimInstance Win32_Process -Filter \"Name LIKE 'yt-dlp%' OR Name LIKE 'ffmpeg%'\"\n\
+                 \"count=$($procs.Count) needle=$needle\"\n\
+                 $procs | Select-Object -First 3 | ForEach-Object { \"cmd[$($_.ProcessId)]=$($_.CommandLine)\" }",
             ])
             .output();
         match out {
             Ok(o) => format!(
-                "scan={scanned:?} by-name={:?}",
+                "scan={scanned:?} forensic={:?}",
                 String::from_utf8_lossy(&o.stdout)
             ),
-            Err(e) => format!("scan={scanned:?} by-name-error={e}"),
+            Err(e) => format!("scan={scanned:?} forensic-error={e}"),
         }
     }
 }
