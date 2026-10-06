@@ -29,7 +29,7 @@ export function filterHistoryJobs(
 /**
  * The jobs the history page renders and counts: everything except paused.
  * Paused jobs live only in the download queue (an active, resumable state);
- * the 进行中 pinned group shows pending/running via its own filter.
+ * the in-progress pinned group shows pending/running via its own filter.
  */
 export function historyVisibleJobs(jobs: DownloadJob[]): DownloadJob[] {
   return jobs.filter((job) => job.status !== "paused");

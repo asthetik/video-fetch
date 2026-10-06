@@ -106,7 +106,7 @@ fn find_work_product_pass(work: &Path, media_only: bool) -> Option<PathBuf> {
             // `….temp.<ext>` is yt-dlp's in-flight merge output, not a product:
             // relocating it would deliver a half-merged file (0.4.0 class bug).
             // Anchor on the stem so a real product whose TITLE embeds ".temp."
-            // (e.g. `如何在 .temp. 目录工作 [BV1xx].mp4`) stays a candidate.
+            // (e.g. `how-to-fix-.temp.-files [BV1xx].mp4`) stays a candidate.
             let is_merge_temp = Path::new(&*name)
                 .file_stem()
                 .is_some_and(|stem| stem.to_string_lossy().ends_with(".temp"));
@@ -223,13 +223,13 @@ mod tests {
         // product whose title merely contains ".temp." must stay a candidate.
         let dir = tempfile::tempdir().unwrap();
         fs::write(
-            dir.path().join("如何在 .temp. 目录工作 [BV1xx].mp4"),
+            dir.path().join("how-to-fix-.temp.-files [BV1xx].mp4"),
             b"final",
         )
         .unwrap();
         assert_eq!(
             find_work_product(dir.path()),
-            Some(dir.path().join("如何在 .temp. 目录工作 [BV1xx].mp4"))
+            Some(dir.path().join("how-to-fix-.temp.-files [BV1xx].mp4"))
         );
 
         let temp = tempfile::tempdir().unwrap();

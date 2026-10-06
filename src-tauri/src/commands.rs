@@ -1554,7 +1554,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed_orphans} 个");
     }
     // A row left Running by the previous session has no runner: surface it as
-    // Paused so the UI offers 继续 instead of a frozen 下载中 bar.
+    // Paused so the UI offers resume instead of a frozen "downloading" bar.
     let reconciled = downloads.reconcile_interrupted_runs()?;
     if reconciled > 0 {
         tracing::info!(target: "core", "app: 中断的下载已转为暂停 {reconciled} 个");

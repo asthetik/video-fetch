@@ -18,11 +18,11 @@ export function mergeJob(
   existing: DownloadJob,
   patch: DownloadProgressPayload,
 ): DownloadJob {
-  // A late `running` patch must not flip a paused row back to "下载中": after a
-  // pause the backend stops emitting, but in-flight events can still land.
-  // The reverse guard matters equally: a stale `paused` patch delivered after
-  // the row's done/failed event would strand it with a 继续 button that can
-  // only error (the backend guarantees terminal rows never resume).
+  // A late `running` patch must not flip a paused row back to "downloading":
+  // after a pause the backend stops emitting, but in-flight events can still
+  // land. The reverse guard matters equally: a stale `paused` patch delivered
+  // after the row's done/failed event would strand it with a resume button
+  // that can only error (the backend guarantees terminal rows never resume).
   if (existing.status === "paused" && patch.status === "running") {
     return existing;
   }
