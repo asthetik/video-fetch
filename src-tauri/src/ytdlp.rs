@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -921,7 +922,7 @@ pub struct DownloadRequest<'a> {
     pub output_template: &'a str,
     pub output_dir: &'a Path,
     pub cookies_path: Option<&'a Path>,
-    pub children: &'a Arc<Mutex<HashMap<String, tokio::process::Child>>>,
+    pub children: &'a DownloadChildren,
     pub stop_flags: &'a StopFlags,
 }
 
@@ -1094,16 +1095,11 @@ pub async fn download(
         .take()
         .ok_or_else(|| AppError::Message("yt-dlp stderr unavailable".into()))?;
 
-    {
-        let mut guard = children
-            .lock()
-            .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?;
-        guard.insert(job_id.to_string(), child);
-    }
+    let token = register_child(children, job_id, child)?;
 
     // A stop may have raced before the child was registered; honor it now.
     if let Some(kind) = stop_kind_of(stop_flags, job_id) {
-        kill_download(children, job_id);
+        kill_registered_child(children, job_id, token);
         return Err(stop_err(kind));
     }
 
@@ -1121,7 +1117,7 @@ pub async fn download(
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                 if let Some(kind) = stop_kind_of(stop_flags, job_id) {
-                    kill_download(children, job_id);
+                    kill_registered_child(children, job_id, token);
                     return Err(stop_err(kind));
                 }
             }
@@ -1143,7 +1139,7 @@ pub async fn download(
                         // An output-read error still has to stop the whole
                         // tree: dropping just the direct child would leave the
                         // PyInstaller second stage running.
-                        kill_download(children, job_id);
+                        kill_registered_child(children, job_id, token);
                         return Err(AppError::Message(format!("读取 yt-dlp 输出失败: {e}")));
                     }
                 }
@@ -1167,7 +1163,7 @@ pub async fn download(
                     }
                     Ok(None) => stderr_done = true,
                     Err(e) => {
-                        kill_download(children, job_id);
+                        kill_registered_child(children, job_id, token);
                         return Err(AppError::Message(format!("读取 yt-dlp 进度失败: {e}")));
                     }
                 }
@@ -1175,7 +1171,7 @@ pub async fn download(
         }
     }
 
-    let mut child = take_child(children, job_id)?;
+    let mut child = take_child(children, job_id, token)?;
     let status = child
         .wait()
         .await
@@ -1230,26 +1226,78 @@ pub async fn download(
     Ok(final_path)
 }
 
-fn take_child(
-    children: &Arc<Mutex<HashMap<String, tokio::process::Child>>>,
+/// A registered yt-dlp process and the token of the run that registered it. The
+/// registry is keyed by job id, so a resumed run overwrites the entry its
+/// predecessor left behind; only the token tells whose process is whose, and a
+/// superseded run that wakes up in a synchronous stretch (where `abort()` cannot
+/// reach it) must not adopt — and then kill on drop — its successor's child.
+pub struct RegisteredChild {
+    pub(crate) token: u64,
+    pub(crate) child: tokio::process::Child,
+}
+
+pub type DownloadChildren = Arc<Mutex<HashMap<String, RegisteredChild>>>;
+
+/// Registration tokens only have to be unique within the process.
+static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(0);
+
+/// Register the child this run just spawned under a token only this run knows.
+fn register_child(
+    children: &DownloadChildren,
     job_id: &str,
-) -> AppResult<tokio::process::Child> {
+    child: tokio::process::Child,
+) -> AppResult<u64> {
+    let token = NEXT_REGISTRATION.fetch_add(1, Ordering::SeqCst) + 1;
     children
         .lock()
         .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?
-        .remove(job_id)
-        .ok_or_else(|| AppError::Message("yt-dlp 进程已结束".into()))
+        .insert(job_id.to_string(), RegisteredChild { token, child });
+    Ok(token)
 }
 
-pub fn kill_download(
-    children: &Arc<Mutex<HashMap<String, tokio::process::Child>>>,
-    job_id: &str,
-) -> bool {
+/// Kill and unregister the child this run registered — same ownership rule as
+/// `take_child`, so a run that reacts to a stop cannot kill a process its
+/// successor registered meanwhile.
+fn kill_registered_child(children: &DownloadChildren, job_id: &str, token: u64) -> bool {
     let Ok(mut guard) = children.lock() else {
         return false;
     };
-    if let Some(mut child) = guard.remove(job_id) {
-        kill_child_process_tree(&mut child);
+    if guard.get(job_id).map(|entry| entry.token) != Some(token) {
+        return false;
+    }
+    if let Some(mut entry) = guard.remove(job_id) {
+        kill_child_process_tree(&mut entry.child);
+        return true;
+    }
+    false
+}
+
+/// Take back the child this run registered. An entry another run registered
+/// under the same job id stays put: dropping an adopted child would kill it
+/// (`kill_on_drop`), tearing down a healthy resumed download.
+fn take_child(
+    children: &DownloadChildren,
+    job_id: &str,
+    token: u64,
+) -> AppResult<tokio::process::Child> {
+    let mut guard = children
+        .lock()
+        .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?;
+    match guard.get(job_id) {
+        Some(entry) if entry.token == token => Ok(guard
+            .remove(job_id)
+            .expect("the entry was just observed")
+            .child),
+        _ => Err(AppError::Message("yt-dlp 进程已结束".into())),
+    }
+}
+
+pub fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
+    let Ok(mut guard) = children.lock() else {
+        return false;
+    };
+    if let Some(mut entry) = guard.remove(job_id) {
+        kill_child_process_tree(&mut entry.child);
         return true;
     }
     false
@@ -1828,14 +1876,11 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     /// asserts the pause error, the whole tree's death, and that the partial
     /// file survives the pause cleanup.
     ///
-    /// Value: protects=the unix group-kill hardening, the pause path of the
-    /// stop-flag poll, and YtDlpDownloader::run's pause-aware Err cleanup
-    /// (keep the work dir so `.part` can resume); fails_when=process_group(0)
-    /// is removed at spawn, kill_child_process_tree falls back to start_kill
-    /// (grandchild survives), or the cleanup stops consulting the stop kind
-    /// (the `.part` file is deleted); why_new=no test exercises ytdlp::download
-    /// or any kill/cleanup path (the real sidecar is not available in tests);
-    /// seam=none
+    /// Value: protects=the unix group-kill hardening and the pause path of the
+    /// stop-flag poll; fails_when=process_group(0) is removed at spawn or
+    /// kill_child_process_tree falls back to start_kill (the grandchild
+    /// survives); why_new=no test exercises ytdlp::download or any kill path
+    /// (the real sidecar is not available in tests); seam=none
     #[cfg(unix)]
     #[tokio::test]
     async fn pause_kill_terminates_the_whole_two_stage_process_tree() {
@@ -1861,8 +1906,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let work_root = dir.path().join("work");
-        let children: Arc<Mutex<HashMap<String, tokio::process::Child>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
 
         const JOB_ID: &str = "job-tree-kill";
@@ -1950,5 +1994,50 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
         assert!(dead, "the grandchild process survived the pause kill");
+    }
+
+    /// A resumed run registers its child under the same job id the paused run
+    /// used, so the registry entry can only be taken — or killed — by the run
+    /// that registered it.
+    ///
+    /// Value: protects=the per-registration token checked by take_child and
+    /// kill_registered_child; fails_when=either looks up by job id alone — a
+    /// superseded run that wakes up in a synchronous stretch (where `abort()`
+    /// cannot reach it) adopts its successor's child, and dropping it
+    /// (kill_on_drop) tears down a healthy resumed download; why_new=the
+    /// registry had no notion of who registered an entry; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_only_touches_the_child_it_registered() {
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        const JOB_ID: &str = "job-registry";
+        let spawn = || {
+            let mut cmd = tokio::process::Command::new("sleep");
+            cmd.arg("30");
+            cmd.process_group(0);
+            cmd.kill_on_drop(true);
+            cmd.spawn().unwrap()
+        };
+
+        let stale = register_child(&children, JOB_ID, spawn()).unwrap();
+        let owner = register_child(&children, JOB_ID, spawn()).unwrap();
+        assert_ne!(stale, owner, "every registration gets its own token");
+
+        let err = take_child(&children, JOB_ID, stale)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("yt-dlp 进程已结束"), "unexpected: {err}");
+        assert!(
+            !kill_registered_child(&children, JOB_ID, stale),
+            "a superseded run must not kill the registered child"
+        );
+        assert!(
+            children.lock().unwrap().contains_key(JOB_ID),
+            "the successor's entry must survive both attempts"
+        );
+
+        let mut mine = take_child(&children, JOB_ID, owner).unwrap();
+        let _ = mine.kill().await;
+        assert!(children.lock().unwrap().is_empty());
     }
 }

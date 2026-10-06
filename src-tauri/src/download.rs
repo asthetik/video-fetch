@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
-use tokio::process::Child;
 use tokio::sync::Semaphore;
 
 use crate::db::Db;
@@ -19,7 +18,7 @@ use crate::models::{
     JobStatus, PauseAllResult, ResumeAllResult, VideoMeta,
 };
 use crate::naming;
-use crate::ytdlp::{self, ProgressUpdate, YtDlpConfig, kill_download};
+use crate::ytdlp::{self, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download};
 
 pub const PROGRESS_EVENT: &str = "download://progress";
 
@@ -93,24 +92,38 @@ pub(crate) fn stop_kind_of(flags: &StopFlags, job_id: &str) -> Option<StopKind> 
 }
 
 /// Which runner currently owns a job's row. `spawn_runner` mints the token the
-/// task carries; pause/resume/retry/cancel retire it, so a runner parked in a
-/// synchronous stretch — where `abort()` cannot reach it — comes back to find
-/// it no longer owns the job. Tokens come from one process-wide sequence, so a
-/// retired token is never minted again.
+/// task carries; pause/resume/retry/cancel retire it, as do the terminal row
+/// writes, deletes and history clears — so a runner parked in a synchronous
+/// stretch, where `abort()` cannot reach it, comes back to find it no longer
+/// owns the job. Tokens come from one process-wide sequence, so a retired token
+/// is never minted again.
 pub type RunnerTokens = Arc<Mutex<HashMap<String, u64>>>;
 
-pub(crate) fn owns_job(tokens: &RunnerTokens, job_id: &str, token: u64) -> bool {
-    // A poisoned lock is unreachable in practice (the lock only guards map
-    // ops). Letting the runner proceed degrades to the pre-token behaviour,
-    // which still beats stranding the job with no runner at all.
-    tokens
-        .lock()
-        .map_or(true, |m| m.get(job_id).copied() == Some(token))
+/// The map holds plain ids and counters, so a poisoned lock still has sound
+/// data: recovering beats swallowing the access (a mint that silently did
+/// nothing would disarm the guard) and beats stranding the job.
+pub(crate) fn lock_tokens(
+    tokens: &RunnerTokens,
+) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
+    tokens.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// What the runner does at a checkpoint when it observes a stop flag: a cancel
-/// re-asserts the Failed row; a pause returns silently — the `pause()` command
-/// already wrote Paused and must not be overwritten, nor its work dir removed.
+/// Live runner handles by job, each tagged with the token of the runner that
+/// owns it: a superseded runner finishing must not unregister the handle the
+/// next pause needs for its immediate abort.
+pub(crate) type RunningTasks = Arc<Mutex<HashMap<String, (u64, JoinHandle<()>)>>>;
+
+/// True while `token` is still the token the job's row belongs to.
+pub(crate) fn owns_job(tokens: &RunnerTokens, job_id: &str, token: u64) -> bool {
+    lock_tokens(tokens).get(job_id).copied() == Some(token)
+}
+
+/// What the runner does at a checkpoint. A stop flag wins over ownership: a
+/// cancelled job must end Failed even when a newer runner owns it. With no
+/// flag, the three cases are — a cancel re-asserts the Failed row; a pause
+/// returns silently (`pause()` already wrote Paused, and its row and work dir
+/// must not be overwritten or removed); a runner that no longer owns the job
+/// stands down the same way, leaving both to whoever took over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopDisposition {
     MarkCancelled,
@@ -163,7 +176,7 @@ pub struct YtDlpDownloader {
     cfg: YtDlpConfig,
     work_root: PathBuf,
     cookies_path: Option<PathBuf>,
-    children: Arc<Mutex<HashMap<String, Child>>>,
+    children: DownloadChildren,
     stop_flags: StopFlags,
 }
 
@@ -172,7 +185,7 @@ impl YtDlpDownloader {
         cfg: YtDlpConfig,
         work_root: PathBuf,
         cookies_path: Option<PathBuf>,
-        children: Arc<Mutex<HashMap<String, Child>>>,
+        children: DownloadChildren,
         stop_flags: StopFlags,
     ) -> Self {
         Self {
@@ -229,12 +242,12 @@ pub struct DownloadManager {
     settings: Arc<Mutex<AppSettings>>,
     downloader: Arc<dyn Downloader>,
     progress: Arc<dyn ProgressEmitter>,
-    children: Arc<Mutex<HashMap<String, Child>>>,
+    children: DownloadChildren,
     work_root: PathBuf,
     semaphore: Arc<Semaphore>,
     /// Configured max concurrent downloads (matches semaphore capacity accounting).
     concurrency_limit: Arc<AtomicUsize>,
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    running_tasks: RunningTasks,
     stop_flags: StopFlags,
     runner_tokens: RunnerTokens,
     /// Source of runner tokens; starts at zero so no token is ever `0`.
@@ -258,7 +271,7 @@ impl DownloadManager {
         settings: AppSettings,
         downloader: Arc<dyn Downloader>,
         progress: Arc<dyn ProgressEmitter>,
-        children: Arc<Mutex<HashMap<String, Child>>>,
+        children: DownloadChildren,
         work_root: PathBuf,
     ) -> AppResult<Self> {
         Self::new_with_stop_flags(
@@ -277,7 +290,7 @@ impl DownloadManager {
         settings: AppSettings,
         downloader: Arc<dyn Downloader>,
         progress: Arc<dyn ProgressEmitter>,
-        children: Arc<Mutex<HashMap<String, Child>>>,
+        children: DownloadChildren,
         work_root: PathBuf,
         stop_flags: StopFlags,
     ) -> AppResult<Self> {
@@ -471,18 +484,15 @@ impl DownloadManager {
         // to see it the instant its process is killed), so every failure past
         // this point has to retract it — a leaked Cancel is a poison pill for
         // whatever runs next.
-        let result = self.cancel_marked(id);
-        if result.is_err() {
-            self.retract_stop_marker(id, StopKind::Cancel);
-        }
-        result
+        self.cancel_marked(id)
+            .inspect_err(|_| self.retract_stop_marker(id, StopKind::Cancel))
     }
 
     fn cancel_marked(&self, id: &str) -> AppResult<DownloadJob> {
         kill_download(&self.children, id);
 
         if let Ok(mut tasks) = self.running_tasks.lock()
-            && let Some(handle) = tasks.remove(id)
+            && let Some((_, handle)) = tasks.remove(id)
         {
             handle.abort();
         }
@@ -635,17 +645,14 @@ impl DownloadManager {
         // the instant its process is killed), so every failure past this point
         // has to retract it: a leaked Pause marker parks the live runner at its
         // next checkpoint while the row stays Running with nothing to resume.
-        let result = self.pause_marked(id);
-        if result.is_err() {
-            self.retract_stop_marker(id, StopKind::Pause);
-        }
-        result
+        self.pause_marked(id)
+            .inspect_err(|_| self.retract_stop_marker(id, StopKind::Pause))
     }
 
     fn pause_marked(&self, id: &str) -> AppResult<DownloadJob> {
         kill_download(&self.children, id);
         if let Ok(mut tasks) = self.running_tasks.lock()
-            && let Some(handle) = tasks.remove(id)
+            && let Some((_, handle)) = tasks.remove(id)
         {
             handle.abort();
         }
@@ -830,16 +837,23 @@ impl DownloadManager {
     /// cannot leave the new runner believing it was already superseded.
     fn mint_runner_token(&self, job_id: &str) -> u64 {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Ok(mut tokens) = self.runner_tokens.lock() {
-            tokens.insert(job_id.to_string(), token);
-        }
+        lock_tokens(&self.runner_tokens).insert(job_id.to_string(), token);
         token
     }
 
     /// Retire the job's runner token: whoever holds it is superseded — a pause,
-    /// a resume, a retry, a cancel or a row that reached a terminal state.
+    /// a resume, a retry, a cancel, a deleted or cleared row, or any command
+    /// that takes the job over.
     fn retire_runner_token(&self, job_id: &str) {
-        if let Ok(mut tokens) = self.runner_tokens.lock() {
+        lock_tokens(&self.runner_tokens).remove(job_id);
+    }
+
+    /// Retire the job's runner token only while it is still this runner's: the
+    /// terminal write of a runner a pause superseded must not revoke the token
+    /// of the runner that took the job over.
+    fn retire_own_runner_token(&self, job_id: &str, token: u64) {
+        let mut tokens = lock_tokens(&self.runner_tokens);
+        if tokens.get(job_id).copied() == Some(token) {
             tokens.remove(job_id);
         }
     }
@@ -881,7 +895,19 @@ impl DownloadManager {
         });
 
         if let Ok(mut tasks) = self.running_tasks.lock() {
-            tasks.insert(task_id, handle);
+            tasks.insert(task_id, (token, handle));
+        }
+    }
+
+    /// Drop this runner's task handle, but only while it is still this
+    /// runner's: a superseded runner must not unregister the handle its
+    /// successor needs for the next pause's immediate abort.
+    fn unregister_task(&self, job_id: &str, token: u64) {
+        if let Ok(mut tasks) = self.running_tasks.lock()
+            && let Some((owner, _)) = tasks.get(job_id)
+            && *owner == token
+        {
+            tasks.remove(job_id);
         }
     }
 
@@ -899,12 +925,12 @@ impl DownloadManager {
         let save_dir = match self.save_dir() {
             Ok(dir) => dir,
             Err(e) => {
-                self.try_fail_job(&job_id, &e.to_string());
+                self.try_fail_job(&job_id, token, &e.to_string());
                 return;
             }
         };
         if let Err(e) = check_save_dir_writable(&save_dir) {
-            self.try_fail_job(&job_id, &e.to_string());
+            self.try_fail_job(&job_id, token, &e.to_string());
             return;
         }
 
@@ -949,7 +975,7 @@ impl DownloadManager {
             Err(e) => fail_msg = Some(e.to_string()),
         }
         if let Some(msg) = fail_msg {
-            self.try_fail_job(&job_id, &msg);
+            self.try_fail_job(&job_id, token, &msg);
             return;
         }
         let Some(running) = start else {
@@ -979,18 +1005,14 @@ impl DownloadManager {
             // fragments); never relocate from such a dir — re-run instead.
             .filter(|_| !fsutil::has_fragment_leftovers(&work));
         if let Some(work_path) = recoverable {
-            match self.complete_relocation(&job_id, &running, &work_path, &save_dir) {
+            match self.complete_relocation(&job_id, token, &running, &work_path, &save_dir) {
                 Ok(()) => {
-                    if let Ok(mut tasks) = self.running_tasks.lock() {
-                        tasks.remove(&job_id);
-                    }
+                    self.unregister_task(&job_id, token);
                     return;
                 }
                 Err(e) => {
-                    self.try_fail_job(&job_id, &e);
-                    if let Ok(mut tasks) = self.running_tasks.lock() {
-                        tasks.remove(&job_id);
-                    }
+                    self.try_fail_job(&job_id, token, &e);
+                    self.unregister_task(&job_id, token);
                     return;
                 }
             }
@@ -1003,21 +1025,19 @@ impl DownloadManager {
         let on_progress = {
             let job_id = job_id.clone();
             Box::new(move |update: ProgressUpdate| {
-                // A superseded runner's ticks must not write the row either:
-                // its progress describes a transfer nobody is waiting for, and
-                // the Running write would keep the resumed runner from taking
-                // the job over. Marker first, then token — see
-                // stop_disposition_for.
-                if stop_kind_of(&stop_flags, &job_id).is_some()
-                    || !owns_job(&runner_tokens, &job_id, token)
-                {
-                    return;
-                }
                 if let Ok(db) = db.lock()
                     && let Ok(mut current) = db.get_job(&job_id)
                 {
-                    // Do not resurrect a cancelled/failed/done job from late progress ticks.
-                    if current.status != JobStatus::Running && current.status != JobStatus::Pending
+                    // The stop and ownership checks belong in the same critical
+                    // section as the write they guard (the start section's
+                    // rule): a pause/resume completing between an earlier check
+                    // and this lock would let a superseded runner's tick put the
+                    // row back to Running and stall the runner that owns it.
+                    // Nor may a late tick resurrect a cancelled/failed/done job.
+                    if stop_kind_of(&stop_flags, &job_id).is_some()
+                        || !owns_job(&runner_tokens, &job_id, token)
+                        || (current.status != JobStatus::Running
+                            && current.status != JobStatus::Pending)
                     {
                         return;
                     }
@@ -1059,14 +1079,15 @@ impl DownloadManager {
                 match work_path {
                     Some(path) => {
                         if let Err(e) =
-                            self.complete_relocation(&job_id, &running, &path, &save_dir)
+                            self.complete_relocation(&job_id, token, &running, &path, &save_dir)
                         {
-                            self.try_fail_job(&job_id, &e);
+                            self.try_fail_job(&job_id, token, &e);
                         }
                     }
                     None => {
                         self.try_fail_job(
                             &job_id,
+                            token,
                             &format!(
                                 "下载完成但未找到输出文件（yt-dlp 回报: {}）",
                                 reported_path.display()
@@ -1088,28 +1109,31 @@ impl DownloadManager {
                     Some(StopDisposition::StandDown) => {
                         tracing::debug!(target: "core", "download: 已被更新的任务接管，忽略错误 {job_id}: {err}");
                     }
-                    None => {
-                        // Real error: the failed attempt's fragments are not a
-                        // resumable product, so the work dir goes with it. Only
-                        // a pause (above) keeps it — its `.part` files are the
-                        // whole point of resuming.
-                        let _ = fsutil::remove_job_work_dir(&self.work_root, &job_id);
-                        self.try_fail_job(&job_id, &err);
-                    }
+                    // Real error: only a pause (above) keeps the work dir — its
+                    // `.part` files are the whole point of resuming.
+                    None => self.try_fail_download(&job_id, token, &err),
                 }
             }
         }
 
-        if let Ok(mut tasks) = self.running_tasks.lock() {
-            tasks.remove(&job_id);
-        }
+        self.unregister_task(&job_id, token);
     }
 
     /// fail_job is the last write standing between a task and its Failed row;
     /// when even that fails the job would vanish from the log's perspective,
     /// so leave a debug trace instead of a bare swallow.
-    fn try_fail_job(&self, job_id: &str, error: &str) {
-        if let Err(e) = self.fail_job(job_id, error.to_string()) {
+    fn try_fail_job(&self, job_id: &str, token: u64, error: &str) {
+        if let Err(e) = self.fail_job(job_id, token, error.to_string(), false) {
+            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+        }
+    }
+
+    /// The downloader itself failed, rather than reporting a stop: the failed
+    /// attempt's fragments are not a resumable product, so they go with the
+    /// Failed row — inside fail_job's guarded scope, or a pause landing in
+    /// between would leave a Paused row whose `.part` files are already gone.
+    fn try_fail_download(&self, job_id: &str, token: u64, error: &str) {
+        if let Err(e) = self.fail_job(job_id, token, error.to_string(), true) {
             tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
@@ -1122,24 +1146,36 @@ impl DownloadManager {
         }
     }
 
-    fn fail_job(&self, job_id: &str, error: String) -> AppResult<()> {
-        // Read → check → write in one db critical section, the rule pause(),
-        // resume() and run_job's start section follow: a pause landing between
-        // two scopes would otherwise be overwritten by this stale snapshot, and
-        // the marker cleanup below would wipe the one it just raised.
+    /// Fail the job unless a stop command or a newer runner owns it now. The
+    /// row read, the ownership check and the write share one db critical
+    /// section (the rule pause(), resume() and the run_job start section
+    /// follow): a pause landing mid-way cannot be overwritten by this stale
+    /// snapshot, and the marker cleanup below cannot wipe the one it raised.
+    fn fail_job(
+        &self,
+        job_id: &str,
+        token: u64,
+        error: String,
+        drop_fragments: bool,
+    ) -> AppResult<()> {
         let job = {
             let db = self.db.lock().map_err(lock_err)?;
-            let mut job = db.get_job(job_id)?;
-            // A stop command owns the job now: pause()/cancel() write the row
-            // themselves, and the error a stopped runner reports (its killed
-            // child's "用户暂停下载") is the stop, not a broken download.
-            if stop_kind_of(&self.stop_flags, job_id).is_some() {
-                tracing::debug!(target: "core", "download: 停止信号已生效，不标记失败 {job_id}");
+            if let Some(disposition) = self.stop_disposition_for(job_id, token) {
+                tracing::debug!(
+                    target: "core",
+                    "download: 不标记失败（{disposition:?}）{job_id}"
+                );
                 return Ok(());
             }
+            let mut job = db.get_job(job_id)?;
             job.status = JobStatus::Failed;
             job.error = Some(error);
             db.update_job(&job)?;
+            // cancel() drops the work dir under the same db lock; a failed
+            // download's fragments are not a resumable product either.
+            if drop_fragments {
+                let _ = fsutil::remove_job_work_dir(&self.work_root, job_id);
+            }
             job
         };
         tracing::warn!(
@@ -1147,22 +1183,35 @@ impl DownloadManager {
             "download: 失败 {job_id}: {}",
             crate::activity_log::clean_log_message(job.error.as_deref().unwrap_or("未知错误"))
         );
-        // Same rule as complete_relocation: a terminal row retires its marker.
+        // Same rule as complete_relocation: a terminal row retires its marker
+        // and the token of the runner that wrote it — never a newer runner's.
         if let Ok(mut flags) = self.stop_flags.lock() {
             flags.remove(job_id);
         }
-        self.retire_runner_token(job_id);
+        self.retire_own_runner_token(job_id, token);
         self.emit(&job);
         Ok(())
     }
 
+    /// Move a finished product into the save dir and mark the job Done. `Ok`
+    /// means the caller has nothing left to do — including when the runner no
+    /// longer owns the job, in which case nothing was moved: a newer command's
+    /// runner owns this work dir and row now.
     fn complete_relocation(
         &self,
         job_id: &str,
+        token: u64,
         running: &DownloadJob,
         work_path: &Path,
         save_dir: &Path,
     ) -> Result<(), String> {
+        // Checked before touching the file system: a cross-volume move is a
+        // long synchronous stretch, exactly where an abort cannot reach the
+        // runner that a pause superseded.
+        if let Some(disposition) = self.stop_disposition_for(job_id, token) {
+            tracing::debug!(target: "core", "download: 不交付（{disposition:?}）{job_id}");
+            return Ok(());
+        }
         let work = fsutil::work_dir_for(&self.work_root, job_id);
         let rel = match work_path.strip_prefix(&work) {
             Ok(p) => p.to_path_buf(),
@@ -1201,9 +1250,8 @@ impl DownloadManager {
         if let Ok(mut flags) = self.stop_flags.lock() {
             flags.remove(job_id);
         }
-        // The token goes with it: a runner the row outlived must stand down at
-        // its next checkpoint instead of writing over the Done row.
-        self.retire_runner_token(job_id);
+        // The token goes with it — its own, never a newer runner's.
+        self.retire_own_runner_token(job_id, token);
         tracing::info!(target: "core", "download: 完成 {job_id} -> {}", dest.display());
         self.emit(&done);
         Ok(())
@@ -2770,6 +2818,11 @@ mod tests {
             j.status = JobStatus::Paused;
             db.update_job(&j).unwrap();
         }
+        // A pause's error must leave the fragments alone: they are what 继续
+        // resumes from.
+        let work = fsutil::work_dir_for(&manager.work_root, "job-e");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("demo.f30064.mp4.part"), b"x").unwrap();
 
         sleep(Duration::from_millis(500)).await;
         let jobs = manager.list().unwrap();
@@ -2780,6 +2833,10 @@ mod tests {
             "a downloader Err after pause must not fail the job"
         );
         assert!(j.error.is_none());
+        assert!(
+            work.join("demo.f30064.mp4.part").exists(),
+            "a pause's error must keep the partial files resume needs"
+        );
     }
 
     #[tokio::test]
@@ -3073,11 +3130,10 @@ mod tests {
         cmd.process_group(0);
         let child = cmd.spawn().unwrap();
         let pid = child.id().unwrap() as i32;
-        manager
-            .children
-            .lock()
-            .unwrap()
-            .insert("job-exit".into(), child);
+        manager.children.lock().unwrap().insert(
+            "job-exit".into(),
+            crate::ytdlp::RegisteredChild { token: 1, child },
+        );
 
         manager.kill_all_children();
         assert!(manager.children.lock().unwrap().is_empty());
@@ -3621,8 +3677,11 @@ mod tests {
             .lock()
             .unwrap()
             .insert("job-fail-paused".into(), StopKind::Pause);
+        // The failing runner still owns the job: the marker alone must be what
+        // stops it, and the ownership it keeps must survive the attempt.
+        let owner = manager.mint_runner_token("job-fail-paused");
 
-        manager.try_fail_job("job-fail-paused", stop_message(StopKind::Pause));
+        manager.try_fail_job("job-fail-paused", owner, stop_message(StopKind::Pause));
 
         let jobs = manager.list().unwrap();
         let j = jobs.iter().find(|j| j.id == "job-fail-paused").unwrap();
@@ -3637,6 +3696,111 @@ mod tests {
             Some(StopKind::Pause),
             "the marker belongs to the pause that raised it and must survive"
         );
+        assert!(
+            owns_job(&manager.runner_tokens, "job-fail-paused", owner),
+            "the failed attempt must not retire its own token either"
+        );
+    }
+
+    /// A runner that a pause superseded must not fail the job its successor
+    /// owns: its error lands after the resume (a killed child's 用户暂停下载),
+    /// and the write would both fail a live download and retire the successor's
+    /// token, leaving the job with nobody driving it.
+    ///
+    /// Value: protects=fail_job's ownership check and its compare-and-retire;
+    /// fails_when=either is missing — a stale runner's failure lands on the
+    /// resumed job, or its cleanup revokes the current runner's token;
+    /// why_new=the Err dispatch's own check cannot cover the windows inside
+    /// run_job that call fail_job directly (the save-dir probe, the relocation
+    /// failure, the missing product); seam=none
+    #[test]
+    fn a_superseded_runner_cannot_fail_the_job_it_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let mut job = sample_job("job-lost");
+        job.video_id = "BV1lost".into();
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        // The paused life's token, then the one the resume minted for its own
+        // runner — the second replaces the first.
+        let stale = manager.mint_runner_token("job-lost");
+        let owner = manager.mint_runner_token("job-lost");
+
+        manager.try_fail_job("job-lost", stale, stop_message(StopKind::Pause));
+
+        let jobs = manager.list().unwrap();
+        let j = jobs.iter().find(|j| j.id == "job-lost").unwrap();
+        assert_eq!(
+            j.status,
+            JobStatus::Running,
+            "the resumed job must not be failed by the runner it replaced"
+        );
+        assert!(j.error.is_none());
+        assert!(
+            owns_job(&manager.runner_tokens, "job-lost", owner),
+            "a stale runner's failure must not retire the current runner's token"
+        );
+    }
+
+    /// A download that a pause superseded may still finish: its product must
+    /// not be moved out of the work dir the resumed runner is filling. The move
+    /// itself is a long synchronous stretch (a cross-volume copy is the worst
+    /// case), exactly where the abort cannot reach the runner.
+    ///
+    /// Value: protects=complete_relocation's ownership check; fails_when=it is
+    /// missing — the stale runner relocates the product, deletes the work dir
+    /// under its successor and writes Done over the resumed row; why_new=the
+    /// check before the call in run_job cannot cover the move; seam=none
+    #[test]
+    fn a_superseded_runner_cannot_deliver_its_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let mut job = sample_job("job-late");
+        job.video_id = "BV1late".into();
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        let work = fsutil::work_dir_for(&work_root, "job-late");
+        std::fs::create_dir_all(&work).unwrap();
+        let product = work.join("demo.mp4");
+        std::fs::write(&product, b"video").unwrap();
+
+        let stale = manager.mint_runner_token("job-late");
+        let owner = manager.mint_runner_token("job-late");
+
+        manager
+            .complete_relocation("job-late", stale, &job, &product, &save_dir)
+            .unwrap();
+
+        assert!(product.is_file(), "the product must stay in the work dir");
+        assert!(
+            !save_dir.join("demo.mp4").exists(),
+            "a superseded runner must not deliver"
+        );
+        let j = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == "job-late")
+            .unwrap();
+        assert_eq!(
+            j.status,
+            JobStatus::Running,
+            "the resumed row must be left alone"
+        );
+        assert!(owns_job(&manager.runner_tokens, "job-late", owner));
     }
 
     /// The same race one step later: the runner a pause aborted can already be
@@ -3782,6 +3946,83 @@ mod tests {
         );
     }
 
+    /// The compare-and-retire contract: a terminal write retires its own
+    /// runner's token and leaves a newer runner's alone.
+    ///
+    /// Value: protects=retire_own_runner_token's compare-and-retire;
+    /// fails_when=it removes by job id alone — any stale cleanup revokes the
+    /// token of the runner that owns the job now, and that runner stands down
+    /// silently; why_new=no test pinned the helper's contract (fail_job's own
+    /// use of it sits in a window between its write and the retire that no
+    /// deterministic test can hold open without breaking the documented lock
+    /// order: parking on stop_flags and then reading the row is db → stop_flags
+    /// reversed); seam=none
+    #[test]
+    fn retiring_a_token_only_removes_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let stale = manager.mint_runner_token("job-retire");
+        let owner = manager.mint_runner_token("job-retire");
+
+        manager.retire_own_runner_token("job-retire", stale);
+        assert!(
+            owns_job(&manager.runner_tokens, "job-retire", owner),
+            "a stale runner's cleanup must not revoke the current runner's token"
+        );
+
+        manager.retire_own_runner_token("job-retire", owner);
+        assert!(
+            !manager
+                .runner_tokens
+                .lock()
+                .unwrap()
+                .contains_key("job-retire"),
+            "a runner retiring itself leaves no entry behind"
+        );
+    }
+
+    /// A superseded runner finishing must not unregister the handle its
+    /// successor registered: pause's immediate abort reads that handle.
+    ///
+    /// Value: protects=unregister_task's token guard (running_tasks holds
+    /// (token, handle) pairs); fails_when=the removal keys on the job id alone —
+    /// a stale runner drops the current runner's handle and the next pause
+    /// loses its fast abort, falling back to the checkpoints; why_new=the map
+    /// had no notion of which runner a handle belonged to; seam=none
+    #[tokio::test]
+    async fn a_superseded_runner_leaves_the_current_handle_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let stale = manager.mint_runner_token("job-handle");
+        let owner = manager.mint_runner_token("job-handle");
+        let handle = async_runtime::spawn(async {});
+        manager
+            .running_tasks
+            .lock()
+            .unwrap()
+            .insert("job-handle".into(), (owner, handle));
+
+        manager.unregister_task("job-handle", stale);
+        assert!(
+            manager
+                .running_tasks
+                .lock()
+                .unwrap()
+                .contains_key("job-handle"),
+            "a superseded runner must not unregister the current runner's handle"
+        );
+        manager.unregister_task("job-handle", owner);
+        assert!(manager.running_tasks.lock().unwrap().is_empty());
+    }
+
     /// A real failure still takes the work dir with it: the fragments a failed
     /// attempt left behind are not a resumable product, and a retry starts the
     /// transfer over anyway. That rule used to sit in YtDlpDownloader's Err
@@ -3863,10 +4104,24 @@ mod tests {
         job.video_id = "BV1sup".into();
         manager.db.lock().unwrap().insert_job(&job).unwrap();
 
-        // Park the runner before the "write Running" critical section.
+        // Park the runner before its start critical section, with a positive
+        // signal that it is really parked there: it takes the only permit
+        // before `save_dir()` and never yields in between (tokio can only drop
+        // an aborted task at a yield point), so a permit count of zero means
+        // the pause below cannot "win" by dropping a task that never started.
         let settings_guard = manager.settings.lock().unwrap();
         manager.spawn_runner("job-superseded".to_string());
-        std::thread::sleep(Duration::from_millis(150));
+        for _ in 0..400 {
+            if manager.semaphore.available_permits() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            manager.semaphore.available_permits(),
+            0,
+            "the runner must have claimed the permit"
+        );
 
         // The user pauses — marker raised, row Paused, runner token retired —
         // and then resumes.
@@ -3883,7 +4138,21 @@ mod tests {
         flags.lock().unwrap().remove("job-superseded");
         drop(settings_guard);
 
-        sleep(Duration::from_millis(200)).await;
+        // The permit coming back is the runner's own completion signal: the
+        // task that took it has returned (standing down), so the outcome below
+        // is settled rather than a guess at how long it needs.
+        for _ in 0..400 {
+            let finished = manager.semaphore.available_permits() == 1;
+            if finished {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            manager.semaphore.available_permits(),
+            1,
+            "the parked runner must have finished"
+        );
         let jobs = manager.list().unwrap();
         let j = jobs.iter().find(|j| j.id == "job-superseded").unwrap();
         assert_eq!(
@@ -3897,10 +4166,15 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that swap the process-wide panic hook: the swap is
+    /// global, so two of them must not interleave.
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
     /// Break the manager's db lock the way a panicking holder would. The panic
     /// is the point — a std mutex only reports failure that way — so it is
     /// silenced to keep the test output clean.
     fn poison_db(manager: &DownloadManager) {
+        let _serialized = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let db = Arc::clone(&manager.db);
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
