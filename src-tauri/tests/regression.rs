@@ -64,6 +64,17 @@ async fn server_classifies_requests_and_holds_the_gate() {
     srv.release_gate();
     let _ = fetch.await.unwrap();
     assert_eq!(srv.counts(1).video_fragments, 2);
+
+    // Ordinal gate: video 2's first fragment passes, the second is held
+    srv.arm_gate_on_nth_fragment(2, 2);
+    let _ = support::server::get_text(&srv.url(2, "v0.ts"));
+    let url = srv.url(2, "v1.ts");
+    let fetch = tokio::task::spawn_blocking(move || support::server::get_text(&url));
+    assert!(srv.wait_gate_engaged(Duration::from_secs(10)).await);
+    assert!(!fetch.is_finished(), "gated request must still be pending");
+    srv.release_gate();
+    let _ = fetch.await.unwrap();
+    assert_eq!(srv.counts(2).video_fragments, 2);
 }
 
 /// Value: protects=HEAD/Range tolerance (yt-dlp's resume probing may send
@@ -136,6 +147,47 @@ async fn pause_resume_finishes_without_redownloading() {
     // Pause keeps the work dir (fragments / `.part`)
     let wd = h.work_dir_of(&job.id);
     assert!(wd.is_dir(), "pause must keep the work dir");
+
+    h.manager.resume(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+        .await;
+
+    let c = h.server.counts(1);
+    let fx = support::fixture::ensure(&h.ffmpeg);
+    assert!(
+        c.video_fragments <= fx.video_segments + 2,
+        "video re-downloaded: {c:?}"
+    );
+    assert!(
+        c.audio_fragments <= fx.audio_segments + 2,
+        "audio re-downloaded: {c:?}"
+    );
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
+    support::oracles::assert_no_stray_media_files(&h.work_dir_of(&job.id));
+}
+
+/// Value: protects=resume continuing from the breakpoint — the three fragments
+/// completed before the pause are not re-fetched (a full restart would push
+/// video requests past segments+2); fails_when=resume restarts the transfer
+/// from zero, the pause drops the work dir, or delivery breaks; why_new=the
+/// first-fragment pause cannot distinguish resume from restart under the
+/// tolerance (observed when Task 5's mutation failed to go red); seam=none
+#[tokio::test]
+async fn resume_does_not_refetch_completed_fragments() {
+    let h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+    h.server.arm_gate_on_nth_fragment(1, 4); // hold the fourth fragment request
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    let paused_at = h.server.counts(1);
+    assert!(
+        paused_at.video_fragments >= 4,
+        "expected three completed fragments plus one held: {paused_at:?}"
+    );
+
+    h.manager.pause(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+        .await;
+    h.server.release_gate();
 
     h.manager.resume(&job.id).unwrap();
     h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))

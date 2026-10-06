@@ -16,12 +16,19 @@ pub struct RequestCounts {
 
 #[derive(Default)]
 struct GateState {
+    /// Fragment requests for the gate's video seen since arming, counted
+    /// before any hold; `ordinal` selects which one to hold.
+    seen: usize,
     engaged: bool,
     released: bool,
 }
 
 struct Gate {
     video_n: usize,
+    /// Which fragment request (1-based, video and audio counted together) to
+    /// hold, counted from arm time — `1` holds the next one, whatever traffic
+    /// came before arming.
+    ordinal: usize,
     state: Mutex<GateState>,
     cv: Condvar,
 }
@@ -81,13 +88,23 @@ impl TestServer {
             .unwrap_or_default()
     }
 
-    pub fn arm_gate_on_next_fragment(&self, n: usize) {
+    /// Hold the `ordinal`-th fragment request (1-based, video and audio
+    /// counted together) for video `n`; the counting happens before the hold.
+    /// One-shot, 15s bounded — see `serve`.
+    pub fn arm_gate_on_nth_fragment(&self, n: usize, ordinal: usize) {
         let gate = Arc::new(Gate {
             video_n: n,
+            ordinal,
             state: Mutex::new(GateState::default()),
             cv: Condvar::new(),
         });
         *self.state.gate.lock().unwrap() = Some(gate);
+    }
+
+    /// Thin wrapper over `arm_gate_on_nth_fragment(n, 1)`: hold the next
+    /// fragment request for video `n`.
+    pub fn arm_gate_on_next_fragment(&self, n: usize) {
+        self.arm_gate_on_nth_fragment(n, 1);
     }
 
     pub async fn wait_gate_engaged(&self, timeout: Duration) -> bool {
@@ -163,15 +180,19 @@ fn serve(state: Arc<State>, request: tiny_http::Request) {
             _ => entry.audio_fragments += 1,
         }
         drop(counts);
-        // Gate: hold the NEXT fragment request for the armed video, bounded so a
-        // stuck test can never hang CI forever (well under yt-dlp's socket timeout).
+        // Gate: hold the armed fragment request for the armed video, bounded so
+        // a stuck test can never hang CI forever (well under yt-dlp's socket timeout).
         if kind != "playlist" {
             let gate = state.gate.lock().unwrap().clone();
             if let Some(g) = gate
                 && g.video_n == n
             {
                 let mut st = g.state.lock().unwrap();
-                if !st.engaged {
+                // Count requests as they arrive (before any hold): the ordinal
+                // is relative to arm time, so an arm placed after earlier
+                // traffic still holds exactly the n-th request from then on.
+                st.seen += 1;
+                if !st.engaged && st.seen == g.ordinal {
                     st.engaged = true;
                     g.cv.notify_all();
                     while !st.released {
