@@ -77,4 +77,65 @@ describe("mergeJob", () => {
 
     assert.equal(merged.error, "boom");
   });
+
+  it("ignores a late running patch on a paused job", () => {
+    const paused = baseJob({ status: "paused", progress: 0.5 });
+    const merged = mergeJob(paused, {
+      id: "job-1",
+      progress: 0.9,
+      status: "running",
+      speed: 999,
+    });
+
+    assert.equal(merged, paused, "the paused row is returned untouched");
+    assert.equal(merged.status, "paused");
+    assert.equal(merged.progress, 0.5);
+    assert.equal(merged.speed, undefined, "the late patch's speed is discarded");
+  });
+
+  it("paused patch clears live fields but keeps progress", () => {
+    const merged = mergeJob(
+      baseJob({ speed: 2048, eta: 12, downloaded_bytes: 5, total_bytes: 10 }),
+      { id: "job-1", progress: 0.62, status: "paused" },
+    );
+
+    assert.equal(merged.status, "paused");
+    assert.equal(merged.progress, 0.62);
+    assert.equal(merged.speed, null);
+    assert.equal(merged.eta, null);
+    assert.equal(merged.downloaded_bytes, null);
+    assert.equal(merged.total_bytes, null);
+  });
+
+  it("ignores a stale paused patch on a finished job", () => {
+    const done = baseJob({ status: "done", progress: 1 });
+    const merged = mergeJob(done, {
+      id: "job-1",
+      progress: 0.5,
+      status: "paused",
+    });
+
+    assert.equal(merged, done, "a finished row never regresses to paused");
+    assert.equal(merged.status, "done");
+    assert.equal(merged.progress, 1);
+
+    const failed = baseJob({ status: "failed", error: "boom" });
+    const mergedFailed = mergeJob(failed, {
+      id: "job-1",
+      progress: 0.5,
+      status: "paused",
+    });
+    assert.equal(mergedFailed, failed);
+    assert.equal(mergedFailed.status, "failed");
+  });
+
+  it("accepts a pending patch on a paused job (resume path)", () => {
+    const merged = mergeJob(baseJob({ status: "paused", progress: 0.5 }), {
+      id: "job-1",
+      progress: 0.5,
+      status: "pending",
+    });
+
+    assert.equal(merged.status, "pending");
+  });
 });

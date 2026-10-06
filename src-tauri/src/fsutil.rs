@@ -73,13 +73,45 @@ pub fn find_work_product(work: &Path) -> Option<PathBuf> {
     find_work_product_pass(work, true).or_else(|| find_work_product_pass(work, false))
 }
 
+/// True when the work dir still holds yt-dlp stream fragments (`.f<id>.` names).
+/// A finished product must not be relocated while fragments coexist: a killed
+/// merge leaves a half-written `….temp.<ext>` next to them, and the temp file
+/// alone would pass every other product check. Walks subdirectories like
+/// find_work_product: the output template may nest files.
+pub fn has_fragment_leftovers(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+                && crate::ytdlp::has_fragment_infix(&name)
+            {
+                return true;
+            }
+        } else if path.is_dir() && has_fragment_leftovers(&path) {
+            return true;
+        }
+    }
+    false
+}
+
 fn find_work_product_pass(work: &Path, media_only: bool) -> Option<PathBuf> {
     let entries = std::fs::read_dir(work).ok()?;
     for ent in entries.flatten() {
         let path = ent.path();
         if path.is_file() {
             let name = path.file_name()?.to_string_lossy();
+            // `….temp.<ext>` is yt-dlp's in-flight merge output, not a product:
+            // relocating it would deliver a half-merged file (0.4.0 class bug).
+            // Anchor on the stem so a real product whose TITLE embeds ".temp."
+            // (e.g. `如何在 .temp. 目录工作 [BV1xx].mp4`) stays a candidate.
+            let is_merge_temp = Path::new(&*name)
+                .file_stem()
+                .is_some_and(|stem| stem.to_string_lossy().ends_with(".temp"));
             if !name.ends_with(".part")
+                && !is_merge_temp
                 && path.metadata().ok()?.len() > 0
                 && (!media_only || has_output_ext(&name))
             {
@@ -183,6 +215,86 @@ mod tests {
         fs::write(work.join("cover.jpg"), b"thumb").unwrap();
         fs::write(work.join("clip.mp4"), b"video").unwrap();
         assert_eq!(find_work_product(&work), Some(work.join("clip.mp4")));
+    }
+
+    #[test]
+    fn find_work_product_keeps_a_title_that_embeds_dot_temp() {
+        // Only `<stem>.temp.<ext>` is yt-dlp's in-flight merge file; a finished
+        // product whose title merely contains ".temp." must stay a candidate.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("如何在 .temp. 目录工作 [BV1xx].mp4"),
+            b"final",
+        )
+        .unwrap();
+        assert_eq!(
+            find_work_product(dir.path()),
+            Some(dir.path().join("如何在 .temp. 目录工作 [BV1xx].mp4"))
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("demo.temp.mp4"), b"half-merged").unwrap();
+        assert_eq!(
+            find_work_product(temp.path()),
+            None,
+            "the in-flight merge file must still be excluded"
+        );
+    }
+
+    /// `run_job` refuses to relocate when stream fragments coexist with a
+    /// product: a merge killed mid-flight leaves `….temp.<ext>` next to the
+    /// fragments, and the temp file alone would pass every other product check.
+    ///
+    /// Value: protects=the coexist guard that keeps a half-merged merge file
+    /// from being relocated/delivered as a finished download; fails_when=
+    /// has_fragment_leftovers misses `.f<id>.<ext>` names or reports false
+    /// while a product sits next to fragments; why_new=new helper, and no
+    /// fsutil test covers fragments (only `.part` and media-preference cases
+    /// exist); seam=none
+    #[test]
+    fn has_fragment_leftovers_detects_fragments_next_to_a_product() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !has_fragment_leftovers(dir.path()),
+            "an empty dir has no leftovers"
+        );
+
+        // The in-flight temp file is not a fragment; it is excluded from
+        // product candidates separately (find_work_product).
+        fs::write(dir.path().join("demo.temp.mp4"), b"half-merged").unwrap();
+        assert!(
+            !has_fragment_leftovers(dir.path()),
+            "a lone in-flight temp file is not a fragment leftover"
+        );
+
+        fs::write(dir.path().join("demo.f30016.mp4"), b"frag").unwrap();
+        assert!(
+            has_fragment_leftovers(dir.path()),
+            "a stream fragment is a leftover regardless of other files"
+        );
+
+        fs::write(dir.path().join("demo.mp4"), b"product").unwrap();
+        assert!(
+            has_fragment_leftovers(dir.path()),
+            "fragments next to a product must still block relocation"
+        );
+    }
+
+    #[test]
+    fn has_fragment_leftovers_walks_subdirs() {
+        // The output template may nest files; find_work_product recurses, so
+        // the fragment scan must too or the run_job coexist guard no-ops.
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("uploader");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("demo.mp4"), b"product").unwrap();
+        fs::write(sub.join("demo.f30016.mp4"), b"frag").unwrap();
+        assert!(has_fragment_leftovers(dir.path()));
+
+        let clean = tempfile::tempdir().unwrap();
+        assert!(!has_fragment_leftovers(
+            clean.path().join("missing").as_path()
+        ));
     }
 
     #[test]

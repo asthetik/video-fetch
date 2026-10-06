@@ -7,6 +7,7 @@ pub enum JobStatus {
     Running,
     Done,
     Failed,
+    Paused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +20,7 @@ pub enum JobConflict {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct DownloadConflict {
-    /// Same video/page/format is pending or running.
+    /// Same video/page is pending, running or paused (paused still blocks duplicates).
     pub downloading: bool,
     /// A completed job record exists for the same video/page/format.
     pub exists: bool,
@@ -165,6 +166,22 @@ pub enum AuthStatus {
 #[serde(rename_all = "camelCase")]
 pub struct CancelAllResult {
     pub cancelled: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PauseAllResult {
+    pub paused: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeAllResult {
+    pub resumed: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
 }

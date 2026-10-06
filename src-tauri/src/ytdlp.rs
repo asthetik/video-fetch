@@ -7,6 +7,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use crate::download::{StopFlags, StopKind, stop_kind_of, stop_message};
 use crate::error::{AppError, AppResult};
 use crate::models::{FormatOption, PageItem, VideoMeta};
 use crate::platform::{canonicalize_video_url, detect_platform};
@@ -921,15 +922,11 @@ pub struct DownloadRequest<'a> {
     pub output_dir: &'a Path,
     pub cookies_path: Option<&'a Path>,
     pub children: &'a Arc<Mutex<HashMap<String, tokio::process::Child>>>,
-    pub cancelled: &'a Arc<Mutex<HashMap<String, bool>>>,
+    pub stop_flags: &'a StopFlags,
 }
 
-fn job_is_cancelled(cancelled: &Arc<Mutex<HashMap<String, bool>>>, job_id: &str) -> bool {
-    cancelled
-        .lock()
-        .ok()
-        .and_then(|m| m.get(job_id).copied())
-        .unwrap_or(false)
+fn stop_err(kind: StopKind) -> AppError {
+    AppError::Message(stop_message(kind).into())
 }
 
 /// yt-dlp names per-stream intermediates `Title.f<format-id>.<ext>`. A
@@ -984,7 +981,7 @@ pub async fn download(
         output_dir,
         cookies_path,
         children,
-        cancelled,
+        stop_flags,
     } = req;
 
     if !cfg.yt_dlp_path.exists() {
@@ -1078,6 +1075,11 @@ pub async fn download(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
+    // Own process group (pgid = child pid): the PyInstaller-built yt-dlp runs
+    // as a bootloader parent plus a python child, with ffmpeg as a grandchild;
+    // signalling the group is the only way to stop the whole tree on unix.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = cmd
         .spawn()
@@ -1099,10 +1101,10 @@ pub async fn download(
         guard.insert(job_id.to_string(), child);
     }
 
-    // Cancel may have raced before the child was registered; honor it now.
-    if job_is_cancelled(cancelled, job_id) {
+    // A stop may have raced before the child was registered; honor it now.
+    if let Some(kind) = stop_kind_of(stop_flags, job_id) {
         kill_download(children, job_id);
-        return Err(AppError::Message("用户取消下载".into()));
+        return Err(stop_err(kind));
     }
 
     let mut stdout_lines = BufReader::new(stdout).lines();
@@ -1118,9 +1120,9 @@ pub async fn download(
         }
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
-                if job_is_cancelled(cancelled, job_id) {
+                if let Some(kind) = stop_kind_of(stop_flags, job_id) {
                     kill_download(children, job_id);
-                    return Err(AppError::Message("用户取消下载".into()));
+                    return Err(stop_err(kind));
                 }
             }
             line = stdout_lines.next_line(), if !stdout_done => {
@@ -1138,7 +1140,10 @@ pub async fn download(
                     }
                     Ok(None) => stdout_done = true,
                     Err(e) => {
-                        remove_child(children, job_id);
+                        // An output-read error still has to stop the whole
+                        // tree: dropping just the direct child would leave the
+                        // PyInstaller second stage running.
+                        kill_download(children, job_id);
                         return Err(AppError::Message(format!("读取 yt-dlp 输出失败: {e}")));
                     }
                 }
@@ -1162,7 +1167,7 @@ pub async fn download(
                     }
                     Ok(None) => stderr_done = true,
                     Err(e) => {
-                        remove_child(children, job_id);
+                        kill_download(children, job_id);
                         return Err(AppError::Message(format!("读取 yt-dlp 进度失败: {e}")));
                     }
                 }
@@ -1225,12 +1230,6 @@ pub async fn download(
     Ok(final_path)
 }
 
-fn remove_child(children: &Arc<Mutex<HashMap<String, tokio::process::Child>>>, job_id: &str) {
-    if let Ok(mut guard) = children.lock() {
-        guard.remove(job_id);
-    }
-}
-
 fn take_child(
     children: &Arc<Mutex<HashMap<String, tokio::process::Child>>>,
     job_id: &str,
@@ -1272,6 +1271,21 @@ fn kill_child_process_tree(child: &mut tokio::process::Child) {
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
             return;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // The child is a process-group leader (spawned with process_group(0)):
+            // SIGKILL to -pgid reaches the PyInstaller second stage and ffmpeg.
+            // Only a confirmed group kill returns; a failed one (e.g. a sandbox
+            // denying negative-pid signals) falls through so the direct child is
+            // still signalled instead of reporting a kill that never landed.
+            // SAFETY: kill(2) with a negative pid targets the group; the group
+            // belongs to the child we spawned, never to this process.
+            if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == 0 {
+                return;
+            }
         }
     }
     let _ = child.start_kill();
@@ -1803,5 +1817,138 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     fn a_quiet_run_produces_no_notable_lines() {
         assert!(notable_stderr_lines("", 5).is_empty());
         assert!(notable_stderr_lines("[download] 42% of 1MiB\n", 5).is_empty());
+    }
+
+    /// The PyInstaller yt-dlp is two processes (bootloader + python) with
+    /// ffmpeg as a grandchild, so a pause must terminate the whole process
+    /// group — killing only the direct child leaves the real downloader
+    /// running as an orphan (the macOS bug the process_group(0) hardening
+    /// fixes). This drives a fake first stage (as the real sidecar binary
+    /// would run) that spawns a real child and writes a `.part` file, then
+    /// asserts the pause error, the whole tree's death, and that the partial
+    /// file survives the pause cleanup.
+    ///
+    /// Value: protects=the unix group-kill hardening, the pause path of the
+    /// stop-flag poll, and YtDlpDownloader::run's pause-aware Err cleanup
+    /// (keep the work dir so `.part` can resume); fails_when=process_group(0)
+    /// is removed at spawn, kill_child_process_tree falls back to start_kill
+    /// (grandchild survives), or the cleanup stops consulting the stop kind
+    /// (the `.part` file is deleted); why_new=no test exercises ytdlp::download
+    /// or any kill/cleanup path (the real sidecar is not available in tests);
+    /// seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pause_kill_terminates_the_whole_two_stage_process_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-yt-dlp");
+        // First stage: write an in-flight `.part` file into the requested
+        // output dir, start the "python child", publish its pid, then wait —
+        // mirroring the bootloader/python pair the sidecar ships.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             out=\"\"\nprev=\"\"\n\
+             for a in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$a\"; fi\n  prev=\"$a\"\ndone\n\
+             dir=$(dirname \"$out\")\n\
+             : > \"$dir/demo.f30064.mp4.part\"\n\
+             sleep 30 &\n\
+             echo $! > \"$(dirname \"$0\")/child.pid\"\n\
+             wait\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let work_root = dir.path().join("work");
+        let children: Arc<Mutex<HashMap<String, tokio::process::Child>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
+
+        const JOB_ID: &str = "job-tree-kill";
+        let job = crate::models::DownloadJob {
+            id: JOB_ID.into(),
+            url: "https://www.bilibili.com/video/BV1xx".into(),
+            video_id: "BV1xx".into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: crate::models::JobStatus::Running,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        };
+        let downloader = Arc::new(crate::download::YtDlpDownloader::new(
+            YtDlpConfig {
+                yt_dlp_path: script,
+                ffmpeg_path: None,
+            },
+            work_root.clone(),
+            None,
+            Arc::clone(&children),
+            Arc::clone(&stop_flags),
+        ));
+
+        let handle = tokio::spawn({
+            let downloader = Arc::clone(&downloader);
+            async move {
+                use crate::download::Downloader as _;
+                downloader.run(&job, Box::new(|_| {})).await
+            }
+        });
+
+        // Wait until the second stage has actually started.
+        let pid_file = dir.path().join("child.pid");
+        let mut grandchild = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                grandchild = Some(pid);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        let grandchild = grandchild.expect("fake yt-dlp child should start");
+
+        stop_flags
+            .lock()
+            .unwrap()
+            .insert(JOB_ID.to_string(), StopKind::Pause);
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("download() must react to the pause flag")
+            .expect("join the download task")
+            .expect_err("a paused download returns Err");
+        assert!(err.contains("用户暂停下载"), "unexpected: {err}");
+        assert!(
+            children.lock().unwrap().is_empty(),
+            "the killed child must leave the process registry"
+        );
+        assert!(
+            crate::fsutil::work_dir_for(&work_root, JOB_ID)
+                .join("demo.f30064.mp4.part")
+                .exists(),
+            "the partial file must survive the pause cleanup"
+        );
+
+        // The grandchild (ffmpeg analog) must be gone too: start_kill on the
+        // direct child alone would leave it running as an orphan.
+        let mut dead = false;
+        for _ in 0..100 {
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert!(dead, "the grandchild process survived the pause kill");
     }
 }

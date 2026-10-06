@@ -25,10 +25,12 @@ import {
 } from "../lib/downloadProgress";
 import { formatBytes } from "../lib/format";
 import {
+  historyVisibleJobs,
   filterHistoryJobs,
   type HistoryStatusFilter,
 } from "../lib/historyFilter";
 import { groupHistoryByDate } from "../lib/historyGroup";
+import { isActiveStatus } from "../lib/queueJobs";
 import { api } from "../lib/tauri";
 import type { DownloadJob, JobStatus } from "../types";
 
@@ -37,6 +39,7 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   running: "下载中",
   done: "完成",
   failed: "失败",
+  paused: "已暂停",
 };
 
 function parentDir(filePath: string): string {
@@ -55,7 +58,8 @@ interface HistoryPageProps {
 }
 
 export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
-  // History now shows ALL statuses; active jobs form their own pinned group.
+  // History shows every status except paused (paused lives only in the
+  // download queue); active jobs form their own pinned group.
   const [allJobs, setAllJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -111,6 +115,10 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const doneCount = allJobs.filter((j) => j.status === "done").length;
   const failedCount = allJobs.filter((j) => j.status === "failed").length;
   const finishedTotal = doneCount + failedCount;
+
+  // Counts, segmented totals and empty states exclude paused: paused jobs are
+  // visible and operable only in the download queue.
+  const visibleJobs = useMemo(() => historyVisibleJobs(allJobs), [allJobs]);
 
   const activeJobs = allJobs.filter(
     (j) => j.status === "pending" || j.status === "running",
@@ -177,7 +185,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       setConfirmClear(false);
       // The backend only clears done/failed; keep any active jobs in state.
       setAllJobs((prev) =>
-        prev.filter((j) => j.status === "pending" || j.status === "running"),
+        prev.filter((j) => isActiveStatus(j.status)),
       );
       toast.success("已清空历史记录");
       onJobsChanged?.();
@@ -270,7 +278,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       <div className="history-head">
         <h2 className="history-title">下载历史</h2>
         <span className="history-count">
-          {allJobs.length > 0 ? `${allJobs.length} 条记录` : ""}
+          {visibleJobs.length > 0 ? `${visibleJobs.length} 条记录` : ""}
         </span>
         {finishedTotal > 0 && (
           <button
@@ -298,7 +306,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         </div>
         <Segmented
           options={[
-            { value: "all", label: `全部 ${allJobs.length}` },
+            { value: "all", label: `全部 ${visibleJobs.length}` },
             { value: "done", label: `完成 ${doneCount}` },
             { value: "failed", label: `失败 ${failedCount}` },
           ]}
@@ -310,7 +318,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
 
       {loading && <p className="queue-empty">加载中…</p>}
 
-      {!loading && allJobs.length === 0 && (
+      {!loading && visibleJobs.length === 0 && (
         <EmptyState
           icon={HistoryIcon}
           title="还没有下载记录"
@@ -320,7 +328,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         />
       )}
 
-      {!loading && allJobs.length > 0 && !showActive && groups.length === 0 && (
+      {!loading && visibleJobs.length > 0 && !showActive && groups.length === 0 && (
         <EmptyState icon={Search} title="没有匹配的记录" desc="换个关键词或清除筛选" />
       )}
 
@@ -360,6 +368,11 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         open={pendingDelete !== null}
         jobTitle={pendingDelete ? jobLabel(pendingDelete) : ""}
         filePath={pendingDelete?.output_path}
+        note={
+          pendingDelete && isActiveStatus(pendingDelete.status)
+            ? "已下载的部分会被删除。"
+            : null
+        }
         onChoose={(choice) => {
           if (pendingDelete) {
             void applyDelete(pendingDelete, choice);

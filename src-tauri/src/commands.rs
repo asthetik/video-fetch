@@ -14,13 +14,13 @@ use crate::bilibili_view;
 use crate::cookies::{self, Cookie};
 use crate::download::{
     DownloadManager, DownloadProgressEvent, PROGRESS_EVENT, ProgressEmitter,
-    cleanup_orphan_work_dirs,
+    cleanup_orphan_work_dirs, work_dir_keep_ids,
 };
 use crate::error::{AppError, AppResult};
 use crate::models;
 use crate::models::{
     AppSettings, AuthStatus, CancelAllResult, ClearFinishedResult, DownloadConflict, DownloadJob,
-    JobStatus, VideoMeta,
+    JobStatus, PauseAllResult, ResumeAllResult, VideoMeta,
 };
 use crate::naming;
 use crate::platform;
@@ -994,6 +994,44 @@ pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJo
         .inspect_err(|e| warn_cmd(&format!("download: 重试失败 {id}"), e))
 }
 
+#[tauri::command]
+pub fn pause_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+    tracing::info!(target: "core", "download: 暂停 {id}");
+    state
+        .downloads
+        .pause(&id)
+        .inspect_err(|e| warn_cmd(&format!("download: 暂停失败 {id}"), e))
+}
+
+#[tauri::command]
+pub fn resume_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+    tracing::info!(target: "core", "download: 继续 {id}");
+    state
+        .downloads
+        .resume(&id)
+        .inspect_err(|e| warn_cmd(&format!("download: 继续失败 {id}"), e))
+}
+
+#[tauri::command]
+pub fn pause_all_jobs(state: State<'_, AppState>) -> AppResult<PauseAllResult> {
+    let result = state
+        .downloads
+        .pause_all()
+        .inspect_err(|e| warn_cmd("download: 暂停全部失败", e))?;
+    tracing::info!(target: "core", "download: 暂停全部（{} 个）", result.paused);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn resume_all_jobs(state: State<'_, AppState>) -> AppResult<ResumeAllResult> {
+    let result = state
+        .downloads
+        .resume_all()
+        .inspect_err(|e| warn_cmd("download: 继续全部失败", e))?;
+    tracing::info!(target: "core", "download: 继续全部（{} 个）", result.resumed);
+    Ok(result)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteJobArgs {
@@ -1510,20 +1548,16 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         work_root.clone(),
     )?;
 
-    let active_ids: Vec<String> = downloads
-        .list()?
-        .into_iter()
-        .filter(|j| {
-            matches!(
-                j.status,
-                JobStatus::Pending | JobStatus::Running | JobStatus::Failed
-            )
-        })
-        .map(|j| j.id)
-        .collect();
+    let active_ids = work_dir_keep_ids(&downloads.list()?);
     let removed_orphans = cleanup_orphan_work_dirs(&work_root, &active_ids);
     if removed_orphans > 0 {
         tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed_orphans} 个");
+    }
+    // A row left Running by the previous session has no runner: surface it as
+    // Paused so the UI offers 继续 instead of a frozen 下载中 bar.
+    let reconciled = downloads.reconcile_interrupted_runs()?;
+    if reconciled > 0 {
+        tracing::info!(target: "core", "app: 中断的下载已转为暂停 {reconciled} 个");
     }
 
     let http_client = reqwest::Client::builder()

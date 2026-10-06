@@ -4,6 +4,8 @@ import {
   Download,
   FolderOpen,
   History as HistoryIcon,
+  Pause,
+  Play,
   RotateCcw,
   Trash2,
   X,
@@ -18,7 +20,12 @@ import {
 import { IconButton } from "./IconButton";
 import { api } from "../lib/tauri";
 import { formatBytes } from "../lib/format";
-import { partitionQueueJobs, sortJobs, upsertJob } from "../lib/queueJobs";
+import {
+  isActiveStatus,
+  partitionQueueJobs,
+  sortJobs,
+  upsertJob,
+} from "../lib/queueJobs";
 import {
   type DownloadProgressPayload,
   mergeJob,
@@ -31,6 +38,7 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   running: "下载中",
   done: "完成",
   failed: "失败",
+  paused: "已暂停",
 };
 
 function formatSpeed(bps?: number | null): string | null {
@@ -69,6 +77,7 @@ export function DownloadQueue({
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
+  const [pendingPauseCancel, setPendingPauseCancel] = useState<DownloadJob | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
@@ -128,6 +137,66 @@ export function DownloadQueue({
     }
   }
 
+  async function handlePause(id: string) {
+    try {
+      const updated = await api.pauseJob(id);
+      setJobs((prev) => upsertJob(prev, updated));
+      if (updated.status !== "paused") {
+        toast.info("任务已结束，未执行暂停");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleResume(id: string) {
+    try {
+      const updated = await api.resumeJob(id);
+      setJobs((prev) => upsertJob(prev, updated));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // Shared skeleton for the three bulk actions: busy guard, partial-failure
+  // warning, error toast, refresh. Callers keep only their api call and text.
+  async function runBulk<T extends { errors?: string[] }>(
+    run: () => Promise<T>,
+    warning: (result: T) => string,
+  ) {
+    if (bulkBusyRef.current) {
+      return;
+    }
+    bulkBusyRef.current = true;
+    setBulkBusy(true);
+    try {
+      const result = await run();
+      if (result.errors && result.errors.length > 0) {
+        toast.warning(warning(result));
+      }
+      await loadJobs();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      bulkBusyRef.current = false;
+      setBulkBusy(false);
+    }
+  }
+
+  async function handlePauseAll() {
+    await runBulk(
+      () => api.pauseAllJobs(),
+      (r) => `已暂停 ${r.paused} 个任务，部分失败：${r.errors?.[0]}`,
+    );
+  }
+
+  async function handleResumeAll() {
+    await runBulk(
+      () => api.resumeAllJobs(),
+      (r) => `已继续 ${r.resumed} 个任务，部分失败：${r.errors?.[0]}`,
+    );
+  }
+
   async function applyDelete(job: DownloadJob, choice: DeleteChoice) {
     setPendingDelete(null);
     if (choice === "cancel") {
@@ -152,32 +221,20 @@ export function DownloadQueue({
   }
 
   async function handleCancelAll() {
-    if (bulkBusyRef.current) {
-      return;
-    }
-    bulkBusyRef.current = true;
-    setBulkBusy(true);
-    try {
-      const result = await api.cancelAllJobs();
-      if (result.errors && result.errors.length > 0) {
-        toast.warning(
-          `已取消 ${result.cancelled} 个任务，部分失败：${result.errors[0]}`,
-        );
-      }
-      setConfirmCancelAll(false);
-      await loadJobs();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-      setConfirmCancelAll(false);
-    } finally {
-      bulkBusyRef.current = false;
-      setBulkBusy(false);
-    }
+    await runBulk(
+      () => api.cancelAllJobs(),
+      (r) => `已取消 ${r.cancelled} 个任务，部分失败：${r.errors?.[0]}`,
+    );
+    setConfirmCancelAll(false);
   }
 
   const { active, recentFailed, failedTotal, doneFallback } =
     partitionQueueJobs(jobs);
   const cancellableCount = active.length;
+  const pausableCount = jobs.filter(
+    (j) => j.status === "pending" || j.status === "running",
+  ).length;
+  const resumableCount = jobs.filter((j) => j.status === "paused").length;
 
   function renderJobItem(job: DownloadJob) {
     const speed = job.status === "running" ? formatSpeed(job.speed) : null;
@@ -209,10 +266,13 @@ export function DownloadQueue({
             <span className={`queue-badge ${job.status}`}>
               {STATUS_LABEL[job.status]}
               {job.status === "running" && ` ${pct}%`}
+              {job.status === "paused" && job.progress > 0 && ` ${pct}%`}
             </span>
           </div>
 
-          {(job.status === "running" || job.status === "pending") && (
+          {(job.status === "running" ||
+            job.status === "pending" ||
+            (job.status === "paused" && job.progress > 0)) && (
             <div className="progress-bar">
               <div className="progress-fill" style={{ width: `${pct}%` }} />
             </div>
@@ -222,12 +282,36 @@ export function DownloadQueue({
 
           <div className="queue-actions">
             {(job.status === "pending" || job.status === "running") && (
-              <IconButton
-                icon={X}
-                label="取消"
-                action="cancel-job"
-                onClick={() => void handleCancel(job.id)}
-              />
+              <>
+                <IconButton
+                  icon={Pause}
+                  label="暂停"
+                  action="pause-job"
+                  onClick={() => void handlePause(job.id)}
+                />
+                <IconButton
+                  icon={X}
+                  label="取消"
+                  action="cancel-job"
+                  onClick={() => void handleCancel(job.id)}
+                />
+              </>
+            )}
+            {job.status === "paused" && (
+              <>
+                <IconButton
+                  icon={Play}
+                  label="继续"
+                  action="resume-job"
+                  onClick={() => void handleResume(job.id)}
+                />
+                <IconButton
+                  icon={X}
+                  label="取消"
+                  action="cancel-job"
+                  onClick={() => setPendingPauseCancel(job)}
+                />
+              </>
             )}
             {job.status === "failed" && (
               <IconButton
@@ -276,6 +360,28 @@ export function DownloadQueue({
           )}
         </h3>
         <div className="queue-heading-actions">
+          {pausableCount > 0 && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              data-action="pause-all"
+              disabled={bulkBusy}
+              onClick={() => void handlePauseAll()}
+            >
+              全部暂停
+            </button>
+          )}
+          {resumableCount > 0 && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              data-action="resume-all"
+              disabled={bulkBusy}
+              onClick={() => void handleResumeAll()}
+            >
+              全部继续
+            </button>
+          )}
           {cancellableCount > 0 && (
             <button
               type="button"
@@ -337,7 +443,7 @@ export function DownloadQueue({
       <ConfirmDialog
         open={confirmCancelAll}
         title="取消全部下载"
-        message={`将取消 ${cancellableCount} 个进行中的任务。不会删除已保存的本地文件。`}
+        message={`将取消 ${cancellableCount} 个未完成的任务（含暂停中的）；未完成任务的已下载部分会被删除，已保存到本地的成品不受影响。`}
         confirmLabel="全部取消"
         cancelLabel="关闭"
         busy={bulkBusy}
@@ -347,10 +453,32 @@ export function DownloadQueue({
         onConfirm={() => void handleCancelAll()}
       />
 
+      <ConfirmDialog
+        open={pendingPauseCancel !== null}
+        title="取消暂停的任务"
+        message="将取消该暂停任务，已下载的部分会被删除。"
+        confirmLabel="取消任务"
+        cancelLabel="关闭"
+        danger
+        onCancel={() => setPendingPauseCancel(null)}
+        onConfirm={() => {
+          const job = pendingPauseCancel;
+          setPendingPauseCancel(null);
+          if (job) {
+            void handleCancel(job.id);
+          }
+        }}
+      />
+
       <DeleteConfirmDialog
         open={pendingDelete !== null}
         jobTitle={pendingDelete ? jobLabel(pendingDelete) : ""}
         filePath={pendingDelete?.output_path}
+        note={
+          pendingDelete && isActiveStatus(pendingDelete.status)
+            ? "已下载的部分会被删除。"
+            : null
+        }
         onChoose={(choice) => {
           if (pendingDelete) {
             void applyDelete(pendingDelete, choice);

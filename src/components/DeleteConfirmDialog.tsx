@@ -9,6 +9,8 @@ interface DeleteConfirmDialogProps {
   jobTitle: string;
   /** When set, offer deleting the local file as well. */
   filePath?: string | null;
+  /** Replaces the "不影响本地文件" line when the job has partial data on disk. */
+  note?: string | null;
   onChoose: (choice: DeleteChoice) => void;
 }
 
@@ -16,6 +18,7 @@ export function DeleteConfirmDialog({
   open,
   jobTitle,
   filePath,
+  note,
   onChoose,
 }: DeleteConfirmDialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -90,7 +93,7 @@ export function DeleteConfirmDialog({
             <p className="modal-desc">
               确定删除下载任务「{jobTitle}」？
               <br />
-              仅移除队列中的任务，不会影响本地文件。
+              {note ?? "仅移除队列中的任务，不会影响本地文件。"}
             </p>
             <div className="modal-actions">
               <button

@@ -47,6 +47,10 @@ pub struct Db {
     conn: Connection,
 }
 
+/// One home for the user-facing "row vanished" message: get_job / update_job /
+/// delete_job and download.rs's missing_job_err all speak it.
+pub(crate) const MISSING_JOB_MESSAGE: &str = "该任务已不存在，请刷新列表";
+
 impl Db {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
@@ -172,7 +176,7 @@ impl Db {
             ],
         )?;
         if updated == 0 {
-            return Err(AppError::Message(format!("job not found: {}", job.id)));
+            return Err(AppError::Message(MISSING_JOB_MESSAGE.into()));
         }
         Ok(())
     }
@@ -211,6 +215,13 @@ impl Db {
     }
 
     pub fn get_job(&self, id: &str) -> AppResult<DownloadJob> {
+        self.find_job(id)?
+            .ok_or_else(|| AppError::Message(MISSING_JOB_MESSAGE.into()))
+    }
+
+    /// Like `get_job`, but a missing row is `None` instead of an error — the
+    /// pause/resume paths map it to a Chinese message for concurrent deletes.
+    pub fn find_job(&self, id: &str) -> AppResult<Option<DownloadJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
@@ -219,27 +230,29 @@ impl Db {
             FROM jobs
             WHERE id = ?1",
         )?;
-        let job = stmt.query_row(params![id], |row| {
-            let status_str: String = row.get(7)?;
-            Ok(DownloadJob {
-                id: row.get(0)?,
-                url: row.get(1)?,
-                video_id: row.get(2)?,
-                page_index: row.get::<_, i64>(3)? as u32,
-                format_id: row.get(4)?,
-                title: row.get(5)?,
-                output_template: row.get(6)?,
-                status: status_from_str(&status_str)?,
-                progress: row.get(8)?,
-                error: row.get(9)?,
-                output_path: row.get(10)?,
-                audio_format: row.get(11)?,
-                thumbnail_url: row.get(12)?,
-                duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
-                file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
-                created_at: row.get(15)?,
+        let job = stmt
+            .query_row(params![id], |row| {
+                let status_str: String = row.get(7)?;
+                Ok(DownloadJob {
+                    id: row.get(0)?,
+                    url: row.get(1)?,
+                    video_id: row.get(2)?,
+                    page_index: row.get::<_, i64>(3)? as u32,
+                    format_id: row.get(4)?,
+                    title: row.get(5)?,
+                    output_template: row.get(6)?,
+                    status: status_from_str(&status_str)?,
+                    progress: row.get(8)?,
+                    error: row.get(9)?,
+                    output_path: row.get(10)?,
+                    audio_format: row.get(11)?,
+                    thumbnail_url: row.get(12)?,
+                    duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
+                    file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                    created_at: row.get(15)?,
+                })
             })
-        })?;
+            .optional()?;
         Ok(job)
     }
 
@@ -276,9 +289,10 @@ impl Db {
         })
     }
 
-    /// Any pending/running job for this video page of the same media kind:
-    /// video requests only conflict with other video jobs, audio requests only
-    /// with other audio jobs.
+    /// Any pending/running/paused job for this video page of the same media
+    /// kind: video requests only conflict with other video jobs, audio
+    /// requests only with other audio jobs. A paused job still holds the
+    /// active slot until it is resumed or cancelled.
     pub fn has_active_job(
         &self,
         video_id: &str,
@@ -288,7 +302,7 @@ impl Db {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM jobs
              WHERE video_id = ?1 AND page_index = ?2 AND audio_format IS ?3
-               AND status IN ('pending', 'running')",
+               AND status IN ('pending', 'running', 'paused')",
             params![video_id, page_index, audio_format],
             |row| row.get(0),
         )?;
@@ -319,17 +333,37 @@ impl Db {
             .conn
             .execute("DELETE FROM jobs WHERE id = ?1", params![id])?;
         if deleted == 0 {
-            return Err(AppError::Message(format!("job not found: {id}")));
+            return Err(AppError::Message(MISSING_JOB_MESSAGE.into()));
         }
         Ok(())
     }
 
-    /// Delete all done/failed rows. Does not touch pending/running or any files on disk.
-    pub fn delete_finished_jobs(&self) -> AppResult<u64> {
-        let deleted = self
+    /// Delete all done/failed rows and return their ids (the manager prunes
+    /// those ids' stop markers in the same operation). One statement via
+    /// SQLite RETURNING, so the predicate lives in a single place. Does not
+    /// touch pending/running/paused rows or any files on disk.
+    pub fn delete_finished_jobs(&self) -> AppResult<Vec<String>> {
+        let mut stmt = self
             .conn
-            .execute("DELETE FROM jobs WHERE status IN ('done', 'failed')", [])?;
-        Ok(deleted as u64)
+            .prepare("DELETE FROM jobs WHERE status IN ('done', 'failed') RETURNING id")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
+    /// Startup reconciliation: a row left Running cannot have a live runner
+    /// after a relaunch, so surface it as Paused (progress and the work dir
+    /// are kept; 继续 resumes it). Returns how many rows changed.
+    pub fn mark_running_as_paused(&self) -> AppResult<u64> {
+        let changed = self.conn.execute(
+            "UPDATE jobs SET status = 'paused', updated_at = datetime('now')
+             WHERE status = 'running'",
+            [],
+        )?;
+        Ok(changed as u64)
     }
 
     pub fn get_resolve_cache(&self, key: &str) -> AppResult<Option<(VideoMeta, i64)>> {
@@ -382,6 +416,7 @@ fn status_to_str(status: &JobStatus) -> &'static str {
         JobStatus::Running => "running",
         JobStatus::Done => "done",
         JobStatus::Failed => "failed",
+        JobStatus::Paused => "paused",
     }
 }
 
@@ -391,6 +426,7 @@ fn status_from_str(s: &str) -> rusqlite::Result<JobStatus> {
         "running" => Ok(JobStatus::Running),
         "done" => Ok(JobStatus::Done),
         "failed" => Ok(JobStatus::Failed),
+        "paused" => Ok(JobStatus::Paused),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "invalid job status: {s}"
         ))),
@@ -401,6 +437,24 @@ fn status_from_str(s: &str) -> rusqlite::Result<JobStatus> {
 mod tests {
     use super::*;
     use crate::models::{JobConflict, JobStatus, VideoMeta};
+
+    #[test]
+    fn job_status_roundtrips_through_the_string_column() {
+        for status in [
+            JobStatus::Pending,
+            JobStatus::Running,
+            JobStatus::Done,
+            JobStatus::Failed,
+            JobStatus::Paused,
+        ] {
+            let s = status_to_str(&status);
+            assert_eq!(
+                status_from_str(s).unwrap(),
+                status,
+                "roundtrip for {status:?}"
+            );
+        }
+    }
 
     fn sample_video_meta() -> VideoMeta {
         VideoMeta {
@@ -692,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_finished_jobs_removes_done_and_failed_keeps_active() {
+    fn delete_finished_jobs_removes_done_and_failed_keeps_pending_running_paused() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
 
@@ -704,6 +758,12 @@ mod tests {
         running.status = JobStatus::Running;
         db.insert_job(&running).unwrap();
 
+        // A paused row's work dir holds the partial files resume needs; clearing
+        // history must never delete it (the paused status is a new row state).
+        let mut paused = sample_job_for_db("pa1");
+        paused.status = JobStatus::Paused;
+        db.insert_job(&paused).unwrap();
+
         let mut done = sample_job_for_db("d1");
         done.status = JobStatus::Done;
         done.output_path = Some("/tmp/keep-me.mp4".into());
@@ -714,13 +774,15 @@ mod tests {
         failed.error = Some("用户取消下载".into());
         db.insert_job(&failed).unwrap();
 
-        let cleared = db.delete_finished_jobs().unwrap();
-        assert_eq!(cleared, 2);
+        let mut cleared = db.delete_finished_jobs().unwrap();
+        cleared.sort();
+        assert_eq!(cleared, vec!["d1".to_string(), "f1".to_string()]);
 
         let jobs = db.list_jobs().unwrap();
-        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs.len(), 3);
         assert!(jobs.iter().any(|j| j.id == "p1"));
         assert!(jobs.iter().any(|j| j.id == "r1"));
+        assert!(jobs.iter().any(|j| j.id == "pa1"));
         assert!(!jobs.iter().any(|j| j.id == "d1" || j.id == "f1"));
     }
 
