@@ -29,6 +29,22 @@ use commands::{
 };
 use tauri::Manager;
 
+/// Test-only surface for the integration suite under `tests/`. The modules
+/// themselves stay private; this list is the deliberate, minimal set of pub
+/// items the harness drives. Grow it only when a test needs more.
+#[cfg(feature = "test-utils")]
+pub mod testing {
+    pub use crate::db::Db;
+    pub use crate::download::{
+        DownloadManager, DownloadProgressEvent, EnqueueKind, ProgressEmitter,
+        cleanup_orphan_work_dirs, work_dir_keep_ids,
+    };
+    pub use crate::error::{AppError, AppResult};
+    pub use crate::fsutil::work_dir_for;
+    pub use crate::models::{AppSettings, DownloadJob, JobStatus, PauseAllResult, ResumeAllResult};
+    pub use crate::ytdlp::YtDlpConfig;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

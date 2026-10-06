@@ -151,10 +151,9 @@ pub(crate) fn stop_message(kind: StopKind) -> &'static str {
     }
 }
 
-/// Work-dir ids the startup orphan cleanup must keep: every non-terminal row —
-/// paused included (its `.part` files are exactly what resume needs), failed
-/// too (a retry may relocate a finished leftover).
-pub(crate) fn work_dir_keep_ids(jobs: &[DownloadJob]) -> Vec<String> {
+/// Which jobs keep their work dir across cleanup. pub for the e2e harness,
+/// which mirrors the production startup sequence (see `build_app_state`).
+pub fn work_dir_keep_ids(jobs: &[DownloadJob]) -> Vec<String> {
     jobs.iter()
         .filter(|j| {
             matches!(
