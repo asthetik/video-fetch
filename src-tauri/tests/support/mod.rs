@@ -2,4 +2,5 @@
 pub mod fixture;
 pub mod harness;
 pub mod oracles;
+pub mod rng;
 pub mod server;
