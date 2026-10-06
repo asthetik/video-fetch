@@ -92,14 +92,14 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 
 ### 技术栈
 
-- 桌面框架 Tauri 2：后端 Rust（edition 2024，最低 1.88），前端 React 19 + TypeScript + Vite
+- 桌面框架 Tauri 2：后端 Rust（edition 2024，最低 1.90），前端 React 19 + TypeScript + Vite
 - 下载内核 yt-dlp + ffmpeg，作为 sidecar 子进程随安装包分发
 - 本地存储 SQLite（下载历史与队列）与日志文件
 
 ### 本地环境
 
 - Node.js 24
-- Rust 1.88 或更新
+- Rust 1.90 或更新
 - Python 3.14（版本钉在 `.python-version`，用于拉取 sidecar）
 
 ### 快速开始
