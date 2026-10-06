@@ -244,3 +244,48 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
         .await;
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
 }
+
+/// Value: protects=cancel kills the whole tree (no orphans still writing),
+/// drops the work dir, and stops all further traffic; fails_when=the group
+/// kill regresses (orphan survives — the 0.4.0 macOS bug class) or cancel
+/// leaves the work dir; why_new=the tree-kill had only a fake-script test;
+/// seam=none
+#[tokio::test]
+async fn cancel_stops_everything_and_drops_the_workdir() {
+    let h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+
+    // Sanity: the scanner must observe the live downloader while it is mid-flight.
+    assert!(
+        support::oracles::wait_for_live_processes(&h.marker(), Duration::from_secs(5)).await,
+        "scanner must see the running downloader"
+    );
+
+    h.manager.cancel(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(30))
+        .await;
+    assert!(
+        h.job(&job.id).error.unwrap_or_default().contains("取消"),
+        "cancel must mark the job with the cancel message"
+    );
+    h.server.release_gate();
+
+    assert!(
+        !h.work_dir_of(&job.id).exists(),
+        "cancel must drop the work dir"
+    );
+
+    // Stray processes: anything still carrying this harness's work root in argv must be gone
+    support::oracles::wait_no_stray_processes(&h.marker(), Duration::from_secs(10)).await;
+
+    // Silence: no further requests (auxiliary oracle)
+    let before = h.server.counts(1);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        before,
+        h.server.counts(1),
+        "requests continued after cancel"
+    );
+}

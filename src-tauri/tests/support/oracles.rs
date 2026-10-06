@@ -121,6 +121,40 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
     }
 }
 
+/// Poll until at least one process of this harness is alive (the scanner's
+/// positive control).
+pub async fn wait_for_live_processes(marker: &str, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !live_processes_containing(marker).is_empty() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Poll until no process of this harness is left alive.
+pub async fn wait_no_stray_processes(marker: &str, timeout: std::time::Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let live = live_processes_containing(marker);
+        if live.is_empty() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let detail: Vec<String> = live
+                .iter()
+                .map(|(pid, cmd)| format!("{pid}: {cmd}"))
+                .collect();
+            panic!("stray download processes:\n{}", detail.join("\n"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// SIGKILL every leftover downloader of this harness (teardown and crash reaping).
 pub fn kill_processes_containing(marker: &str) {
     for (pid, _) in live_processes_containing(marker) {
