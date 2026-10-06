@@ -90,7 +90,8 @@ impl TestServer {
 
     /// Hold the `ordinal`-th fragment request (1-based, video and audio
     /// counted together) for video `n`; the counting happens before the hold.
-    /// One-shot, 15s bounded — see `serve`.
+    /// One-shot, released explicitly by the test (a 180s last-resort cap) —
+    /// see `serve`.
     pub fn arm_gate_on_nth_fragment(&self, n: usize, ordinal: usize) {
         let gate = Arc::new(Gate {
             video_n: n,
@@ -180,8 +181,11 @@ fn serve(state: Arc<State>, request: tiny_http::Request) {
             _ => entry.audio_fragments += 1,
         }
         drop(counts);
-        // Gate: hold the armed fragment request for the armed video, bounded so
-        // a stuck test can never hang CI forever (well under yt-dlp's socket timeout).
+        // Gate: hold the armed fragment request for the armed video until the
+        // test calls release_gate (Drop releases too, so a panicking test
+        // cannot strand it). The cap is a last-resort guard only: a short cap
+        // here silently ends the held downloader, which is exactly the process
+        // the caller is trying to observe.
         if kind != "playlist" {
             let gate = state.gate.lock().unwrap().clone();
             if let Some(g) = gate
@@ -196,8 +200,10 @@ fn serve(state: Arc<State>, request: tiny_http::Request) {
                     st.engaged = true;
                     g.cv.notify_all();
                     while !st.released {
+                        // 180s last resort; release_gate (or Drop) ends this far
+                        // sooner in every non-broken test.
                         let (guard, timeout) =
-                            g.cv.wait_timeout(st, Duration::from_secs(15)).unwrap();
+                            g.cv.wait_timeout(st, Duration::from_secs(180)).unwrap();
                         st = guard;
                         if timeout.timed_out() {
                             break;

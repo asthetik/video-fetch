@@ -126,8 +126,8 @@ npm run tauri dev
 ### 集成 / 压力测试（需要先拉 sidecar）
 
 ```bash
-# 确定性回归套件（CI 同款；改动下载引擎时推送前跑一遍）
-cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression
+# 确定性回归套件（CI 同款，串行执行；改动下载引擎时推送前跑一遍）
+cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
 # 长压测（本地，默认 5 分钟；SOAK_SEED 可复现操作序列）
 SOAK_MINUTES=10 cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test soak -- --ignored --nocapture

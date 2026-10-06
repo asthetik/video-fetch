@@ -107,11 +107,11 @@ async fn download_completes_and_delivers_a_merged_file() {
     // Hold the first fragment so the work dir exists mid-flight: this is the
     // only moment fragments are observable before delivery.
     h.server.arm_gate_on_next_fragment(1);
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
     support::oracles::assert_fragment_naming(&h.work_dir_of(&job.id));
     h.server.release_gate();
 
-    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 
     let c = h.server.counts(1);
@@ -138,10 +138,10 @@ async fn pause_resume_finishes_without_redownloading() {
     let h = support::harness::Harness::new(1);
     let job = h.enqueue(1);
     h.server.arm_gate_on_next_fragment(1);
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
 
     h.manager.pause(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
 
@@ -150,7 +150,7 @@ async fn pause_resume_finishes_without_redownloading() {
     assert!(wd.is_dir(), "pause must keep the work dir");
 
     h.manager.resume(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 
     let c = h.server.counts(1);
@@ -178,7 +178,7 @@ async fn resume_does_not_refetch_completed_fragments() {
     let h = support::harness::Harness::new(1);
     let job = h.enqueue(1);
     h.server.arm_gate_on_nth_fragment(1, 4); // hold the fourth fragment request
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
     let paused_at = h.server.counts(1);
     assert!(
         paused_at.video_fragments >= 4,
@@ -186,12 +186,12 @@ async fn resume_does_not_refetch_completed_fragments() {
     );
 
     h.manager.pause(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
 
     h.manager.resume(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 
     let c = h.server.counts(1);
@@ -220,9 +220,9 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
     let mut h = support::harness::Harness::new(1);
     let job = h.enqueue(1);
     h.server.arm_gate_on_next_fragment(1);
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
     h.manager.pause(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
 
@@ -242,7 +242,7 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
     );
 
     h.manager.resume(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
 }
@@ -257,19 +257,28 @@ async fn cancel_stops_everything_and_drops_the_workdir() {
     let h = support::harness::Harness::new(1);
     let job = h.enqueue(1);
     h.server.arm_gate_on_next_fragment(1);
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
 
-    // Sanity: the scanner must observe the live downloader while it is mid-flight.
-    // The window is generous: the Windows scan spawns powershell + a CIM query
-    // per poll, which costs seconds on a loaded runner.
+    // Sanity: the scanner must observe a marker-bearing process while the
+    // downloader is parked. The sleeper proves the scan path itself; the
+    // real-downloader check then only depends on yt-dlp's argv shape.
+    let mut sleeper = support::oracles::spawn_marker_sleeper(&h.marker());
     assert!(
-        support::oracles::wait_for_live_processes(&h.marker(), Duration::from_secs(30)).await,
+        support::oracles::wait_for_live_processes(&h.marker(), Duration::from_secs(60)).await,
+        "scanner must see the marker sleeper; evidence: {}",
+        support::oracles::debug_process_snapshot(&h.marker())
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+
+    assert!(
+        support::oracles::wait_for_live_processes(&h.marker(), Duration::from_secs(60)).await,
         "scanner must see the running downloader; evidence: {}",
         support::oracles::debug_process_snapshot(&h.marker())
     );
 
     h.manager.cancel(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(30))
+    h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(60))
         .await;
     assert!(
         h.job(&job.id).error.unwrap_or_default().contains("取消"),
@@ -283,7 +292,7 @@ async fn cancel_stops_everything_and_drops_the_workdir() {
     );
 
     // Stray processes: anything still carrying this harness's work root in argv must be gone
-    support::oracles::wait_no_stray_processes(&h.marker(), Duration::from_secs(30)).await;
+    support::oracles::wait_no_stray_processes(&h.marker(), Duration::from_secs(60)).await;
 
     // Silence: no further requests (auxiliary oracle)
     let before = h.server.counts(1);
@@ -305,9 +314,9 @@ async fn a_paused_job_keeps_its_active_slot() {
     let h = support::harness::Harness::new(1);
     let job = h.enqueue(1);
     h.server.arm_gate_on_next_fragment(1);
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
     h.manager.pause(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
 
@@ -317,7 +326,7 @@ async fn a_paused_job_keeps_its_active_slot() {
     assert!(err.to_string().contains("已在下载队列中"), "got: {err}");
 
     h.manager.cancel(&job.id).unwrap();
-    h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(30))
+    h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(60))
         .await;
     h.manager
         .enqueue(h.job_for(1), false)
@@ -334,25 +343,25 @@ async fn pause_all_resume_all_round_trips_the_queue() {
     let a = h.enqueue(1);
     let b = h.enqueue(2);
     h.server.arm_gate_on_next_fragment(1);
-    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
 
     h.manager.pause(&a.id).unwrap();
-    h.wait_status(&a.id, JobStatus::Paused, Duration::from_secs(30))
+    h.wait_status(&a.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
     // The permit must be released so b takes over
-    h.wait_status(&b.id, JobStatus::Running, Duration::from_secs(30))
+    h.wait_status(&b.id, JobStatus::Running, Duration::from_secs(60))
         .await;
 
     let paused = h.manager.pause_all().unwrap();
     assert_eq!(paused.paused, 1, "only b was still active");
-    h.wait_status(&b.id, JobStatus::Paused, Duration::from_secs(30))
+    h.wait_status(&b.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
 
     let resumed = h.manager.resume_all().unwrap();
     assert_eq!(resumed.resumed, 2);
-    h.wait_status(&a.id, JobStatus::Done, Duration::from_secs(60))
+    h.wait_status(&a.id, JobStatus::Done, Duration::from_secs(120))
         .await;
-    h.wait_status(&b.id, JobStatus::Done, Duration::from_secs(60))
+    h.wait_status(&b.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 }

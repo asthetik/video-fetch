@@ -107,10 +107,11 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
         // and the CIM query enumerates every process — caller included — so
         // the scan would always match at least the caller and could never
         // report an empty set. The env var also removes argv quoting hazards
-        // for path characters. Literal `Contains`, not a wildcard pattern,
-        // keeps path characters safe. The name prefilter trims the query to a
-        // handful of rows: the full-table enumeration is seconds-slow on a
-        // loaded CI runner, which starved the scanner's positive control.
+        // for path characters. Literal `Contains` (case and separators
+        // normalized) over the full table: a name prefilter cannot see the
+        // synthetic sleeper the positive control plants. The full scan is
+        // affordable now that the gate parks a downloader until the test
+        // releases it and the suite runs serially in CI.
         let out = Command::new("powershell")
             .env("VF_MARKER", marker)
             .args([
@@ -119,7 +120,7 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
                 "-Command",
                 "if (-not $env:VF_MARKER) { Write-Error 'VF_MARKER not set'; exit 2 }\n\
                  $needle = $env:VF_MARKER.Replace('/','\\').ToLowerInvariant()\n\
-                 Get-CimInstance Win32_Process -Filter \"Name LIKE 'yt-dlp%' OR Name LIKE 'ffmpeg%'\" | \
+                 Get-CimInstance Win32_Process | \
                  Where-Object { $_.CommandLine -and $_.CommandLine.Replace('/','\\').ToLowerInvariant().Contains($needle) } | \
                  ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
             ])
@@ -150,9 +151,10 @@ pub fn live_processes_containing(marker: &str) -> Vec<(u32, String)> {
 }
 
 /// Best-effort forensic snapshot for failure messages: what the scanner sees
-/// right now, plus (Windows) the needle it compared and the CommandLines of
-/// the downloader processes by name — distinguishes "process already gone"
-/// from "marker mismatch" without a second CI round trip.
+/// right now, plus (Windows) the needle it compared, the size of the process
+/// table, and every row whose CommandLine contains the needle — distinguishes
+/// "process already gone" from "marker mismatch" without a second CI round
+/// trip.
 pub fn debug_process_snapshot(marker: &str) -> String {
     let scanned = live_processes_containing(marker);
     #[cfg(unix)]
@@ -169,9 +171,9 @@ pub fn debug_process_snapshot(marker: &str) -> String {
                 "-Command",
                 "if (-not $env:VF_MARKER) { Write-Error 'VF_MARKER not set'; exit 2 }\n\
                  $needle = $env:VF_MARKER.Replace('/','\\').ToLowerInvariant()\n\
-                 $procs = Get-CimInstance Win32_Process -Filter \"Name LIKE 'yt-dlp%' OR Name LIKE 'ffmpeg%'\"\n\
+                 $procs = Get-CimInstance Win32_Process\n\
                  \"count=$($procs.Count) needle=$needle\"\n\
-                 $procs | Select-Object -First 3 | ForEach-Object { \"cmd[$($_.ProcessId)]=$($_.CommandLine)\" }",
+                 $procs | ForEach-Object { $c = $_.CommandLine; if ($c -and $c.Replace('/','\\').ToLowerInvariant().Contains($needle)) { \"hit[$($_.ProcessId)]=$c\" } }",
             ])
             .output();
         match out {
@@ -181,6 +183,30 @@ pub fn debug_process_snapshot(marker: &str) -> String {
             ),
             Err(e) => format!("scan={scanned:?} forensic-error={e}"),
         }
+    }
+}
+
+/// A marker-bearing sleeper for the scanner's positive control: its argv
+/// carries the marker, so a successful scan proves the scan path itself,
+/// independent of yt-dlp's boot and exit timings on load-saturated runners.
+pub fn spawn_marker_sleeper(marker: &str) -> std::process::Child {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("sh")
+            .args(["-c", "sleep 45"])
+            .arg(marker)
+            .spawn()
+            .expect("spawn marker sleeper")
+    }
+    #[cfg(windows)]
+    {
+        // The marker rides in a trailing comment so the script stays valid
+        // while the CommandLine carries the token under test.
+        let script = format!("Start-Sleep -Seconds 45 # {marker}");
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .spawn()
+            .expect("spawn marker sleeper")
     }
 }
 

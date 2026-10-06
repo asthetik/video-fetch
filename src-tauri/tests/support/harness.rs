@@ -133,8 +133,9 @@ impl Harness {
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!(
-                    "job {id} did not reach {want:?}; now {:?}",
-                    self.job(id).status
+                    "job {id} did not reach {want:?}; now {:?}; processes: {}",
+                    self.job(id).status,
+                    super::oracles::debug_process_snapshot(&self.marker())
                 );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -145,10 +146,17 @@ impl Harness {
         work_dir_for(&self.work_root, id)
     }
 
-    /// Marker for process scans: every yt-dlp/ffmpeg this harness spawns has
-    /// this unique path in its argv.
+    /// Marker for process scans: the harness tempdir's unique basename (e.g.
+    /// `.tmp5k5j7w`). Every yt-dlp/ffmpeg this harness spawns carries it in
+    /// argv as part of the work path, and a bare basename survives any
+    /// 8.3-vs-long-name form difference between this process's path string and
+    /// a child's CommandLine.
     pub fn marker(&self) -> String {
-        self.work_root.to_string_lossy().into_owned()
+        self._tmp
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.work_root.to_string_lossy().into_owned())
     }
 
     /// Production-order restart: quit-kill → manager lands → rebuild → orphan

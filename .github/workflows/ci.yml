@@ -92,7 +92,10 @@ jobs:
           echo "regression tests listed: $n"
           [ "$n" -ge 6 ]
       - name: Run the regression suite
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression
+        # Serial: ten parallel PyInstaller cold starts on a 4-vCPU runner make
+        # every timing assumption in the suite meaningless (and cost more
+        # wall-clock than running the tests one after another).
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
   scripts:
     runs-on: ubuntu-latest
