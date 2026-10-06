@@ -110,7 +110,12 @@ fn find_work_product_pass(work: &Path, media_only: bool) -> Option<PathBuf> {
             let is_merge_temp = Path::new(&*name)
                 .file_stem()
                 .is_some_and(|stem| stem.to_string_lossy().ends_with(".temp"));
+            // `….ytdl` is yt-dlp's fragment-resume state sidecar (a JSON index),
+            // never a product: an early pause leaves only `<stream>.part` +
+            // `<stream>.ytdl`, and relocating the sidecar delivered a 50-byte
+            // JSON as the finished download (pause→resume bug).
             if !name.ends_with(".part")
+                && !name.ends_with(".ytdl")
                 && !is_merge_temp
                 && path.metadata().ok()?.len() > 0
                 && (!media_only || has_output_ext(&name))
@@ -238,6 +243,54 @@ mod tests {
             find_work_product(temp.path()),
             None,
             "the in-flight merge file must still be excluded"
+        );
+    }
+
+    /// An early pause leaves the work dir holding only the interrupted
+    /// fragment's `.part` file plus yt-dlp's `.ytdl` fragment-resume state
+    /// sidecar. Neither is a product; the sidecar is a 50-byte JSON index.
+    ///
+    /// Value: protects=the resume short-circuit in `run_job`, which relocates a
+    /// `find_work_product` hit without re-running the download; fails_when=the
+    /// fallback pass accepts `….ytdl` and delivers a broken 50-byte file as a
+    /// finished download; why_new=the pause→resume e2e regression exposed this
+    /// exact early-pause delivery; seam=none
+    #[test]
+    fn find_work_product_skips_ytdl_state_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("job-1");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("clip-1.f256.mp4.part"), b"").unwrap();
+        fs::write(
+            work.join("clip-1.f256.mp4.ytdl"),
+            br#"{"downloader": {"current_fragment": {"index": 0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            find_work_product(&work),
+            None,
+            "the .ytdl state sidecar must not be relocated as a product"
+        );
+    }
+
+    /// The `.ytdl` skip must not over-reject: a real product sitting next to
+    /// the sidecar is still found.
+    #[test]
+    fn find_work_product_still_finds_a_real_product_next_to_ytdl() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("job-1");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("clip-1.f256.mp4.part"), b"").unwrap();
+        fs::write(
+            work.join("clip-1.f256.mp4.ytdl"),
+            br#"{"downloader": {"current_fragment": {"index": 0}}}"#,
+        )
+        .unwrap();
+        fs::write(work.join("clip-1.mp4"), b"final").unwrap();
+        assert_eq!(
+            find_work_product(&work),
+            Some(work.join("clip-1.mp4")),
+            "a real product must still be found next to the sidecar"
         );
     }
 

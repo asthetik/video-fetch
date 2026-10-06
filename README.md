@@ -123,6 +123,28 @@ npm run tauri dev
 | `cargo fmt --manifest-path src-tauri/Cargo.toml --all` | 格式化后端代码 |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` | 后端静态检查 |
 
+### 集成 / 压力测试（需要先拉 sidecar）
+
+```bash
+# 确定性回归套件（CI 同款，串行执行；改动下载引擎时推送前跑一遍）
+cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
+
+# 长压测（本地，默认 5 分钟；SOAK_SEED 可复现操作序列）
+SOAK_MINUTES=10 cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test soak -- --ignored --nocapture
+```
+
+### 推送前门禁
+
+改动下载引擎后推送前，本地跑一遍 CI 同款门禁：fmt + clippy（两条：默认与 `--features test-utils`）+ 单测 + 回归套件。
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --features test-utils --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression
+```
+
 ### 项目结构
 
 ```

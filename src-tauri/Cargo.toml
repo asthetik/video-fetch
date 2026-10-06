@@ -17,6 +17,17 @@ rust-version = "1.90"
 name = "video_fetch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+test-utils = []
+
+[[test]]
+name = "regression"
+required-features = ["test-utils"]
+
+[[test]]
+name = "soak"
+required-features = ["test-utils"]
+
 [build-dependencies]
 tauri-build = { version = "2.7.1", features = [] }
 
@@ -44,6 +55,7 @@ tracing-appender = "0.2.5"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tiny_http = "0.12.0"
 
 [target.'cfg(unix)'.dependencies]
 # kill(2) for process-group termination of the yt-dlp tree (PyInstaller spawns
