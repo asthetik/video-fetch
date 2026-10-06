@@ -117,9 +117,10 @@ async fn download_completes_and_delivers_a_merged_file() {
 
 /// Value: protects=pause keeps fragments and resume continues from the
 /// breakpoint (per-stream request accounting, playlists excluded, tolerance
-/// +2 for the interrupted fragment's fail+retry); fails_when=resume restarts
-/// the transfer or the pause drops the work dir; why_new=the spike verified
-/// this only by hand; seam=none
+/// +2 for the interrupted fragment's fail+retry); fails_when=the resume
+/// delivers nothing merged, the pause drops the work dir, or per-stream
+/// requests exceed segments+2; why_new=the spike verified this only by hand;
+/// seam=none
 #[tokio::test]
 async fn pause_resume_finishes_without_redownloading() {
     let h = support::harness::Harness::new(1);
@@ -151,4 +152,5 @@ async fn pause_resume_finishes_without_redownloading() {
         "audio re-downloaded: {c:?}"
     );
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
+    support::oracles::assert_no_stray_media_files(&h.work_dir_of(&job.id));
 }
