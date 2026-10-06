@@ -739,6 +739,8 @@ mod tests {
         let content = std::fs::read_to_string(t.path().join("app.log")).unwrap();
         assert!(content.contains("app: panic v"));
         assert!(content.contains("boom <url>"));
-        assert!(content.contains("[src/activity_log.rs:")); // panic site recorded
+        // Location::file() carries the platform separator (`src\activity_log.rs`
+        // on Windows), so compare on a normalized copy.
+        assert!(content.replace('\\', "/").contains("[src/activity_log.rs:"));
     }
 }

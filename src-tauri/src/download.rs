@@ -2668,6 +2668,7 @@ mod tests {
         sleep_ms: u64,
         succeed: bool,
         scratch: tempfile::TempDir,
+        park_first_run: bool,
     }
 
     impl CountingDownloader {
@@ -2677,7 +2678,16 @@ mod tests {
                 sleep_ms,
                 succeed,
                 scratch: tempfile::tempdir().unwrap(),
+                park_first_run: false,
             }
+        }
+
+        /// Park the first run forever (the future is dropped when the runner
+        /// task is aborted) and apply `sleep_ms` only to later runs, so a
+        /// pause oracle does not have to win a race against a short completion.
+        fn parking_first_run(mut self) -> Self {
+            self.park_first_run = true;
+            self
         }
     }
 
@@ -2688,8 +2698,15 @@ mod tests {
             job: &DownloadJob,
             _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
-            if let Ok(mut runs) = self.runs.lock() {
-                runs.push(job.id.clone());
+            let nth_run = match self.runs.lock() {
+                Ok(mut runs) => {
+                    runs.push(job.id.clone());
+                    runs.len()
+                }
+                Err(_) => 0,
+            };
+            if self.park_first_run && nth_run == 1 {
+                std::future::pending::<()>().await;
             }
             if self.sleep_ms > 0 {
                 sleep(Duration::from_millis(self.sleep_ms)).await;
@@ -2839,7 +2856,11 @@ mod tests {
     #[tokio::test]
     async fn resume_keeps_progress_and_reruns_the_downloader() {
         let dir = tempfile::tempdir().unwrap();
-        let downloader = Arc::new(CountingDownloader::new(300, true));
+        // First run parks until the pause aborts it: a live 300ms run races CI
+        // scheduling jitter (observed red on ubuntu-24.04, 2026-10-07), and the
+        // race's outcome (completion beats pause) is intentional product
+        // behavior this oracle should not wager on.
+        let downloader = Arc::new(CountingDownloader::new(300, true).parking_first_run());
         let manager = manager_for(
             dir.path(),
             downloader.clone(),
