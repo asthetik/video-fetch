@@ -1,7 +1,9 @@
 //! Seeded chaos driver for the soak: reproducible operation sequences without
 //! a dependency on rand.
 
-/// Seeded, dependency-free. Reproduces the OPERATION SEQUENCE only — timing
+/// Seeded, dependency-free. The draw stream is fixed by the seed, but the
+/// reproduced sequence is `seed + guard outcomes`: an unavailable arm consumes
+/// rerolls, so a timing-induced guard flip re-aligns every later draw — timing
 /// races are not replayable (see the spec's residual risks).
 pub struct XorShift64(u64);
 impl XorShift64 {
