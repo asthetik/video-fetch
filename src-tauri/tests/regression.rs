@@ -206,3 +206,41 @@ async fn resume_does_not_refetch_completed_fragments() {
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
     support::oracles::assert_no_stray_media_files(&h.work_dir_of(&job.id));
 }
+
+/// Value: protects=the production restart sequence (kill_all_children →
+/// manager lands → rebuild → orphan cleanup with keep-list → reconcile) and
+/// the paused job's work dir surviving cleanup_orphan_work_dirs;
+/// fails_when=the keep-list or the reconcile drops/cleans a paused job, or
+/// resume restarts from zero; why_new=0.4.1's known-risk area, hand-verified
+/// only; seam=none
+#[tokio::test]
+async fn paused_job_survives_a_relaunch_and_resumes() {
+    let mut h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(30)).await);
+    h.manager.pause(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(30))
+        .await;
+    h.server.release_gate();
+
+    let wd = h.work_dir_of(&job.id);
+    assert!(wd.is_dir());
+
+    h.clean_restart();
+
+    assert_eq!(
+        h.job(&job.id).status,
+        JobStatus::Paused,
+        "relaunch must keep the paused row"
+    );
+    assert!(
+        wd.is_dir(),
+        "orphan cleanup must keep a paused job's work dir"
+    );
+
+    h.manager.resume(&job.id).unwrap();
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(60))
+        .await;
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
+}
