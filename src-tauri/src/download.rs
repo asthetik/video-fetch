@@ -599,9 +599,9 @@ impl DownloadManager {
             match job.status {
                 JobStatus::Pending | JobStatus::Running => {}
                 // Already finished/failed: return the job unchanged (never set
-                // the marker) so the UI shows its 「任务已结束，未执行暂停」
-                // info toast and pause_all skips it instead of counting a
-                // bogus failure — mirroring cancel()'s silent no-op.
+                // the marker) so the UI shows its "job already ended, not
+                // paused" info toast and pause_all skips it instead of counting
+                // a bogus failure — mirroring cancel()'s silent no-op.
                 JobStatus::Done | JobStatus::Failed => return Ok(job),
                 JobStatus::Paused => {
                     return Err(AppError::Message("只能暂停等待中或下载中的任务".into()));
@@ -691,8 +691,8 @@ impl DownloadManager {
     }
 
     /// Rows left Running when the app quit have no runner after a relaunch;
-    /// surface them as Paused (progress and .part files are kept, 继续 resumes
-    /// them) instead of leaving a zombie 下载中 row with a frozen progress bar.
+    /// surface them as Paused (progress and .part files are kept; resume picks
+    /// them up) instead of leaving a zombie running row with a frozen bar.
     pub fn reconcile_interrupted_runs(&self) -> AppResult<u64> {
         self.db.lock().map_err(lock_err)?.mark_running_as_paused()
     }
@@ -2715,7 +2715,7 @@ mod tests {
         done.status = JobStatus::Done;
         manager.db.lock().unwrap().insert_job(&done).unwrap();
         // A finished job is returned unchanged (silent no-op), not an error —
-        // the UI renders 「任务已结束，未执行暂停」 from the returned status.
+        // the UI renders the "job already ended" toast from the returned status.
         let returned = manager.pause("job-done").unwrap();
         assert_eq!(returned.status, JobStatus::Done);
         let jobs = manager.list().unwrap();
@@ -2898,14 +2898,14 @@ mod tests {
         );
     }
 
-    /// A relaunch must not leave zombie 下载中 rows: interrupted runs come back
-    /// as 已暂停 with their progress kept, and only Running rows are touched.
+    /// A relaunch must not leave zombie running rows: interrupted runs come
+    /// back as paused with their progress kept, and only Running rows change.
     ///
     /// Value: protects=the startup reconciliation build_app_state runs, and its
     /// status filter; fails_when=mark_running_as_paused widens or narrows its
     /// WHERE (pending/paused/done rows flipped, or the running row left
     /// behind); why_new=quit-while-running previously left a frozen
-    /// 下载中 row with no runner and had no coverage; seam=none
+    /// running row with no runner and had no coverage; seam=none
     #[test]
     fn reconcile_interrupted_runs_turns_only_running_into_paused() {
         let dir = tempfile::tempdir().unwrap();
@@ -3288,7 +3288,7 @@ mod tests {
     /// flag-set / DB-write split can produce.
     ///
     /// Value: protects=the in-critical-section stop re-check that keeps a
-    /// paused row out of "下载中"; fails_when=the re-check is dropped — the
+    /// paused row out of "downloading"; fails_when=the re-check is dropped — the
     /// runner writes Running even though a stop flag is set, and the row stays
     /// Running with nothing behind it; why_new=pause_pending_job_never_starts
     /// _the_downloader aborts the runner, so no test exercises the

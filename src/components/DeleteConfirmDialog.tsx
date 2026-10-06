@@ -9,7 +9,7 @@ interface DeleteConfirmDialogProps {
   jobTitle: string;
   /** When set, offer deleting the local file as well. */
   filePath?: string | null;
-  /** Replaces the "不影响本地文件" line when the job has partial data on disk. */
+  /** Replaces the "won't touch local files" line when the job has partial data on disk. */
   note?: string | null;
   onChoose: (choice: DeleteChoice) => void;
 }

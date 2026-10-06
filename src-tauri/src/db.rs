@@ -356,7 +356,7 @@ impl Db {
 
     /// Startup reconciliation: a row left Running cannot have a live runner
     /// after a relaunch, so surface it as Paused (progress and the work dir
-    /// are kept; 继续 resumes it). Returns how many rows changed.
+    /// are kept; resume picks it up). Returns how many rows changed.
     pub fn mark_running_as_paused(&self) -> AppResult<u64> {
         let changed = self.conn.execute(
             "UPDATE jobs SET status = 'paused', updated_at = datetime('now')

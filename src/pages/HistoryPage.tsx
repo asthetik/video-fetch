@@ -85,7 +85,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     void loadJobs();
   }, [loadJobs]);
 
-  // Live progress keeps the pinned 进行中 group current while the page is
+  // Live progress keeps the pinned in-progress group current while the page is
   // open; terminal events also trigger a reload so completed rows pick up
   // persisted metadata (file size) that the event payload doesn't carry.
   useEffect(() => {
@@ -163,7 +163,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     try {
       const updated = await api.retryJob(job.id);
       // Map-replace only: the retried job turns pending and moves to the
-      // pinned "进行中" group instead of being filtered out.
+      // pinned in-progress group instead of being filtered out.
       setAllJobs((prev) =>
         prev.map((j) => (j.id === updated.id ? updated : j)),
       );
