@@ -1,31 +1,35 @@
 # Video Fetch
 
-<p style="text-align: center">
+<p align="center">
   <img src="docs/images/icon.png" alt="Video Fetch 图标" width="128" />
 </p>
 
-<p style="text-align: center">
+<p align="center">
+  <a href="README.en.md">English</a> | 简体中文
+</p>
+
+<p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/asthetik/video-fetch/actions/workflows/ci.yml"><img src="https://github.com/asthetik/video-fetch/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
   <a href="https://github.com/asthetik/video-fetch/releases"><img src="https://img.shields.io/github/v/release/asthetik/video-fetch" alt="Release" /></a>
   <a href="https://github.com/asthetik/video-fetch/releases"><img src="https://img.shields.io/github/downloads/asthetik/video-fetch/total" alt="Downloads" /></a>
 </p>
 
-轻量桌面视频下载器（影取），目前支持哔哩哔哩（B 站）。粘贴链接，一键下载。
+Video Fetch（影取）是一款轻量的桌面视频下载器，目前支持哔哩哔哩（B 站）。粘贴链接，一键下载。
 
-<p style="text-align: center">
+<p align="center">
   <img src="docs/images/home.png" alt="Video Fetch 主页：多 P 视频勾选分 P 后下载" width="720" />
 </p>
 
 ## 它能做什么
 
 - 粘贴 B 站视频链接，自动列出清晰度，选好就能下载
-- 多 P（分集）视频可以勾选要下载的集数，一次全部下载
-- 粘贴 UP 主空间链接，列出全部投稿：可以搜索、排序，跨页勾选后统一入队
-- 支持「视频 / 仅音频」切换：仅音频可选音质档位（64/132/192kbps AAC、Hi-Res 无损）与输出格式（m4a / mp3 / FLAC，FLAC 仅 Hi-Res 源可选）
+- 多 P（分集）视频可以勾选想下载的集数，一次全部下载
+- 粘贴 UP 主空间链接，列出全部投稿，可以搜索、排序，跨页勾选后一次性加入下载队列
+- 支持「视频 / 仅音频」两种模式：仅音频模式可选音质档位（64/132/192 kbps AAC、Hi-Res 无损）和输出格式（m4a / mp3 / FLAC，FLAC 仅对 Hi-Res 音源开放）
 - 登录 B 站后，可以下载大会员专属清晰度
-- 下载排队执行，可以暂停、继续、取消、重试，历史记录随时可查
-- 安装包自带下载组件，装完就能用，不需要额外配置
+- 下载排队执行（并发数可在「设置 → 下载」里调整），支持暂停、继续、取消、重试，历史记录随时可查
+- 下载组件随安装包提供，装完即用，无需额外配置
 
 ## 安装
 
@@ -34,7 +38,8 @@
    - macOS（仅 Apple 芯片）：`Video-Fetch-v*-macOS.dmg`
    - Windows x64：`Video-Fetch-v*-Windows-x64.msi` / `.exe`
    - Windows arm64：`Video-Fetch-v*-Windows-arm64.msi` / `.exe`
-   - Linux：`Video-Fetch-v*-Linux-*.AppImage` / `.deb`
+   - Linux x86_64：`Video-Fetch-v*-Linux-x86_64.AppImage` / `.deb`
+   - Linux arm64：`Video-Fetch-v*-Linux-arm64.AppImage` / `.deb`
 3. 安装后打开即可
 
 安装包**没有做官方签名**，首次打开时各系统会有提示，按下面操作即可：
@@ -69,13 +74,13 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 
 想要大会员清晰度？在应用内登录 B 站，或手动导入 `cookies.txt` 文件。
 
-下载好的文件默认存到系统下载文件夹，可以在「设置 → 下载 → 保存目录」改到别处。万一系统下载文件夹取不到，会退回保存到应用数据文件夹下的 `downloads/`。
+下载好的文件默认保存在系统下载文件夹，可以在「设置 → 下载 → 保存目录」修改。如果取不到系统下载文件夹，会退回到应用数据文件夹下的 `downloads/`。
 
 ## 日志与隐私
 
 - 应用会把你的操作（解析、下载、设置等）记录成本地日志
-- 应用内的「日志」页可以查看、打开日志文件夹、清空日志
-- 登录信息保存在本地文件里
+- 应用内的「日志」页可以查看日志、打开日志目录、清空日志
+- 登录信息以 cookies 形式保存在本地文件里（macOS 和 Linux 上会限制为仅本人可读）
 - 下载记录和设置也保存在同一个文件夹里
 
 应用数据文件夹的位置：
@@ -93,7 +98,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 ### 技术栈
 
 - 桌面框架 Tauri 2：后端 Rust（edition 2024，最低 1.90），前端 React 19 + TypeScript + Vite
-- 下载内核 yt-dlp + ffmpeg，作为 sidecar 子进程随安装包分发
+- 下载内核 yt-dlp + ffmpeg，作为 sidecar 子进程随安装包分发（sidecar：随应用打包的外部程序）
 - 本地存储 SQLite（下载历史与队列）与日志文件
 
 ### 本地环境
@@ -101,6 +106,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 - Node.js 24
 - Rust 1.90 或更新
 - Python 3.14（版本钉在 `.python-version`，用于拉取 sidecar）
+- Linux 还需要 Tauri 的系统依赖（Ubuntu / Debian）：libwebkit2gtk-4.1-dev、libappindicator3-dev、librsvg2-dev、patchelf、xdg-utils
 
 ### 快速开始
 
@@ -135,14 +141,14 @@ SOAK_MINUTES=10 cargo test --manifest-path src-tauri/Cargo.toml --features test-
 
 ### 推送前门禁
 
-改动下载引擎后推送前，本地跑一遍 CI 同款门禁：fmt + clippy（两条：默认与 `--features test-utils`）+ 单测 + 回归套件。
+改动下载引擎后推送前，本地跑一遍 CI 同款门禁：fmt + clippy（默认与 `--features test-utils` 两种配置）+ 单测 + 回归套件（串行执行）。
 
 ```bash
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo clippy --manifest-path src-tauri/Cargo.toml --features test-utils --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression
+cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 ```
 
 ### 项目结构
@@ -154,18 +160,6 @@ src-tauri/binaries/     开发态 sidecar（不入库）
 scripts/                sidecar 拉取与校验、发版辅助脚本
 .github/workflows/      CI 与发版流程
 ```
-
-### 一条下载的路径
-
-粘贴链接 → 后端解析（B 站 WBI 签名，失败时降级到 yt-dlp）→ 入队 → yt-dlp 子进程下载 → 落盘并写入 SQLite 历史。
-
-### 发版与 sidecar
-
-- 推 `v*.*.*` 标签触发 `.github/workflows/release.yml`，构建 macOS（Apple 芯片）、Windows x64 / arm64、Linux x86_64 / arm64 五个平台的安装包
-- yt-dlp 版本钉在 `scripts/requirements-sidecars.txt`；ffmpeg 按平台钉在 `scripts/fetch_sidecars.py`（Linux / Windows 用 BtbN 的固定 tag，macOS 用 martin-riedl 的固定构建号）；升级后跑 `python3 scripts/fetch_sidecars.py --update-pins` 更新 `scripts/sidecar_pins.json` 里的 SHA-256
-- 每月 1 号 `.github/workflows/sidecar-upstream.yml` 自动查上游有没有新版本（yt-dlp 的最新 tag、BtbN 新快照里同变体的版本串、martin-riedl 索引页里 macos/arm64 的稳定构建），有更新就开一个 `[sidecar-upstream]` issue——只报告、不改 pin；检查本身失败（网络或上游响应格式变了）则让 job 失败，不会被当成「无事可做」
-- Linux / Windows 取源时按资源名声称的架构断言二进制头（ELF `e_machine` / PE `Machine`），对不上就拒绝打包，不再只靠资源名自觉
-- `scripts/verify_macos_ffmpeg.py` 离线复核 macOS 那一份 ffmpeg 包：上游公布的 `.sha256` 与固定摘要一致 → 下载包 SHA-256 一致 → 解包二进制是 arm64 Mach-O、带 Developer ID 签名（团队 KU3N25YGLU）且 SHA-256 一致，全过才输出 OK
 
 ## 许可证
 
