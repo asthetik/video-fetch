@@ -404,12 +404,7 @@ pub async fn resolve_url(
     request_id: Option<u64>,
 ) -> AppResult<VideoMeta> {
     let force = force.unwrap_or(false);
-    let url = platform::canonicalize_video_url(&url);
-    if platform::detect_platform(&url).is_none() {
-        return Err(AppError::Message(
-            "暂不支持该链接，最小可行产品仅支持 B 站".into(),
-        ));
-    }
+    let url = platform::require_supported(&url).map_err(|e| AppError::Message(e.into()))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -729,6 +724,11 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     if args.page_indexes.is_empty() {
         return Err(AppError::Message("请至少选择一个分 P".into()));
     }
+    // Checked here, not just in resolve_url: this URL becomes an argv entry
+    // for yt-dlp, and the two commands are reachable independently (the home
+    // page passes the input box's current text, which outruns its own resolve).
+    let base_url =
+        platform::require_supported(&args.url).map_err(|e| AppError::Message(e.into()))?;
 
     let settings = state
         .settings
@@ -766,7 +766,6 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
     let save_as_copy = args.save_as_copy;
     let uploader = args.uploader;
     let save_dir = Path::new(&settings.save_dir);
-    let base_url = platform::canonicalize_video_url(&args.url);
     let page_count = args.page_indexes.len();
 
     let mut last = None;
@@ -1238,6 +1237,14 @@ pub async fn start_bilibili_login(
         )
         .title("登录 B 站 — 影取")
         .inner_size(980.0, 720.0)
+        // The login page is the one place the app's own cookie handling does
+        // not reach: a WebView keeps session cookies in the platform's
+        // browsing-data store, and `clear_auth` cannot clean it once this
+        // window is gone — which it always is, because a successful login
+        // closes it. So "退出登录" removed cookies.txt and left the SESSDATA
+        // on disk. Incognito keeps that store in memory, which also covers a
+        // crash: there is nothing written to leave behind.
+        .incognito(true)
         // The default WebView UA (bare AppleWebKit/WebKitGTK string) is classified by
         // Bilibili's login risk control as an outdated browser.
         .user_agent(bilibili_view::USER_AGENT)
@@ -1331,9 +1338,73 @@ pub fn preview_name(
     naming::preview_filename(&template, &title, &id, &uploader, &ext, index)
 }
 
+/// Extensions that make a *directory* something the OS launches rather than
+/// reveals. A `.app` bundle opens as an application, not as a folder.
+const LAUNCHABLE_DIR_EXTS: &[&str] = &["app", "bundle", "framework", "kext", "xpc", "plugin"];
+
+fn has_ext_from(path: &Path, known: &[&str]) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| known.iter().any(|k| k.eq_ignore_ascii_case(ext)))
+}
+
+fn is_app_output(path: &Path) -> bool {
+    has_ext_from(path, naming::OUTPUT_EXTS) || has_ext_from(path, naming::AUDIO_OUTPUT_EXTS)
+}
+
+/// Resolve `raw` and require it to be something the app itself produced, under
+/// a directory the app itself writes to.
+///
+/// Handing a path to the system's default handler is the same call as "run it"
+/// for a `.app`, a shell script or a `.desktop` entry, and a scheme-bearing
+/// string (`https:`, `ms-msdt:`) reaches a protocol handler instead. The
+/// plugin's own scope does not help here: it validates the plugin's `open-path`
+/// *command*, while the free `open_path` used below goes straight to the opener.
+fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
+    let refused = || AppError::Message("无法打开：只允许打开应用保存的下载与日志".into());
+    let resolved = Path::new(raw).canonicalize().map_err(|_| refused())?;
+    if !roots.iter().any(|root| resolved.starts_with(root)) {
+        return Err(refused());
+    }
+    let openable = if resolved.is_dir() {
+        !has_ext_from(&resolved, LAUNCHABLE_DIR_EXTS)
+    } else {
+        is_app_output(&resolved)
+    };
+    if !openable {
+        return Err(refused());
+    }
+    Ok(resolved)
+}
+
+/// The directories the app writes into: the log folder, the current save
+/// folder, and wherever earlier downloads landed — the save folder can have
+/// been changed since those rows were written.
+fn openable_roots(state: &AppState) -> Vec<PathBuf> {
+    fn resolve(dir: &Path) -> Option<PathBuf> {
+        dir.canonicalize().ok()
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    roots.extend(resolve(state.activity_log.logs_dir()));
+    if let Ok(settings) = state.settings.lock() {
+        roots.extend(resolve(Path::new(&settings.save_dir)));
+    }
+    for job in state.downloads.list().unwrap_or_default() {
+        if let Some(parent) = job
+            .output_path
+            .as_deref()
+            .and_then(|p| Path::new(p).parent())
+        {
+            roots.extend(resolve(parent));
+        }
+    }
+    roots
+}
+
 #[tauri::command]
-pub fn open_path(path: String) -> AppResult<()> {
-    tauri_plugin_opener::open_path(&path, None::<&str>)
+pub fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
+    let resolved = ensure_openable(&path, &openable_roots(&state))?;
+    tauri_plugin_opener::open_path(resolved.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| AppError::Message(format!("无法打开路径: {e}")))?;
     Ok(())
 }
@@ -1745,6 +1816,57 @@ pub fn log_ui_events(events: Vec<crate::activity_log::UiLogEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `open_path` hands its argument straight to the system's default
+    /// handler, so the path is resolved against the roots the app itself
+    /// writes to before anything is opened.
+    #[test]
+    fn open_path_reaches_only_the_apps_own_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("save");
+        std::fs::create_dir_all(&root).unwrap();
+        let inside = root.join("clip.mp4");
+        std::fs::write(&inside, b"x").unwrap();
+        // A media file outside the roots: without the root check this one
+        // passes every other guard, so it is the case that pins it.
+        let elsewhere = dir.path().join("elsewhere.mp4");
+        std::fs::write(&elsewhere, b"x").unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+
+        assert!(ensure_openable(inside.to_str().unwrap(), &roots).is_ok());
+        assert!(ensure_openable(root.to_str().unwrap(), &roots).is_ok());
+        for refused in [
+            elsewhere.to_str().unwrap(),
+            "/etc/passwd",
+            "/tmp/../../etc/hosts",
+            "https://example.com/evil.mp4",
+            "ms-msdt:/id",
+            "--version",
+            "does-not-exist.mp4",
+        ] {
+            assert!(
+                ensure_openable(refused, &roots).is_err(),
+                "should have been refused: {refused}"
+            );
+        }
+    }
+
+    /// Opening and executing are the same call: a `.app` directory is launched
+    /// rather than revealed, and a `.sh` / `.command` / `.desktop` / `.lnk` is
+    /// run. Only what the app itself writes is openable.
+    #[test]
+    fn open_path_refuses_something_the_app_did_not_produce() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("save");
+        let bundle = root.join("payload.app");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let script = root.join("evil.sh");
+        std::fs::write(&script, b"x").unwrap();
+        let roots = vec![root.canonicalize().unwrap()];
+
+        assert!(ensure_openable(bundle.to_str().unwrap(), &roots).is_err());
+        assert!(ensure_openable(script.to_str().unwrap(), &roots).is_err());
+    }
 
     #[test]
     fn stale_request_id_is_not_current() {
