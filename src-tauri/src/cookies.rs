@@ -22,6 +22,11 @@ pub fn parse_netscape_cookies(text: &str) -> AppResult<Vec<Cookie>> {
 
     for line in text.lines() {
         let line = line.trim_end();
+        // Browser extensions mark HttpOnly cookies with a `#HttpOnly_` prefix
+        // so other Netscape readers skip them; yt-dlp strips it back off.
+        // Bilibili's SESSDATA is HttpOnly, so reading the line as a comment
+        // dropped exactly the cookie this import exists to capture.
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -159,6 +164,34 @@ mod tests {
 .bilibili.com	TRUE	/	FALSE	0	SESSDATA	abc123
 .bilibili.com	TRUE	/	FALSE	0	bili_jct	tok
 "#;
+
+    /// Browser extensions mark HttpOnly cookies with a `#HttpOnly_` prefix so
+    /// other Netscape readers skip them; yt-dlp strips it. Bilibili's SESSDATA
+    /// is HttpOnly, so reading the line as a comment dropped exactly the
+    /// cookie the import exists to capture.
+    #[test]
+    fn parses_httponly_prefixed_lines() {
+        let text = "# Netscape HTTP Cookie File\n\
+                    #HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tabc123\n";
+        let cookies = parse_netscape_cookies(text).unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name, "SESSDATA");
+        assert_eq!(cookies[0].domain, ".bilibili.com");
+        assert!(cookies[0].secure);
+        assert!(has_bilibili_sessdata(&cookies));
+    }
+
+    #[test]
+    fn still_skips_comments_and_blank_lines() {
+        let text = "# a comment\n\
+                    \n\
+                    #HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tv\n\
+                    #HttpOnly_\n\
+                    # trailing comment\n";
+        let cookies = parse_netscape_cookies(text).unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value, "v");
+    }
 
     #[test]
     fn parses_sessdata() {
