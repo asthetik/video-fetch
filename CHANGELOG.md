@@ -19,6 +19,7 @@
 - 捆绑的 Linux/Windows ffmpeg 升级到 BtbN 快照 `n9.0.2-22-g46d8f462ee`（autobuild-2026-10-03-18-14，原 `n9.0.2-3-ga5923073bf`）：这正是新上线的每月上游检查的第一次实报；升级在 `--update-pins` 里完成，四个 Linux/Windows 摘要逐一对过 BtbN 的校验文件，被取代的 key 已清理，快照锚点同步更新。macOS 的 martin-riedl 构建不变。
 - `src-tauri/Cargo.toml` 的依赖改为完整三段版本号（不再有 `2.11`、`1.0` 这类两段写法；版本语义仍是 caret，精确解析继续由 `Cargo.lock` 兜底），七个直接依赖随之升到 tauri 2.12 生态（`tauri` 2.12.1、`tauri-build` 2.7.1、`tauri-plugin-opener` 2.7.0、`tauri-plugin-dialog` 2.8.1、`tauri-plugin-shell` 2.4.0、`tauri-plugin-single-instance` 2.5.2、`tokio` 1.53.2），最低 Rust 版本相应从 1.88 升到 1.90（新依赖树里最高的要求，用 `cargo metadata` 核对）。
 - 更新 npm 与 Cargo 依赖。
+- README 精简并新增英文版：新增 `README.en.md`（与中文版信息一一对应），中文版删除「一条下载的路径」与「发版与 sidecar」两节（内部流程对读者价值低），`.github/workflows/sidecar-upstream.yml` 里指向已删章节的升级提示改为指向脚本自身文档。同时修正与现实现不符的表述（下载并发可调、日志页按钮文案对齐界面、Linux 安装包补 arm64 一行、推送前门禁回归命令补串行参数），居中排版改用 GitHub 可渲染的 `align`。
 
 ### Fixed
 
