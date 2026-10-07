@@ -63,14 +63,22 @@ impl ActivityLog {
     }
 }
 
+/// Create the log directory and take it owner-only before anything is
+/// written into it. Split out of `install`, whose tracing subscriber may
+/// only be initialised once per process, so the mode can be asserted.
+fn create_private_logs_dir(logs_dir: &Path) -> AppResult<()> {
+    fs::create_dir_all(logs_dir)
+        .map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
+    crate::fsutil::restrict_private_dir_perms(logs_dir);
+    Ok(())
+}
+
 pub fn install(
     logs_dir: PathBuf,
     max_file_size: u64,
     retention_days: u32,
 ) -> AppResult<ActivityLog> {
-    fs::create_dir_all(&logs_dir)
-        .map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
-    crate::fsutil::restrict_private_dir_perms(&logs_dir);
+    create_private_logs_dir(&logs_dir)?;
     install_panic_hook(&logs_dir);
     let today = chrono::Local::now().date_naive();
     cleanup_old_logs(&logs_dir, retention_days, today)?;
@@ -498,6 +506,43 @@ mod tests {
 
     fn dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    /// The log directory is the one directory the app creates for itself, and
+    /// it holds resolved video URLs. This goes through the same path `install`
+    /// uses because install itself cannot be exercised: the tracing
+    /// subscriber it builds may only be initialised once per process.
+    #[cfg(unix)]
+    #[test]
+    fn create_private_logs_dir_takes_the_directory_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir();
+        let logs = d.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        // create_dir's mode follows the umask; widen it first so the
+        // assertion cannot pass with the restriction removed.
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
+
+        create_private_logs_dir(&logs).unwrap();
+
+        assert_eq!(
+            fs::metadata(&logs).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    /// The other half of the contract: a directory that is not there yet gets
+    /// created. The case above pre-creates it, because that is what an install
+    /// upgrading from an earlier version starts with.
+    #[cfg(unix)]
+    #[test]
+    fn create_private_logs_dir_creates_a_missing_directory() {
+        let d = dir();
+        let logs = d.path().join("nested/logs");
+
+        create_private_logs_dir(&logs).unwrap();
+
+        assert!(logs.is_dir());
     }
 
     #[test]
