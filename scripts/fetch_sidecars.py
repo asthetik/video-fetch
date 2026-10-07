@@ -25,7 +25,9 @@ Integrity:
   appended; existing digests are never overwritten unless --force is
   passed, so a digest failure cannot be waved away by re-running the
   update (a human must look at the diff). yt-dlp, BtbN and martin-riedl
-  all publish checksum files that --update-pins cross-checks.
+  all publish checksum files that --update-pins cross-checks. The same
+  run rewrites the generated block of THIRD_PARTY.md; the test suite
+  fails whenever that block and these constants disagree.
 
   Pin keys carry what identifies the upstream release: BtbN's and
   martin-riedl's asset names embed the build, and yt-dlp's
@@ -111,6 +113,11 @@ REQUIREMENTS_FILE = Path(__file__).resolve().parent / "requirements-sidecars.txt
 PINS_FILE = Path(__file__).resolve().parent / "sidecar_pins.json"
 # Tauri's externalBin directory, where the fetched sidecars land.
 SIDECAR_DIR = Path(__file__).resolve().parent.parent / "src-tauri" / "binaries"
+THIRD_PARTY_FILE = Path(__file__).resolve().parent.parent / "THIRD_PARTY.md"
+# The one region of THIRD_PARTY.md that is generated rather than written. The
+# ASCII prefixes are the search keys; the rest of the marker line is prose.
+THIRD_PARTY_BLOCK_BEGIN = "<!-- ffmpeg-pins:start"
+THIRD_PARTY_BLOCK_END = "<!-- ffmpeg-pins:end -->"
 
 # Schema 2 records the ffmpeg snapshot the file was generated from
 # (`ffmpeg_snapshot`). Schema 1 files still load so --update-pins can
@@ -1054,6 +1061,81 @@ class PinsRecorder:
         return self.stale
 
 
+def load_third_party(path: Path | None = None) -> str:
+    """Read THIRD_PARTY.md, dying with a pointer rather than a traceback."""
+    file = path or THIRD_PARTY_FILE
+    try:
+        return file.read_text(encoding="utf-8")
+    except OSError as e:
+        die(
+            f"cannot read {file}: {e}\n"
+            "it must be committed; the generated block inside it is kept in "
+            "sync by `python scripts/fetch_sidecars.py --update-pins`"
+        )
+
+
+def _ffmpeg_pins_block() -> str:
+    """The generated region of THIRD_PARTY.md, markers included."""
+    stated = (
+        ("FFMPEG_VERSION", FFMPEG_VERSION),
+        ("FFMPEG_BTBN_TAG", FFMPEG_BTBN_TAG),
+        ("FFMPEG_MACOS_BUILD", FFMPEG_MACOS_BUILD),
+        ("FFMPEG_MACOS_SIGNER", FFMPEG_MACOS_SIGNER),
+        ("FFMPEG_MACOS_TEAM_ID", FFMPEG_MACOS_TEAM_ID),
+    )
+    rows = "\n".join(f"| `{name}` | `{value}` |" for name, value in stated)
+    return (
+        f"{THIRD_PARTY_BLOCK_BEGIN} — 由 scripts/fetch_sidecars.py --update-pins "
+        "生成，勿手工编辑 -->\n"
+        "\n"
+        "| 常量 | 当前取值 |\n"
+        "|------|---------|\n"
+        f"{rows}\n"
+        "\n"
+        f"{THIRD_PARTY_BLOCK_END}"
+    )
+
+
+def sync_third_party_versions(text: str) -> str:
+    """Rewrite the marker-delimited block of THIRD_PARTY.md, in place.
+
+    Everything outside the markers is hand-written prose and comes back
+    untouched. Markers rather than anchors in that prose: the notice is
+    Chinese sentences, and a regex over them silently ate a parenthetical
+    note that sat beside a version. A marker that is missing or repeated is
+    an error rather than a skip — a sync that quietly stopped updating is the
+    drift it exists to prevent.
+    """
+    starts = text.count(THIRD_PARTY_BLOCK_BEGIN)
+    ends = text.count(THIRD_PARTY_BLOCK_END)
+    if starts != 1 or ends != 1:
+        die(
+            f"THIRD_PARTY.md carries {starts} {THIRD_PARTY_BLOCK_BEGIN!r} and "
+            f"{ends} {THIRD_PARTY_BLOCK_END!r}, expected one of each. Restore "
+            "the markers around the generated block, then re-run --update-pins."
+        )
+    start = text.index(THIRD_PARTY_BLOCK_BEGIN)
+    stop = text.index(THIRD_PARTY_BLOCK_END) + len(THIRD_PARTY_BLOCK_END)
+    if stop < start:
+        die(
+            f"THIRD_PARTY.md closes its generated block before opening it; the "
+            "block would be empty. Swap the markers, then re-run --update-pins."
+        )
+    return text[:start] + _ffmpeg_pins_block() + text[stop:]
+
+
+def write_third_party(text: str) -> None:
+    """Replace THIRD_PARTY.md atomically.
+
+    The notice is what an auditor reads to establish provenance; one
+    truncated by an interrupted write is worse than one still describing the
+    previous build, which the test suite catches anyway.
+    """
+    tmp = THIRD_PARTY_FILE.with_name(THIRD_PARTY_FILE.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(THIRD_PARTY_FILE)
+
+
 def update_pins(force: bool) -> None:
     """Refresh scripts/sidecar_pins.json from the pinned upstream releases.
 
@@ -1068,6 +1150,16 @@ def update_pins(force: bool) -> None:
 
     if FFMPEG_BTBN_TAG == "latest":
         die("FFMPEG_BTBN_TAG must be a frozen autobuild tag, not 'latest'")
+
+    # Resolved before the downloads below so a doc that can no longer be
+    # synced fails the run cheaply, and written last so the ordinary failure
+    # paths (a download failing, a digest CHANGED) leave it alone. That is
+    # ordering, not atomicity: a run interrupted between the two writes still
+    # leaves the pins ahead of the doc. What actually holds "the doc states
+    # the current constants" is the test suite — the block is a function of
+    # the constants alone, so a re-run repairs it either way.
+    third_party_before = load_third_party()
+    third_party_after = sync_third_party_versions(third_party_before)
 
     ytdlp_version = load_ytdlp_version()
     print(f"yt-dlp {ytdlp_version} — digests from SHA2-256SUMS")
@@ -1174,6 +1266,9 @@ def update_pins(force: bool) -> None:
             "change is legitimate, re-run with --force; otherwise treat it as "
             "a supply-chain incident and investigate."
         )
+    if third_party_after != third_party_before:
+        write_third_party(third_party_after)
+        print("  updated  THIRD_PARTY.md")
     print("Pins up to date.")
 
 

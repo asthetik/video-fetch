@@ -24,7 +24,23 @@ Video Fetch（影取）在发版包中捆绑以下独立可执行文件与字体
 | **用途** | 合并 DASH 等分离的音视频流 |
 | **上游项目** | https://ffmpeg.org/ |
 | **许可证** | FFmpeg 上游以 **LGPL v2.1+** 为主；部分静态构建启用 GPL 组件，此时以 **GPL** 为准。详见上游 [LICENSE](https://git.ffmpeg.org/ffmpeg.git/tree/LICENSE.md) 与各构建说明。 |
-| **本仓库获取方式** | 按平台选用第三方静态构建（版本固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`，当前 9.0.2，手动升级）：<br>• **macOS（Apple 芯片）**：https://ffmpeg.martin-riedl.de/ — arm64 构建固定到不可变构建号 `1789931890_9.0.2`（`FFMPEG_MACOS_BUILD`，URL 绝不走 `/redirect/latest/`），Developer ID 签名团队 KU3N25YGLU；`scripts/verify_macos_ffmpeg.py` 可离线复核该包<br>• **Linux / Windows**：https://github.com/BtbN/FFmpeg-Builds — 固定于不可变的 autobuild 快照标签 `autobuild-2026-09-20-13-11`（`FFMPEG_BTBN_TAG`），按宿主架构选择 `-gpl-` 静态构建；具体文件名与 SHA-256 摘要见 `scripts/sidecar_pins.json` |
+| **本仓库获取方式** | 按平台选用第三方静态构建（版本固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`、`FFMPEG_BTBN_TAG` 与 `FFMPEG_MACOS_BUILD`，手动升级；当前取值见下方「已固定构建」块）：<br>• **macOS（Apple 芯片）**：https://ffmpeg.martin-riedl.de/ — arm64 构建固定到不可变构建号（URL 绝不走 `/redirect/latest/`），Developer ID 签名；`scripts/verify_macos_ffmpeg.py` 可离线复核该包<br>• **Linux / Windows**：https://github.com/BtbN/FFmpeg-Builds — 固定于不可变的 autobuild 快照标签，按宿主架构选择 `-gpl-` 静态构建；具体文件名与 SHA-256 摘要见 `scripts/sidecar_pins.json` |
+
+### 已固定构建
+
+下表是上述常量的当前取值。这一块由 `scripts/fetch_sidecars.py --update-pins` 生成并保持同步，请勿手工编辑——手工副本曾经漂移过一次（BtbN 快照标签晚了一个版本），因此改为生成。
+
+<!-- ffmpeg-pins:start — 由 scripts/fetch_sidecars.py --update-pins 生成，勿手工编辑 -->
+
+| 常量 | 当前取值 |
+|------|---------|
+| `FFMPEG_VERSION` | `9.0.2` |
+| `FFMPEG_BTBN_TAG` | `autobuild-2026-10-03-18-14` |
+| `FFMPEG_MACOS_BUILD` | `1789931890_9.0.2` |
+| `FFMPEG_MACOS_SIGNER` | `Martin Riedl` |
+| `FFMPEG_MACOS_TEAM_ID` | `KU3N25YGLU` |
+
+<!-- ffmpeg-pins:end -->
 
 BtbN 构建文件名含 `gpl`，表示包含 GPL 许可组件；若需严格 LGPL 链路，请自行替换为符合要求的 ffmpeg 构建并在设置中使用系统路径。
 
