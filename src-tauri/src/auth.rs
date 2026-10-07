@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cookies::{self, Cookie};
 use crate::error::{AppError, AppResult};
-use crate::fsutil::restrict_private_file_perms;
+use crate::fsutil::{restrict_private_file_perms, warn_unrestricted};
 use crate::models::AuthStatus;
 
 const COOKIES_FILENAME: &str = "cookies.txt";
@@ -74,7 +74,10 @@ impl AuthStore for FileStore {
             let mut file = opts.open(&tmp)?;
             file.write_all(value.as_bytes())?;
             file.sync_all()?;
-            restrict_private_file_perms(&tmp);
+            // Propagated, not warned: this temp file is about to be renamed
+            // into place carrying the session cookies, and a store that
+            // cannot be made private should not be published.
+            restrict_private_file_perms(&tmp)?;
             fs::rename(&tmp, &self.file_path)?;
             Ok(())
         })();
@@ -184,7 +187,12 @@ impl<S: AuthStore> AuthManager<S> {
                 fs::create_dir_all(&self.cache_dir)?;
                 let path = self.cookies_file_path();
                 cookies::write_netscape_file(&path, cookies)?;
-                restrict_private_file_perms(&path);
+                // A fixup for a jar left by an earlier version: a fresh file
+                // already arrives at 0600 from its creation mode, but create
+                // on an existing path keeps whatever mode was there.
+                if let Err(e) = restrict_private_file_perms(&path) {
+                    warn_unrestricted(&path, &e);
+                }
                 Ok(Some(path))
             }
             _ => {

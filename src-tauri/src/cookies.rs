@@ -102,8 +102,27 @@ pub fn cookie_header_for_bilibili(cookies: &[Cookie]) -> String {
         .join("; ")
 }
 
+/// Create the cookie jar owner-only from the moment it exists.
+///
+/// `File::create` would leave it at `0666 & ~umask` until a later chmod, and
+/// a local user who opens the file inside that window keeps the handle — the
+/// chmod cannot take back a read that already started. The kernel applies
+/// `mode` when it creates the file, so there is no window to lose. A path
+/// that already exists keeps its own mode, which is what the caller's fixup
+/// covers.
+fn create_private_jar(path: &Path) -> std::io::Result<fs::File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
 pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
-    let mut file = fs::File::create(path)?;
+    let mut file = create_private_jar(path)?;
     writeln!(file, "# Netscape HTTP Cookie File")?;
     writeln!(file, "# https://curl.haxx.se/docs/http-cookies.html")?;
     writeln!(
@@ -170,6 +189,35 @@ mod tests {
             name: name.into(),
             value: value.into(),
         }
+    }
+
+    /// The jar carries SESSDATA. `File::create` left it at 0666 & ~umask
+    /// until auth.rs chmod-ed it afterwards, and a local user who opened the
+    /// file inside that window kept the handle — the chmod cannot take back a
+    /// read that already started. Asking the kernel for the mode at creation
+    /// leaves no window to lose.
+    #[cfg(unix)]
+    #[test]
+    fn write_netscape_file_creates_the_jar_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode_of = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // Premise: under a umask of 077 a plain create is 0600 too, and the
+        // assertion below could hold without the mode ever being requested.
+        let control = dir.path().join("control");
+        fs::write(&control, b"x").unwrap();
+        assert_ne!(
+            mode_of(&control),
+            0o600,
+            "this umask makes the test vacuous; it cannot tell whether the \
+             mode was requested"
+        );
+
+        let path = dir.path().join("cookies.txt");
+        write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "secret")]).unwrap();
+
+        assert_eq!(mode_of(&path), 0o600);
     }
 
     #[test]
