@@ -34,5 +34,6 @@ src-tauri/binaries/*
 
 .superpowers/
 docs/superpowers/
+docs/gstack/
 .gstack/
 .codegraph

@@ -2,7 +2,7 @@
 
 本项目的版本说明集中记录于此，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.4.1] - 未发布
+## [0.4.1] - 2026-10-07
 
 > **降级提示**：回退到 0.4.x 或更早版本前，请先把所有暂停中的任务取消或继续掉。旧版本不认识 `paused` 状态行，读到任意一条会连整个下载列表一起读失败，应用将无法启动。
 
@@ -11,6 +11,7 @@
 - 下载队列新增暂停、继续与「全部暂停」/「全部继续」：暂停会终止该任务的传输（整棵进程树，含合并音视频用的 ffmpeg），已下载的片段保留在任务工作目录；继续时 yt-dlp 从断点续传——视频与音频片段都已完整时只做本地合成、零流量，下载到一半被暂停的进度也不会从头再来。暂停状态持久化：应用重启后任务仍显示「已暂停」，点「继续」即可恢复（不自动恢复），下载中被直接退出应用的任务重启后同样回到「已暂停」。暂停中的任务仍占用同一视频的防重复提交名额（继续或取消后释放）。
 - 暂停任务只在下载队列可见可操作（继续、取消防弃半成品、删除），下载历史页不展示暂停任务，其计数、筛选总数与空态也不计入暂停项；暂停徽章沿用琥珀色系（warn 档），与等待中/下载中/完成/失败的既有四色并列。
 - 新增每月 sidecar 上游检查（`.github/workflows/sidecar-upstream.yml`，每月 1 号定时、可手动触发；逻辑在 `scripts/check_sidecar_upstream.py`）：只检测、不改 pin、不下载产物；三条腿各盯真正会移动的字段——yt-dlp 的 GitHub release tag、BtbN 最新 autobuild 里同一资源变体的版本串（快照每天重建，日期本身不是升级信号）、martin-riedl 索引页里 macos/arm64 的稳定构建号（nightly 条目不参与，否则每月都会误报）；发现更新就开一个（或评论已有的）`[sidecar-upstream]` issue 提醒跑 `--update-pins`，报告用英文。检查自带退出码契约：`0` 表示 pin 最新、`3` 表示上游有更新、其余值一律算检查本身坏了——上游不可达因此会让任务失败，而不是被读成「无事可做」；某个资源变体在上游消失也会被点名，不会被略过。
+- 新增集成 / 压力测试体系：合成 HLS 夹具 + 真实 sidecar 子进程的确定性回归套件（覆盖暂停、继续、取消、重启恢复、零重下载、进程不残留等场景，串行执行）与带崩溃恢复循环的随机压力测试（`SOAK_MINUTES` 控制时长、`SOAK_SEED` 复现操作序列）。该体系上线当天就抓到并修复了一个交付缺陷（见 Fixed）。
 
 ### Changed
 
@@ -18,7 +19,8 @@
 - `sidecar_pins.json` 记录生成它时的 ffmpeg 快照（`ffmpeg_snapshot`：`version` / `btbn_tag` / `macos_build`）：脚本在动任何字节之前先把记录值与当前常量对照，ffmpeg 版本升了却漏跑 `--update-pins` 时直接报错，点名记录的快照、当前常量与修复命令——此前这种漏跑会让所有环境（包括干净的 CI runner）静默留在被取代的构建上。此处刻意不做自动重取：pin 的资源名与摘要都从该文件自身读取，重新生成 pin 才是唯一修复路径。文件格式随之升到 schema 2（新增必填字段）：schema 1 的读取方会拒绝 schema 2 文件，而不是静默忽略这个锚点；本脚本仍能读 schema 1，便于一次 `--update-pins` 完成迁移（迁移前抓取路径会拒绝它）。
 - 捆绑的 Linux/Windows ffmpeg 升级到 BtbN 快照 `n9.0.2-22-g46d8f462ee`（autobuild-2026-10-03-18-14，原 `n9.0.2-3-ga5923073bf`）：这正是新上线的每月上游检查的第一次实报；升级在 `--update-pins` 里完成，四个 Linux/Windows 摘要逐一对过 BtbN 的校验文件，被取代的 key 已清理，快照锚点同步更新。macOS 的 martin-riedl 构建不变。
 - `src-tauri/Cargo.toml` 的依赖改为完整三段版本号（不再有 `2.11`、`1.0` 这类两段写法；版本语义仍是 caret，精确解析继续由 `Cargo.lock` 兜底），七个直接依赖随之升到 tauri 2.12 生态（`tauri` 2.12.1、`tauri-build` 2.7.1、`tauri-plugin-opener` 2.7.0、`tauri-plugin-dialog` 2.8.1、`tauri-plugin-shell` 2.4.0、`tauri-plugin-single-instance` 2.5.2、`tokio` 1.53.2），最低 Rust 版本相应从 1.88 升到 1.90（新依赖树里最高的要求，用 `cargo metadata` 核对）。
-- 更新 npm 与 Cargo 依赖。
+- 更新 npm 与 Cargo 依赖：前端已升至最新（本轮复查无待升级）；Cargo 锁文件层面升级 hyper 1.12、jiff 0.2.38、winreg 0.56、embed-resource 3.0.12、zeroize 1.9.1 等七个包至各自最新兼容版本。
+- CI 测试覆盖对齐发布矩阵：单测在三个系统上执行（此前仅 Linux——macOS 专属测试从未在任何 CI 中运行过），集成回归扩到与发布一致的五个平台（新增 linux-arm64 与 windows-arm64 两个 ARM 格），push 触发收窄到 main / dev（带 PR 的分支不再双跑），全部任务补 `timeout-minutes`，Linux 运行环境钉到 ubuntu-24.04 与发布同基线。
 - README 精简并新增英文版：新增 `README.en.md`（与中文版信息一一对应），中文版删除「一条下载的路径」与「发版与 sidecar」两节（内部流程对读者价值低），`.github/workflows/sidecar-upstream.yml` 里指向已删章节的升级提示改为指向脚本自身文档。同时修正与现实现不符的表述（下载并发可调、日志页按钮文案对齐界面、Linux 安装包补 arm64 一行、推送前门禁回归命令补串行参数），居中排版改用 GitHub 可渲染的 `align`。
 
 ### Fixed
@@ -29,6 +31,7 @@
 - sidecar 取源链路的三处完整性缺口一并关闭：缓存里的 yt-dlp 锚定到固定 release 的带版本下载 key，版本升了却漏跑 `--update-pins` 时会重新取、并因缺少 pin 大声失败，而不是从热缓存里静默复用旧二进制（这正是「本机跑得通、干净的发布 runner 反而失败」的来源）；ffmpeg 构建升级在一次 `--update-pins` 里收敛完成（清掉被取代的 BtbN 与 macOS key、删掉 `binaries.ffmpeg` 交给记录环节回填、资源名改从本轮自己的表里解析，而不是去读尚未写入的文件）；失败的下载与未满足的 pin 都会删掉目标路径上的字节，让之后的 `tauri build` 无从打包它们。
 - `fetch_ffmpeg` 此前先把解包二进制复制到最终 sidecar 路径、再做架构与签名校验，校验失败时（Mach-O / ELF / PE 的 CPU 不符、根本不是对应格式、macOS 未签名或签名团队不对）被拒的字节留在目标位置，期间任何一次 `tauri build` 都会把它们打进安装包；现在校验经 `verify_written` 包装器执行，失败时先删除目标文件再抛出，三处调用（macOS 的签名与架构、Linux 与 Windows 的 BtbN 架构）都走这条路径，校验函数本身保持无副作用。
 - sidecar 缓存一律 fail closed：`ytdlp_needs_fetch` 与 `ffmpeg_needs_fetch` 遇到不可信的缓存（release pin 缺失或不符、摘要对不上、乃至根本没有 pin）不再只是重新下载，而是先删除已缓存的二进制再取（受信任的缓存不受影响）——重取本身可能失败（缺 pin、断网），而留在最终 sidecar 路径上的旧字节正是下一次 `tauri build` 会静默打进去的东西；快照锚点不符的路径同样先删缓存再退出。
+- 修复暂停后继续可能把一个 50 字节的 JSON 交付为成品：暂停发生在分片下载早期时，工作目录里只有被打断分片的 `.part` 与 yt-dlp 的续传状态文件（`*.ytdl`，一段 JSON 索引），成品扫描的兜底逻辑此前会把状态文件搬移交付；现在 `.ytdl` 与 `.part`、`.temp.*` 一样被排除在成品候选之外，不会再把它当作完成的下载交出去。
 
 ### 已知行为
 
