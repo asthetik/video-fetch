@@ -53,15 +53,32 @@ pub fn validate_output_template(template: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("文件名模板不能为空".into());
     }
-    if looks_like_absolute_path(trimmed) {
+    validate_path_shape(trimmed)?;
+    validate_template_fields(trimmed)?;
+    // The `>` formats are baked to literals before the template reaches
+    // yt-dlp, so everything above only sees what was typed by hand. Bake with
+    // any date and check the result too: `%(timestamp>/tmp/evil)s_…` becomes
+    // an absolute path, and `output_dir.join` discards the work directory
+    // entirely for an absolute argument. The date itself does not matter —
+    // the shape is what is being checked.
+    let baked = bake_local_datetime_tokens(trimmed, &Local::now());
+    if baked != trimmed {
+        validate_path_shape(&baked)?;
+    }
+    Ok(())
+}
+
+/// Reject a template whose shape would put the output outside its directory.
+fn validate_path_shape(path: &str) -> Result<(), String> {
+    if looks_like_absolute_path(path) {
         return Err("文件名模板不能使用绝对路径".into());
     }
-    for seg in trimmed.split(['/', '\\']) {
+    for seg in path.split(['/', '\\']) {
         if seg == ".." || seg == "." {
             return Err("文件名模板不能包含相对路径段（. 或 ..）".into());
         }
     }
-    validate_template_fields(trimmed)
+    Ok(())
 }
 
 /// Fields the app substitutes itself, and therefore the only ones a template
@@ -98,8 +115,25 @@ fn validate_template_fields(template: &str) -> Result<(), String> {
             Some((field, format)) => (field, Some(format)),
             None => (inner, None),
         };
+        // `%(field|default)s` substitutes the default when the field is empty.
+        // The substituted *value* cannot escape: yt-dlp rewrites separators in
+        // anything it substitutes (a title of `../../escape` lands as one
+        // directory entry). The default is template text, though, so it is the
+        // part that has to be checked — `%(playlist_index|..)s` was the escape.
+        let (field, default) = match field.split_once('|') {
+            Some((field, default)) => (field, Some(default)),
+            None => (field, None),
+        };
         if !ALLOWED_TEMPLATE_FIELDS.contains(&field) {
             return Err(format!("文件名模板不支持字段 %({inner})s"));
+        }
+        if let Some(default) = default
+            && (default.contains(['/', '\\', ':'])
+                || default == "."
+                || default == ".."
+                || default.is_empty())
+        {
+            return Err(format!("文件名模板的默认值不能是路径：%({inner})s"));
         }
         if let Some(format) = format
             && format.contains("..")
@@ -403,6 +437,33 @@ mod tests {
     /// the file landed two levels above the work directory. So the fields
     /// themselves are allowlisted, and a `>` format may not smuggle `..`
     /// either: the app bakes it to a literal before yt-dlp runs.
+    /// The `>` format is baked to a literal before the template reaches
+    /// yt-dlp, so a separator inside it supplies a prefix the checks on the
+    /// raw template never see: `%(timestamp>/tmp/evil)s_…` bakes to
+    /// `/tmp/evil_…`, and `output_dir.join` discards the work directory
+    /// entirely for an absolute argument.
+    #[test]
+    fn validate_output_template_rejects_a_format_that_bakes_absolute() {
+        for template in [
+            "%(timestamp>/tmp/evil)s_%(title)s.%(ext)s",
+            "%(upload_date>C:/evil)s_%(title)s.%(ext)s",
+            "%(timestamp>\\\\server\\share\\x)s.%(ext)s",
+        ] {
+            assert!(
+                validate_output_template(template).is_err(),
+                "should have been rejected: {template}"
+            );
+        }
+    }
+
+    /// The same check must not take away date subdirectories, which are the
+    /// reason a `>` format is allowed to contain a separator at all.
+    #[test]
+    fn validate_output_template_keeps_a_relative_date_subdirectory() {
+        assert!(validate_output_template("%(timestamp>%Y/%m)s/%(title)s.%(ext)s").is_ok());
+        assert!(validate_output_template("%(upload_date>%Y-%m-%d)s_%(title)s.%(ext)s").is_ok());
+    }
+
     #[test]
     fn validate_output_template_rejects_fields_yt_dlp_would_expand() {
         for template in [
@@ -427,6 +488,10 @@ mod tests {
             "%(upload_date)s_%(title)s.%(ext)s",
             "%(timestamp>%Y-%m-%d)s/%(title)s.%(ext)s",
             "%(release_timestamp>%Y%m%d)s-%(title)s.%(ext)s",
+            // A default value is ordinary template text, and a harmless one
+            // stays available — only the escaping ones are refused.
+            "%(playlist_index|0)03d_%(title)s.%(ext)s",
+            "%(playlist_index|unknown)s-%(title)s.%(ext)s",
         ] {
             assert!(
                 validate_output_template(template).is_ok(),

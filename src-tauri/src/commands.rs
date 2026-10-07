@@ -1339,8 +1339,23 @@ pub fn preview_name(
 }
 
 /// Extensions that make a *directory* something the OS launches rather than
-/// reveals. A `.app` bundle opens as an application, not as a folder.
-const LAUNCHABLE_DIR_EXTS: &[&str] = &["app", "bundle", "framework", "kext", "xpc", "plugin"];
+/// reveals. A `.app` bundle opens as an application, not as a folder; the rest
+/// are the same idea elsewhere in LaunchServices.
+const LAUNCHABLE_DIR_EXTS: &[&str] = &[
+    "app",
+    "bundle",
+    "framework",
+    "kext",
+    "xpc",
+    "plugin",
+    "prefPane",
+    "appex",
+    "qlgenerator",
+    "mdimporter",
+    "saver",
+    "workflow",
+    "action",
+];
 
 fn has_ext_from(path: &Path, known: &[&str]) -> bool {
     path.extension()
@@ -1381,21 +1396,38 @@ fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
 /// folder, and wherever earlier downloads landed — the save folder can have
 /// been changed since those rows were written.
 fn openable_roots(state: &AppState) -> Vec<PathBuf> {
-    fn resolve(dir: &Path) -> Option<PathBuf> {
-        dir.canonicalize().ok()
+    fn resolve(dir: &Path, what: &str) -> Option<PathBuf> {
+        match dir.canonicalize() {
+            Ok(path) => Some(path),
+            Err(e) => {
+                // Dropped rather than guessed at, but never silently: a root
+                // that falls out here makes the paths under it unopenable with
+                // no other explanation.
+                tracing::warn!(
+                    "open_path: 无法解析{what} {}（{e}），其下的路径将无法打开",
+                    dir.display()
+                );
+                None
+            }
+        }
     }
     let mut roots: Vec<PathBuf> = Vec::new();
-    roots.extend(resolve(state.activity_log.logs_dir()));
-    if let Ok(settings) = state.settings.lock() {
-        roots.extend(resolve(Path::new(&settings.save_dir)));
+    roots.extend(resolve(state.activity_log.logs_dir(), "日志目录"));
+    match state.settings.lock() {
+        Ok(settings) => roots.extend(resolve(Path::new(&settings.save_dir), "保存目录")),
+        Err(_) => tracing::warn!("open_path: settings 锁中毒，保存目录不计入可打开范围"),
     }
-    for job in state.downloads.list().unwrap_or_default() {
+    let jobs = state.downloads.list().unwrap_or_else(|e| {
+        tracing::warn!("open_path: 读取任务列表失败（{e}），历史任务的目录不计入");
+        Vec::new()
+    });
+    for job in jobs {
         if let Some(parent) = job
             .output_path
             .as_deref()
             .and_then(|p| Path::new(p).parent())
         {
-            roots.extend(resolve(parent));
+            roots.extend(resolve(parent, "历史任务的保存目录"));
         }
     }
     roots
@@ -1403,8 +1435,12 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
 
 #[tauri::command]
 pub fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
-    let resolved = ensure_openable(&path, &openable_roots(&state))?;
-    tauri_plugin_opener::open_path(resolved.to_string_lossy().into_owned(), None::<&str>)
+    // Validated as resolved, opened as given. `canonicalize` is what makes the
+    // root check sound, but on Windows it also returns a `\\?\`-prefixed path,
+    // and the opener hands that to ShellExecuteW, which does not understand the
+    // form — it would fail to open, and report success while doing it.
+    ensure_openable(&path, &openable_roots(&state))?;
+    tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|e| AppError::Message(format!("无法打开路径: {e}")))?;
     Ok(())
 }
