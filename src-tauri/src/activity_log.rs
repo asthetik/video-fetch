@@ -69,7 +69,8 @@ impl ActivityLog {
 fn create_private_logs_dir(logs_dir: &Path) -> AppResult<()> {
     fs::create_dir_all(logs_dir)
         .map_err(|e| AppError::Message(format!("创建日志目录失败: {e}")))?;
-    crate::fsutil::restrict_private_dir_perms(logs_dir);
+    crate::fsutil::restrict_private_dir_perms(logs_dir)
+        .unwrap_or_else(|e| crate::fsutil::warn_unrestricted(logs_dir, &e));
     Ok(())
 }
 
@@ -256,7 +257,8 @@ fn open_append(path: &Path) -> AppResult<File> {
         .append(true)
         .open(path)
         .map_err(|e| AppError::Message(format!("打开日志文件失败: {e}")))?;
-    crate::fsutil::restrict_private_file_perms(path);
+    crate::fsutil::restrict_private_file_perms(path)
+        .unwrap_or_else(|e| crate::fsutil::warn_unrestricted(path, &e));
     Ok(file)
 }
 

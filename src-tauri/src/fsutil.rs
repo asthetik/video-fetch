@@ -2,30 +2,48 @@ use std::path::{Path, PathBuf};
 
 use crate::naming::{AUDIO_OUTPUT_EXTS, OUTPUT_EXTS};
 
-/// Restrict a private file to owner-only on Unix (0600). No-op elsewhere.
-pub(crate) fn restrict_private_file_perms(path: &Path) {
+/// Restrict a private file to owner-only on Unix (0600).
+///
+/// The failure is returned rather than dropped: on a filesystem that carries
+/// no Unix modes the restriction does not happen, and a caller that ignored
+/// that went on to report the file as private. Elsewhere this is a no-op —
+/// Windows files inherit the per-user ACL of the profile directory they are
+/// created under, and nothing here tightens them further.
+pub(crate) fn restrict_private_file_perms(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
     }
     #[cfg(not(unix))]
     {
         let _ = path;
+        Ok(())
     }
 }
 
-/// Restrict a private directory to owner-only on Unix (0700). No-op elsewhere.
-pub(crate) fn restrict_private_dir_perms(path: &Path) {
+/// Restrict a private directory to owner-only on Unix (0700). Same reporting
+/// and the same non-Unix no-op as [`restrict_private_file_perms`].
+pub(crate) fn restrict_private_dir_perms(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
     {
         let _ = path;
+        Ok(())
     }
+}
+
+/// Report a restriction that failed, for callers that cannot act on it.
+pub(crate) fn warn_unrestricted(path: &Path, error: &std::io::Error) {
+    tracing::warn!(
+        "could not restrict {} to owner-only: {error}; it may be readable by \
+         other local users",
+        path.display()
+    );
 }
 
 pub fn work_dir_for(work_root: &Path, job_id: &str) -> PathBuf {
@@ -183,7 +201,7 @@ mod tests {
         fs::write(&path, b"{}").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        restrict_private_file_perms(&path);
+        restrict_private_file_perms(&path).unwrap();
 
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -200,12 +218,24 @@ mod tests {
         fs::create_dir(&logs).unwrap();
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
 
-        restrict_private_dir_perms(&logs);
+        restrict_private_dir_perms(&logs).unwrap();
 
         assert_eq!(
             fs::metadata(&logs).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    /// Dropping the error meant a filesystem without Unix modes left the file
+    /// readable by every local user while its caller reported it private.
+    #[cfg(unix)]
+    #[test]
+    fn restrict_private_perms_reports_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-there");
+
+        assert!(restrict_private_file_perms(&missing).is_err());
+        assert!(restrict_private_dir_perms(&missing).is_err());
     }
 
     #[test]
