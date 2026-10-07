@@ -604,6 +604,106 @@ class TestFfmpegUrl(unittest.TestCase):
         self.assertRegex(FFMPEG_VERSION, r"^\d+\.\d+\.\d+$")
 
 
+class TestThirdPartySync(TmpDirTestCase):
+    """THIRD_PARTY.md restates the pinned build identifiers for license
+    auditors who never open sidecar_pins.json. Those restatements live in a
+    marker-delimited block the sync rewrites wholesale; everything else in the
+    file is hand-written prose the sync must not touch."""
+
+    third_party = Path(fetch_sidecars.__file__).resolve().parent.parent / "THIRD_PARTY.md"
+    begin = fetch_sidecars.THIRD_PARTY_BLOCK_BEGIN
+    end = fetch_sidecars.THIRD_PARTY_BLOCK_END
+
+    def doc(self) -> str:
+        return self.third_party.read_text(encoding="utf-8")
+
+    def test_repo_third_party_describes_the_pinned_build(self) -> None:
+        text = self.doc()
+        self.assertEqual(fetch_sidecars.sync_third_party_versions(text), text)
+
+    def generated_block(self) -> str:
+        """The block the sync produces, independent of what the doc holds.
+
+        Syncing the doc as-is would only re-assert what is already on disk;
+        hollowing the block out first makes the result pure generator output.
+        """
+        text = self.doc()
+        start = text.index(self.begin)
+        stop = text.index(self.end) + len(self.end)
+        hollow = text[:start] + f"{self.begin}\n{self.end}" + text[stop:]
+        synced = fetch_sidecars.sync_third_party_versions(hollow)
+        return synced[synced.index(self.begin) : synced.index(self.end)]
+
+    def test_the_block_states_every_pinned_identifier(self) -> None:
+        block = self.generated_block()
+        for constant in (
+            "FFMPEG_VERSION",
+            "FFMPEG_BTBN_TAG",
+            "FFMPEG_MACOS_BUILD",
+            "FFMPEG_MACOS_SIGNER",
+            "FFMPEG_MACOS_TEAM_ID",
+        ):
+            with self.subTest(constant=constant):
+                self.assertIn(f"`{getattr(fetch_sidecars, constant)}`", block)
+
+    def test_a_stale_value_inside_the_block_is_rewritten(self) -> None:
+        text = self.doc()
+        stale = text.replace(f"`{FFMPEG_BTBN_TAG}`", "`autobuild-1999-01-01-00-00`")
+        self.assertNotEqual(stale, text)
+        self.assertEqual(fetch_sidecars.sync_third_party_versions(stale), text)
+
+    def test_prose_is_never_rewritten(self) -> None:
+        # Only the block is machine-owned. The first cut anchored regexes in
+        # this prose instead, and silently deleted a parenthetical note that
+        # sat next to a value — this is that note, back where it was.
+        text = self.doc()
+        noted = text.replace(
+            self.begin,
+            "版本固定于 `scripts/fetch_sidecars.py` 的 `FFMPEG_VERSION`，"
+            f"当前 {FFMPEG_VERSION}（含下游补丁），手动升级。\n\n{self.begin}",
+        )
+        self.assertNotEqual(noted, text)
+        self.assertEqual(fetch_sidecars.sync_third_party_versions(noted), noted)
+
+    def test_a_lost_marker_dies(self) -> None:
+        # A restructured doc must not turn the sync into a silent no-op: that
+        # is the drift the sync exists to prevent.
+        text = self.doc()
+        for label, damaged in (
+            ("begin", text.replace(self.begin, "")),
+            ("end", text.replace(self.end, "")),
+        ):
+            with self.subTest(marker=label):
+                with self.assertRaises(SystemExit):
+                    fetch_sidecars.sync_third_party_versions(damaged)
+
+    def test_a_missing_doc_dies_with_a_pointer(self) -> None:
+        # Deleting or renaming the notice must not surface as a traceback:
+        # --update-pins is run by whoever bumps the pin, not by a Python dev.
+        missing = self.tmpdir() / "THIRD_PARTY.md"
+        with self.assertRaises(SystemExit):
+            fetch_sidecars.load_third_party(missing)
+
+    def test_update_pins_resolves_the_doc_before_the_downloads(self) -> None:
+        # --update-pins fetches every platform's archive; a doc that can no
+        # longer be synced has to fail the run before that, not after.
+        doc = self.tmpdir() / "THIRD_PARTY.md"
+        doc.write_text("no markers here", encoding="utf-8")
+        with mock.patch.object(fetch_sidecars, "THIRD_PARTY_FILE", doc):
+            with mock.patch.object(
+                fetch_sidecars,
+                "load_pins",
+                return_value={"downloads": {}, "binaries": {}},
+            ):
+                with mock.patch.object(
+                    fetch_sidecars,
+                    "load_ytdlp_version",
+                    side_effect=AssertionError("reached the download phase"),
+                ):
+                    with self.assertRaises(SystemExit):
+                        fetch_sidecars.update_pins(force=False)
+
+
 class TestBtbnAssetResolution(unittest.TestCase):
     """--update-pins resolves each platform's asset against the run's
     in-memory table: the file the run has not written yet still holds the
