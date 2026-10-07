@@ -59,10 +59,22 @@ fn resolve_bundled(app: &AppHandle, sidecar_name: &str, dev_base: &str) -> Optio
 }
 
 fn path_from_env(var: &str) -> Option<PathBuf> {
-    std::env::var(var)
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
+    env_override(std::env::var(var).ok(), cfg!(debug_assertions))
+}
+
+/// Split from the lookup so the gate can be asserted: `cfg!` is fixed at
+/// compile time, and a test build always takes the permissive branch.
+fn env_override(value: Option<String>, allowed: bool) -> Option<PathBuf> {
+    // Debug-only, like the PATH fallback below. A release build must run the
+    // bundled sidecar: its digest is what `scripts/sidecar_pins.json` fixes,
+    // and an override here would put an arbitrary binary on that trust path.
+    // It also keeps the version floor honest — an overridden yt-dlp is not
+    // guaranteed to accept every flag `ytdlp.rs` now passes. The README
+    // describes these variables as a development convenience.
+    if !allowed {
+        return None;
+    }
+    value.map(PathBuf::from).filter(|p| p.is_file())
 }
 
 fn path_from_which(name: &str) -> Option<PathBuf> {
@@ -117,6 +129,13 @@ fn probe(path: &std::path::Path, version_flag: &str) -> Result<(), String> {
     }
 }
 
+/// Build the argv for a version probe.
+///
+/// Unlike the invocations in `ytdlp.rs` this one carries no URL and no
+/// frontend-supplied value, and yt-dlp answers `--version` while parsing argv,
+/// before it loads any configuration file — so it is deliberately left without
+/// `--ignore-config`. The flag set is per tool (ffmpeg takes `-version`), so
+/// there is nothing to share here either.
 fn probe_command(path: &std::path::Path, version_flag: &str) -> StdCommand {
     let mut cmd = StdCommand::new(path);
     cmd.arg(version_flag)
@@ -217,6 +236,23 @@ pub fn resolve_ytdlp_config(app: &AppHandle) -> crate::ytdlp::YtDlpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A release build must run the sidecar the pins file vouches for. An
+    /// override in the environment would let anything that can set a variable
+    /// choose the binary instead, and would put an unvetted yt-dlp — one that
+    /// need not accept the flags `ytdlp.rs` passes — on the download path.
+    #[test]
+    fn a_release_build_ignores_the_sidecar_override() {
+        let file = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(env_override(Some(file.clone()), true).is_some());
+        assert!(env_override(Some(file), false).is_none());
+        // A value that is not a file is refused either way.
+        assert!(env_override(Some("/nonexistent/yt-dlp".into()), true).is_none());
+    }
 
     #[test]
     fn dev_sidecar_path_uses_manifest_binaries_dir() {

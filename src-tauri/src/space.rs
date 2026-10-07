@@ -193,8 +193,8 @@ pub async fn fetch_via_ytdlp(
     cmd.arg("--flat-playlist")
         .arg("-J")
         .arg("--playlist-items")
-        .arg(format!("{start}:{end}"))
-        .arg(format!("https://space.bilibili.com/{mid}/video"));
+        .arg(format!("{start}:{end}"));
+    crate::ytdlp::arg_url(&mut cmd, &format!("https://space.bilibili.com/{mid}/video"));
     let out = cmd
         .output()
         .await

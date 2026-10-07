@@ -741,15 +741,49 @@ pub(crate) fn hide_windows_console(cmd: &mut Command) {
     }
 }
 
-/// Shared yt-dlp spawn policy: no console window on Windows, an optional
-/// cookie file (ignored when missing), and UTF-8 Python IO for stable JSON.
+/// Flags every invocation carries, whatever it is being asked to do.
+///
+/// `--ignore-config` is the load-bearing one: yt-dlp otherwise reads a config
+/// file from `~/.config/yt-dlp/config`, `/etc/yt-dlp.conf`, the portable
+/// location beside the binary and the process CWD, and merges anything it
+/// finds there — `--exec`, `--paths`, `--output` — into the run. Any process
+/// running as the same user can plant one, which both overrides the output
+/// template the app chose and turns the app into a code-execution channel.
+/// `--no-plugin-dirs` closes the same door for plugin loading.
+fn harden(cmd: &mut Command) {
+    cmd.arg("--ignore-config").arg("--no-plugin-dirs");
+}
+
+/// Pass `url` as the positional argument, after ending option parsing.
+///
+/// The URL reaches these call sites from the frontend, and without `--` a
+/// value starting with `-` is read as an option: `yt-dlp -J "--version"`
+/// prints the version and exits 0.
+pub(crate) fn arg_url(cmd: &mut Command, url: &str) {
+    cmd.arg("--").arg(url);
+}
+
+/// Shared yt-dlp spawn policy: no console window on Windows, ambient
+/// configuration ignored, an optional cookie file (ignored when missing), and
+/// UTF-8 Python IO for stable JSON.
 pub fn base_command(ytdlp_path: &Path, cookies_path: Option<&Path>) -> Command {
     let mut cmd = Command::new(ytdlp_path);
     hide_windows_console(&mut cmd);
+    harden(&mut cmd);
     if let Some(p) = cookies_path.filter(|p| p.exists()) {
         cmd.arg("--cookies").arg(p);
     }
     cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
+    cmd
+}
+
+/// [`base_command`] plus the ffmpeg location from the resolved config, for the
+/// invocations that work from a [`YtDlpConfig`] rather than a bare path.
+fn cfg_command(cfg: &YtDlpConfig, cookies_path: Option<&Path>) -> Command {
+    let mut cmd = base_command(&cfg.yt_dlp_path, cookies_path);
+    if let Some(path) = cfg.ffmpeg_path.as_ref() {
+        cmd.arg("--ffmpeg-location").arg(path);
+    }
     cmd
 }
 
@@ -764,20 +798,11 @@ pub async fn resolve_meta(
 
     let url = canonicalize_video_url(url);
 
-    let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
-    hide_windows_console(&mut cmd);
+    let mut cmd = cfg_command(cfg, cookies_path);
     // Keep playlist entries so Bilibili multi-P `pages` can be mapped.
     cmd.arg("-J");
 
-    if let Some(path) = cfg.ffmpeg_path.as_ref() {
-        cmd.arg("--ffmpeg-location").arg(path);
-    }
-
-    if let Some(cookies) = cookies_path.filter(|p| p.exists()) {
-        cmd.arg("--cookies").arg(cookies);
-    }
-
-    cmd.arg(&url);
+    arg_url(&mut cmd, &url);
 
     let output = cmd
         .output()
@@ -884,16 +909,9 @@ async fn fetch_json_for_url(
     url: &str,
     cookies_path: Option<&Path>,
 ) -> Option<serde_json::Value> {
-    let mut cmd = tokio::process::Command::new(&cfg.yt_dlp_path);
-    hide_windows_console(&mut cmd);
+    let mut cmd = cfg_command(cfg, cookies_path);
     cmd.arg("-J").arg("--no-playlist");
-    if let Some(path) = cfg.ffmpeg_path.as_ref() {
-        cmd.arg("--ffmpeg-location").arg(path);
-    }
-    if let Some(cookies) = cookies_path.filter(|p| p.exists()) {
-        cmd.arg("--cookies").arg(cookies);
-    }
-    cmd.arg(url);
+    arg_url(&mut cmd, url);
 
     let output = cmd.output().await.ok()?;
     if !output.status.success() {
@@ -1033,8 +1051,7 @@ pub async fn download(
             }
         }
     }
-    let mut cmd = Command::new(&cfg.yt_dlp_path);
-    hide_windows_console(&mut cmd);
+    let mut cmd = cfg_command(cfg, cookies_path);
     cmd.arg("-f").arg(&plan.selector);
     // Bilibili DASH selectors (vh height caps, exact single-P bands, multi-P
     // codec options) all resolve through bestvideo[...]; sort by resolution then
@@ -1061,18 +1078,7 @@ pub async fn download(
         .arg("--print")
         .arg("after_move:filepath");
 
-    cmd.env("PYTHONIOENCODING", "utf-8");
-    cmd.env("PYTHONUTF8", "1");
-
-    if let Some(path) = cfg.ffmpeg_path.as_ref() {
-        cmd.arg("--ffmpeg-location").arg(path);
-    }
-
-    if let Some(cookies) = cookies_path.filter(|p| p.exists()) {
-        cmd.arg("--cookies").arg(cookies);
-    }
-
-    cmd.arg(&url);
+    arg_url(&mut cmd, &url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
@@ -1342,6 +1348,47 @@ fn kill_child_process_tree(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// yt-dlp reads a config file from `~/.config/yt-dlp/config`,
+    /// `/etc/yt-dlp.conf`, the portable location beside the binary and the
+    /// process CWD, and merges any `--exec` / `--paths` / `--output` it finds
+    /// into the run. Any process running as the same user can plant one, so
+    /// every invocation has to opt out. Confirmed against the pinned
+    /// 2026.08.19 build: a `yt-dlp.conf` in the CWD was honoured without it.
+    #[test]
+    fn every_invocation_ignores_ambient_yt_dlp_configuration() {
+        let direct = base_command(Path::new("/nonexistent/yt-dlp"), None);
+        let via_cfg = cfg_command(
+            &YtDlpConfig {
+                yt_dlp_path: PathBuf::from("/nonexistent/yt-dlp"),
+                ffmpeg_path: None,
+            },
+            None,
+        );
+        for (label, cmd) in [("base_command", direct), ("cfg_command", via_cfg)] {
+            let args = command_args(&cmd);
+            for flag in ["--ignore-config", "--no-plugin-dirs"] {
+                assert!(args.contains(&flag.to_string()), "{label}: {args:?}");
+            }
+        }
+    }
+
+    /// The URL arrives from the frontend. Without `--` a value starting with
+    /// `-` is read as an option: `yt-dlp -J "--version"` prints the version
+    /// and exits 0.
+    #[test]
+    fn arg_url_ends_option_parsing_before_the_url() {
+        let mut cmd = Command::new("yt-dlp");
+        arg_url(&mut cmd, "--version");
+        assert_eq!(command_args(&cmd), ["--", "--version"]);
+    }
 
     #[test]
     fn parses_percent_progress() {
