@@ -13,10 +13,22 @@ pub fn settings_path(app_dir: &Path) -> PathBuf {
 
 pub fn load_settings(app_dir: &Path) -> AppResult<AppSettings> {
     let path = settings_path(app_dir);
-    if !path.exists() {
-        return Ok(AppSettings::default());
-    }
-    let text = fs::read_to_string(&path)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AppSettings::default());
+        }
+        Err(e) => {
+            // Same reasoning as a file that parses badly, one step earlier:
+            // `setup` propagates this, and propagating it means the app never
+            // opens again.
+            eprintln!(
+                "videofetch: cannot read {} ({e}); starting from default settings",
+                path.display()
+            );
+            return Ok(AppSettings::default());
+        }
+    };
     let mut settings: AppSettings = match serde_json::from_str(&text) {
         Ok(settings) => settings,
         Err(e) => {
@@ -25,8 +37,13 @@ pub fn load_settings(app_dir: &Path) -> AppResult<AppSettings> {
             // out was deleting it by hand. Keep it for diagnosis, start from
             // defaults, and let the next save replace it.
             let backup = path.with_extension("json.bad");
-            tracing::warn!(
-                "settings.json 解析失败（{e}），已另存为 {}，本次使用默认设置",
+            // `eprintln!` rather than `tracing::warn!`: this runs before the
+            // activity-log subscriber is installed, so a warn here is dropped
+            // and the user would find their settings reset with no explanation.
+            eprintln!(
+                "videofetch: {} is not valid JSON ({e}); kept as {} and starting \
+                 from default settings",
+                path.display(),
                 backup.display()
             );
             let _ = fs::rename(&path, &backup);
@@ -67,11 +84,19 @@ pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     // first, so an interrupted save left a settings.json that every later launch
     // failed to parse — before the window ever opened.
     let tmp = path.with_extension("json.tmp");
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(json.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
+    let write = (|| -> AppResult<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        // Nothing else ever tidies this directory, so a scratch file left by a
+        // failed save would sit there for the life of the install.
+        let _ = fs::remove_file(&tmp);
+    }
+    write
 }
 
 #[cfg(test)]
@@ -114,6 +139,36 @@ mod tests {
             .collect();
 
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// The first cut only covered a file that parses badly. One that cannot be
+    /// read at all still returned early through `?`, and `setup` propagates
+    /// that, so the app exited on every launch — the same brick, one step
+    /// earlier.
+    #[test]
+    fn an_unreadable_settings_path_starts_from_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file belongs: a readable path that is not a
+        // readable file.
+        fs::create_dir(settings_path(dir.path())).unwrap();
+
+        let loaded = load_settings(dir.path()).expect("startup must not fail");
+
+        assert_eq!(loaded.concurrency, AppSettings::default().concurrency);
+    }
+
+    /// A save that cannot land must not leave its scratch file behind: nothing
+    /// cleans that directory, so it would sit there for the life of the
+    /// install.
+    #[test]
+    fn a_failed_save_leaves_no_temporary_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where settings.json belongs, so the rename cannot land.
+        fs::create_dir(settings_path(dir.path())).unwrap();
+
+        assert!(save_settings(dir.path(), &AppSettings::default()).is_err());
+
+        assert!(!dir.path().join("settings.json.tmp").exists());
     }
 
     /// The save swaps a finished temp file in rather than rewriting the real
