@@ -170,6 +170,44 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// The perms helpers are the only thing keeping a private file or
+    /// directory out of other users' reach. The mode is read back after a
+    /// deliberately permissive setup so the assertion cannot hold with the
+    /// restriction removed.
+    #[cfg(unix)]
+    #[test]
+    fn restrict_private_file_perms_takes_a_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.json");
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        restrict_private_file_perms(&path);
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_private_dir_perms_takes_a_directory_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
+
+        restrict_private_dir_perms(&logs);
+
+        assert_eq!(
+            fs::metadata(&logs).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
     #[test]
     fn work_dir_for_joins_job_id() {
         let root = PathBuf::from("virtual-download-work");
