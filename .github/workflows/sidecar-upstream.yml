@@ -60,7 +60,7 @@ jobs:
             echo
             cat report.txt
             echo
-            echo "Upgrade steps: see the README section on releases and sidecars. Set the new version,"
+            echo "Upgrade steps: see the module docstring in scripts/fetch_sidecars.py. Set the new version,"
             echo "then run \`python3 scripts/fetch_sidecars.py --update-pins\` to refresh the digests."
             echo "A new yt-dlp release arrives under a new key (\`yt-dlp_linux@<tag>\`); add it as-is, no \`--force\` needed."
             echo "\`--force\` is only for a digest that changed under an unchanged key; that is a poisoning signal, so investigate before deciding."
