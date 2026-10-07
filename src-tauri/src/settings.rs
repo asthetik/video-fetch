@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, AppResult};
@@ -16,8 +17,22 @@ pub fn load_settings(app_dir: &Path) -> AppResult<AppSettings> {
         return Ok(AppSettings::default());
     }
     let text = fs::read_to_string(&path)?;
-    let mut settings: AppSettings =
-        serde_json::from_str(&text).map_err(|e| AppError::Message(e.to_string()))?;
+    let mut settings: AppSettings = match serde_json::from_str(&text) {
+        Ok(settings) => settings,
+        Err(e) => {
+            // A truncated write used to brick the app: setup propagates this
+            // error, so every launch died on the same file and the only way
+            // out was deleting it by hand. Keep it for diagnosis, start from
+            // defaults, and let the next save replace it.
+            let backup = path.with_extension("json.bad");
+            tracing::warn!(
+                "settings.json 解析失败（{e}），已另存为 {}，本次使用默认设置",
+                backup.display()
+            );
+            let _ = fs::rename(&path, &backup);
+            return Ok(AppSettings::default());
+        }
+    };
     if migrate_filename_template(&mut settings) {
         let _ = save_settings(app_dir, &settings);
     }
@@ -48,13 +63,79 @@ pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     let path = settings_path(app_dir);
     let json =
         serde_json::to_string_pretty(settings).map_err(|e| AppError::Message(e.to_string()))?;
-    fs::write(path, json)?;
+    // Written beside the real file and renamed into place: `fs::write` truncates
+    // first, so an interrupted save left a settings.json that every later launch
+    // failed to parse — before the window ever opened.
+    let tmp = path.with_extension("json.tmp");
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&tmp, &path)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A truncated write used to brick startup: `setup` propagates the parse
+    /// error, so every launch died on the same file and the only way out was
+    /// deleting it by hand.
+    #[test]
+    fn a_corrupt_settings_file_starts_from_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(settings_path(dir.path()), br#"{"concurrency": "#).unwrap();
+
+        let loaded = load_settings(dir.path()).expect("startup must not fail");
+
+        assert_eq!(loaded.concurrency, AppSettings::default().concurrency);
+    }
+
+    #[test]
+    fn a_corrupt_settings_file_is_kept_for_diagnosis() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(settings_path(dir.path()), b"not json at all").unwrap();
+
+        load_settings(dir.path()).unwrap();
+
+        assert!(dir.path().join("settings.json.bad").is_file());
+        assert!(!settings_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn saving_leaves_no_temporary_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        save_settings(dir.path(), &AppSettings::default()).unwrap();
+
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != SETTINGS_FILE)
+            .collect();
+
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// The save swaps a finished temp file in rather than rewriting the real
+    /// one, and that swap is the whole point: an interrupted `fs::write`
+    /// truncates first, and the truncated file then fails every launch before
+    /// the window opens. Atomicity itself needs fault injection to observe,
+    /// so this pins the structure that provides it — a rename installs a new
+    /// inode, an in-place write keeps the old one.
+    #[cfg(unix)]
+    #[test]
+    fn saving_replaces_the_file_instead_of_rewriting_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        save_settings(dir.path(), &AppSettings::default()).unwrap();
+        let first = fs::metadata(settings_path(dir.path())).unwrap().ino();
+
+        save_settings(dir.path(), &AppSettings::default()).unwrap();
+        let second = fs::metadata(settings_path(dir.path())).unwrap().ino();
+
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn settings_round_trip() {
