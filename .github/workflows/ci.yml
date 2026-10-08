@@ -8,6 +8,14 @@ on:
   pull_request:
     branches: [main, dev]
 
+# Stated once rather than per job. The repository default is already read, so
+# this changes nothing today; it pins the intent, so a job added later cannot
+# silently inherit something wider. Every job here only reads the repository.
+# Several of them run `npm ci` on a pull request's lockfile, which executes
+# whatever postinstall scripts it names.
+permissions:
+  contents: read
+
 jobs:
   frontend:
     runs-on: ubuntu-24.04
@@ -24,7 +32,10 @@ jobs:
 
   lint:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Two clippy passes now, one per profile. The release pass compiles its
+    # dependency graph cold: it shares `shared-key: src-tauri` with `unit` and
+    # `integration`, whose winning entry holds no release artifacts.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -52,6 +63,20 @@ jobs:
         run: python scripts/fetch_sidecars.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy in the release profile
+        # A dev-profile compile cannot see `#[cfg(not(debug_assertions))]` code
+        # at all, so nothing has ever linted it. The smoke job compiles those
+        # paths on a pull request, but a warning there fails nothing; this is
+        # what makes one fail.
+        #
+        # Clippy expands `generate_context!`, so this does run Tauri's codegen
+        # and is not skipped by stopping at metadata. It needs no frontend
+        # build all the same: without the CLI's `tauri/custom-protocol` feature
+        # codegen takes the `dev = true` branch, and with `devUrl` set in
+        # tauri.conf.json it short-circuits to empty assets without reading
+        # `frontendDist`. Adding that feature to this invocation, or removing
+        # `devUrl`, would make `../dist` required in this job.
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --release -- -D warnings
 
   unit:
     strategy:
@@ -156,12 +181,15 @@ jobs:
     # silently if the CLI ever changed it.
     #
     # `--no-bundle` is what keeps this affordable: no installers are built. The
-    # frontend build cannot be skipped the way it can in the dev-profile jobs —
-    # Tauri's codegen reads `frontendDist` for a release build and fails
-    # outright when the directory is missing.
+    # frontend build cannot be skipped the way the dev-profile jobs skip it:
+    # the CLI is what turns on `tauri/custom-protocol`, which flips codegen's
+    # `dev` to false and makes the `frontendDist` directory required.
     strategy:
       fail-fast: false
       matrix:
+        # Keep this list in step with release.yml's: a target the release builds
+        # and this does not is one whose release profile goes unverified, and
+        # neither workflow would say so.
         os: [ubuntu-24.04, macos-latest, windows-latest, ubuntu-24.04-arm, windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
