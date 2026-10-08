@@ -57,6 +57,17 @@ tracing-appender = "0.2.5"
 tempfile = "3.27.0"
 tiny_http = "0.12.0"
 
+# Cargo's defaults leave a release build unstripped and without LTO, which on
+# Windows means a larger executable for Defender to scan on every launch.
+# `panic = "abort"` is deliberately not set: the panic hook writes its record
+# straight to the log file, but the non-blocking writer behind every other
+# event is only drained by unwinding or by the graceful flush on exit, so
+# aborting would drop whatever is still queued.
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
 [target.'cfg(unix)'.dependencies]
 # kill(2) for process-group termination of the yt-dlp tree (PyInstaller spawns
 # a second stage; killing the direct child alone leaves it downloading).
