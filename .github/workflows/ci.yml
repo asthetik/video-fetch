@@ -121,6 +121,13 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
 
   integration:
+    # Skipped on a push to an integration branch. Merging the pull request is
+    # what produced that commit, and a merge commit's tree is byte-for-byte the
+    # head it merged, so the run here would re-verify what the pull request
+    # already verified. This job and `release-smoke` are 44 of the 53 runner
+    # minutes a full run costs. The cheap jobs still run on a push, as the net
+    # for a commit that reaches `main` without a pull request.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -184,6 +191,11 @@ jobs:
     # frontend build cannot be skipped the way the dev-profile jobs skip it:
     # the CLI is what turns on `tauri/custom-protocol`, which flips codegen's
     # `dev` to false and makes the `frontendDist` directory required.
+    #
+    # Skipped on a push for the same reason as `integration`: a merge commit's
+    # tree is byte-for-byte the head it merged, so a run here would be a second
+    # pass over identical inputs.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
