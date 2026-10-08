@@ -13,6 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep this list in step with ci.yml's `release-smoke` job, which
+        # compiles the release profile on a pull request for these same
+        # targets. Neither workflow would flag a target added to only one.
         include:
           # Floating on purpose: pinned macOS images retire with no warning short of failing brownouts.
           - platform: macos-latest
