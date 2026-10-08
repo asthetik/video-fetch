@@ -81,7 +81,10 @@ pub fn run() {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 if let Some(window) = handle.get_webview_window("main")
-                    && !window.is_visible().unwrap_or(true)
+                    // An erroring probe counts as not visible: this thread
+                    // exists so the window cannot stay hidden, so it errs
+                    // toward showing it.
+                    && !window.is_visible().unwrap_or(false)
                 {
                     let _ = window.show();
                 }
