@@ -47,10 +47,6 @@ pub mod testing {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Captured before the builder so the startup line in the activity log also
-    // covers the work that happens before `setup`: loading this executable,
-    // building the Tauri app and the window, and starting WebView2.
-    let started = std::time::Instant::now();
     tauri::Builder::default()
         // A second instance would fight over jobs.db and the log rotator;
         // focus the existing window instead.
@@ -62,9 +58,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .setup(move |app| {
+        .setup(|app| {
             let state =
-                build_app_state(app.handle(), started).inspect_err(|e| {
+                build_app_state(app.handle()).inspect_err(|e| {
                     tracing::error!(
                         target: "core",
                         "app: 启动失败: {}",
