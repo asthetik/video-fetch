@@ -142,6 +142,85 @@ jobs:
         # wall-clock than running the tests one after another).
         run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
+  release-smoke:
+    # The release profile is read by `npx tauri build` and by nothing else, and
+    # that command only runs on a tag. Every other job here compiles in the dev
+    # or test profile, so a `[profile.release]` that cannot build would not be
+    # discovered until a release was already being cut. This compiles what the
+    # release compiles, on all five targets the release runs on, and publishes
+    # nothing.
+    #
+    # It goes through the CLI rather than a bare `cargo build --release`: the
+    # CLI adds `--features tauri/custom-protocol`, which selects a different
+    # embedded-asset code path, and spelling that flag out here would drift
+    # silently if the CLI ever changed it.
+    #
+    # `--no-bundle` is what keeps this affordable: no installers are built. The
+    # frontend build cannot be skipped the way it can in the dev-profile jobs —
+    # Tauri's codegen reads `frontendDist` for a release build and fails
+    # outright when the directory is missing.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest, ubuntu-24.04-arm, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          # Its own bucket: the other jobs cache dev-profile artifacts, and one
+          # shared entry would have them evicting each other.
+          shared-key: src-tauri-release
+          # Save only from the integration branches. The store is capped at
+          # 10 GiB for the whole repository and a release entry is measured at
+          # 450-550 MB per platform, so a copy written per pull request is both
+          # large and unreadable to any other run. PRs still restore, including
+          # from `main`, so they only lose the first run's warmth.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Tauri Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+      - name: Cache sidecar binaries
+        uses: actions/cache@v6
+        with:
+          path: src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/requirements-sidecars.txt', 'scripts/fetch_sidecars.py', 'scripts/sidecar_pins.json') }}
+      - name: Fetch sidecar binaries
+        # Required at compile time: tauri-build copies bundle.externalBin
+        # entries during build.rs and fails when any is missing.
+        run: python scripts/fetch_sidecars.py
+      - run: npm ci
+      - name: Build the release profile
+        run: npx tauri build --no-bundle
+      - name: Assert the build produced a binary
+        shell: bash
+        # The exit code already says the compile succeeded. This guards the
+        # other half: that a release build is still what happened. Both
+        # `tauri build` and its cargo invocation could start assuming an
+        # artifact that is already there, and the job would go quietly green
+        # having compiled nothing.
+        run: |
+          bin=src-tauri/target/release/video-fetch
+          if [ -f "$bin.exe" ]; then bin="$bin.exe"; fi
+          [ -f "$bin" ] || { echo "no release binary at $bin"; exit 1; }
+          # A stub detector, not a size assertion: every platform's real bundle
+          # is well over this, and an empty or truncated file is not.
+          size=$(wc -c < "$bin")
+          echo "release binary: $bin, $size bytes"
+          [ "$size" -ge 10000000 ] || { echo "$bin looks like a stub"; exit 1; }
+
   scripts:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
