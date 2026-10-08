@@ -160,6 +160,22 @@ fn resolve_candidates(spec: ToolCandidates) -> Option<PathBuf> {
 
 /// `probe` is the only syscall under here, so callers that cannot spawn (the
 /// tests) inject their own and still exercise the walk.
+///
+/// Probing means spawning the candidate and waiting for it to exit, which is
+/// the most expensive thing startup does: a release bundle offers exactly one
+/// candidate, so the walk below would only ever be *verifying* it, and yt-dlp
+/// is a PyInstaller bundle that takes seconds to unpack and boot just to print
+/// a version (measured ~2.8-3.5 s against the shipped macOS build). That cost
+/// sits inside the Tauri `setup` hook, which blocks the main thread before the
+/// event loop pumps, so it lands directly on time-to-window.
+///
+/// A single candidate is therefore taken as-is. Verification of the shipped
+/// binary belongs at build time, where `fetch_sidecars.py` already asserts the
+/// architecture and `sidecar_pins.json` pins its digest. What a broken binary
+/// costs at runtime is a later failure rather than a startup one: yt-dlp stops
+/// at its own spawn error, and ffmpeg lets the run finish and is caught at the
+/// delivery point by `looks_unmerged`. Both are loud, but both arrive during a
+/// download instead of before one starts.
 fn resolve_with(
     spec: ToolCandidates,
     probe: impl Fn(&std::path::Path, &str) -> Result<(), String>,
@@ -172,14 +188,27 @@ fn resolve_with(
         from_system,
     } = spec;
     let bundled_present = bundled.is_some();
-    // Candidates are probed lazily: a working bundled binary never spawns the
-    // discarded ones.
-    for (origin, candidate) in [
+    // Each candidate was already existence-checked where it was looked up, so
+    // everything that survives here is a real file.
+    let present = [
         (ORIGIN_BUNDLED, bundled),
         (ORIGIN_ENV, from_env),
         (ORIGIN_SYSTEM, from_system),
-    ] {
-        let Some(path) = candidate else { continue };
+    ]
+    .into_iter()
+    .filter_map(|(origin, candidate)| candidate.map(|path| (origin, path)))
+    .collect::<Vec<_>>();
+
+    // Nothing to choose between: do not pay a spawn to confirm it. The walk
+    // below logs as it goes; with a single candidate there is no degradation to
+    // report, so this path stays as silent as a healthy bundled binary was.
+    if let [(_, only)] = present.as_slice() {
+        return Some(only.clone());
+    }
+
+    // Candidates are probed lazily: a working bundled binary never spawns the
+    // discarded ones.
+    for (origin, path) in present {
         match probe(&path, version_flag) {
             Ok(()) => {
                 // A fallback is a degradation, so it is a warning, not a state
@@ -363,9 +392,38 @@ mod tests {
     #[test]
     fn resolve_uses_the_system_candidate_last() {
         assert_eq!(
-            resolve_with_fake_probe(None, None, Some("/system/ffmpeg"), &["/system/ffmpeg"]),
+            resolve_with_fake_probe(
+                Some("/bundled/ffmpeg"),
+                Some("/env/ffmpeg"),
+                Some("/system/ffmpeg"),
+                &["/system/ffmpeg"],
+            ),
             Some(PathBuf::from("/system/ffmpeg"))
         );
+    }
+
+    /// A release bundle resolves to exactly one candidate (both the env
+    /// override and the PATH lookup are dev-only), and spawning that candidate
+    /// to prove it runs is what put seconds on startup. With nothing to choose
+    /// between, it must be taken as-is.
+    #[test]
+    fn a_lone_candidate_is_taken_without_being_spawned() {
+        let spec = ToolCandidates {
+            label: TOOL_YT_DLP,
+            version_flag: YT_DLP_VERSION_FLAG,
+            bundled: Some(PathBuf::from("/bundled/yt-dlp")),
+            from_env: None,
+            from_system: None,
+        };
+        let spawned = std::cell::Cell::new(false);
+
+        let resolved = resolve_with(spec, |_, _| {
+            spawned.set(true);
+            Ok(())
+        });
+
+        assert_eq!(resolved, Some(PathBuf::from("/bundled/yt-dlp")));
+        assert!(!spawned.get(), "a lone candidate must not be spawned");
     }
 
     #[test]

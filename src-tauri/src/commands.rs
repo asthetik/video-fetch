@@ -1598,7 +1598,25 @@ pub async fn pick_cookies_file(app: AppHandle) -> AppResult<String> {
     }
 }
 
-pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
+/// Milliseconds with one decimal: every figure in the startup line shares one
+/// unit, so two launches compare at a glance.
+fn fmt_ms(elapsed: std::time::Duration) -> String {
+    format!("{:.1}ms", elapsed.as_secs_f64() * 1_000.0)
+}
+
+/// `started` is captured at the top of `run()`, so the logged gap covers
+/// everything from entering Rust to the state being built: building the Tauri
+/// app, initialising plugins, creating the window, and starting WebView2. That
+/// is the stretch a cold WebView2 inflates, and it is invisible from inside
+/// `setup`.
+///
+/// It does not cover what precedes `main`: the loader mapping this executable
+/// and its libraries, which is where a scanner's cost lands on Windows.
+/// Nothing in-process can observe that, so a Windows figure has to be read as
+/// "after the image was already loaded", not as the whole gap the user waits
+/// through.
+pub fn build_app_state(app: &AppHandle, started: std::time::Instant) -> AppResult<AppState> {
+    let setup_started = std::time::Instant::now();
     let app_dir = app
         .path()
         .app_data_dir()
@@ -1644,7 +1662,9 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
 
+    let sidecar_started = std::time::Instant::now();
     let ytdlp = sidecar::resolve_ytdlp_config(app);
+    let sidecar_elapsed = sidecar_started.elapsed();
     let progress: Arc<dyn ProgressEmitter> = Arc::new(TauriProgressEmitter::new(app.clone()));
     let downloads = DownloadManager::with_ytdlp(
         db,
@@ -1674,6 +1694,22 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         .build()
         .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
 
+    // One line per launch, so a slow startup can be attributed instead of
+    // guessed at. 框架就绪 is everything before our own work begins, which is
+    // the figure a cold WebView2 inflates.
+    //
+    // A failure below never reaches this line, and cannot report its own
+    // timing either: the ActivityLog holding the writer's guard is a local of
+    // this function, so an early return drops it and the writer is already
+    // gone by the time the error surfaces. The panic hook writes to the file
+    // directly and still records the reason and the location.
+    tracing::info!(
+        target: "core",
+        "app: 启动分段 框架就绪 {}，应用状态 {}（其中引擎解析 {}）",
+        fmt_ms(setup_started.duration_since(started)),
+        fmt_ms(setup_started.elapsed()),
+        fmt_ms(sidecar_elapsed)
+    );
     Ok(AppState {
         app_dir,
         auth,
