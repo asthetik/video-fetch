@@ -17,8 +17,10 @@ permissions:
   contents: read
 
 jobs:
+  # Every Linux carrier here tracks release.yml's build matrix: the 22.04 pin
+  # is deliberate (keeps the shipped glibc floor at 2.34) and is explained there.
   frontend:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -31,7 +33,7 @@ jobs:
       - run: npm run test
 
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     # Two clippy passes now, one per profile. The release pass compiles its
     # dependency graph cold: it shares `shared-key: src-tauri` with `unit` and
     # `integration`, whose winning entry holds no release artifacts.
@@ -82,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [ubuntu-22.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -124,7 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest, ubuntu-24.04-arm, windows-11-arm]
+        os: [ubuntu-22.04, macos-latest, windows-latest, ubuntu-22.04-arm, windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -190,7 +192,7 @@ jobs:
         # Keep this list in step with release.yml's: a target the release builds
         # and this does not is one whose release profile goes unverified, and
         # neither workflow would say so.
-        os: [ubuntu-24.04, macos-latest, windows-latest, ubuntu-24.04-arm, windows-11-arm]
+        os: [ubuntu-22.04, macos-latest, windows-latest, ubuntu-22.04-arm, windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -250,7 +252,7 @@ jobs:
           [ "$size" -ge 10000000 ] || { echo "$bin looks like a stub"; exit 1; }
 
   scripts:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

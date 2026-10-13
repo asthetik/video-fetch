@@ -27,10 +27,13 @@ jobs:
           - platform: windows-11-arm
             release_os: Windows
             release_arch: arm64
-          - platform: ubuntu-24.04
+          # Pinned to 22.04 on purpose: the older glibc keeps the floor at 2.34
+          # so Ubuntu 22.04 / Debian 12 / RHEL 9 can run the bundles. This image
+          # retires 2027-04-17 (brownouts from 2027-03-23); migrate before then.
+          - platform: ubuntu-22.04
             release_os: Linux
             release_arch: x86_64
-          - platform: ubuntu-24.04-arm
+          - platform: ubuntu-22.04-arm
             release_os: Linux
             release_arch: arm64
 
