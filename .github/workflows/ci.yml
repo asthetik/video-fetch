@@ -251,6 +251,16 @@ jobs:
           echo "release binary: $bin, $size bytes"
           [ "$size" -ge 10000000 ] || { echo "$bin looks like a stub"; exit 1; }
 
+      - name: Assert the Linux binary keeps the glibc floor
+        # The image the Linux cells run on is what sets this floor, and the
+        # floor is what the CHANGELOG promises: RHEL 9 has glibc 2.34, so a
+        # version need above it means the bundle does not start there. This
+        # is where a dependency bump that raises it gets caught — before a
+        # tag, and not by a user. release.yml asserts the same thing on the
+        # artifact it ships.
+        if: runner.os == 'Linux'
+        run: python scripts/check_glibc_floor.py --max 2.34 src-tauri/target/release/video-fetch
+
   scripts:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
