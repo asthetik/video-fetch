@@ -17,8 +17,9 @@ permissions:
   contents: read
 
 jobs:
-  # Every Linux carrier here tracks release.yml's build matrix: the 22.04 pin
-  # is deliberate (keeps the shipped glibc floor at 2.34) and is explained there.
+  # The Linux cells run on the image release.yml builds on, so what CI tests
+  # is what the release ships: the 22.04 pin is deliberate (it keeps the
+  # shipped glibc floor at 2.34) and is explained there.
   frontend:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
@@ -35,7 +36,7 @@ jobs:
   lint:
     runs-on: ubuntu-22.04
     # Two clippy passes now, one per profile. The release pass compiles its
-    # dependency graph cold: it shares `shared-key: src-tauri` with `unit` and
+    # dependency graph cold: it shares its cache bucket with `unit` and
     # `integration`, whose winning entry holds no release artifacts.
     timeout-minutes: 40
     steps:
@@ -46,7 +47,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          shared-key: src-tauri
+          # The bucket name carries the runner image. rust-cache's key holds
+          # the OS and arch but nothing that moves with the image, so a
+          # `target/` built on another image restores here as an exact match:
+          # the 24.04 -> 22.04 switch left five Linux cells red on that, and
+          # was cleared by purging the whole cache store by hand. `unit` and
+          # `integration` build the same name from `matrix.os`; this job has
+          # no matrix, so the label is spelled out and has to move with
+          # `runs-on` above. (A floating label cannot do this: `macos-latest`
+          # stays put when the image underneath it changes.)
+          shared-key: src-tauri-ubuntu-22.04
       - name: Install Tauri Linux deps
         run: |
           sudo apt-get update
@@ -93,7 +103,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          shared-key: src-tauri
+          # Image-segmented bucket, so no cache entry can cross images; the
+          # name is the one `lint` explains.
+          shared-key: src-tauri-${{ matrix.os }}
       - name: Install Tauri Linux deps
         if: runner.os == 'Linux'
         run: |
@@ -137,7 +149,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          shared-key: src-tauri
+          # Image-segmented bucket, so no cache entry can cross images; the
+          # name is the one `lint` explains.
+          shared-key: src-tauri-${{ matrix.os }}
       - name: Install Tauri Linux deps
         if: runner.os == 'Linux'
         run: |
@@ -206,8 +220,9 @@ jobs:
         with:
           workspaces: src-tauri -> target
           # Its own bucket: the other jobs cache dev-profile artifacts, and one
-          # shared entry would have them evicting each other.
-          shared-key: src-tauri-release
+          # shared entry would have them evicting each other. Image-segmented
+          # the way `lint` explains.
+          shared-key: src-tauri-release-${{ matrix.os }}
           # Save only from the integration branches. The store is capped at
           # 10 GiB for the whole repository and a release entry is measured at
           # 450-550 MB per platform, so a copy written per pull request is both
