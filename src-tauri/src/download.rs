@@ -724,10 +724,12 @@ impl DownloadManager {
             .mark_running_and_pending_as_paused()
     }
 
-    /// Best-effort teardown for app exit: kill every live download's whole
-    /// process group so no yt-dlp second stage (or its ffmpeg) outlives the
-    /// app — dropping the Child alone only reaps the direct stage.
-    pub fn kill_all_children(&self) {
+    /// Kill every live download's whole process group so no yt-dlp second stage
+    /// (or its ffmpeg) outlives the app — dropping the Child alone only reaps
+    /// the direct stage. The kill half of `shutdown_for_exit`, private for the
+    /// same reason `abort_runners` is: either half on its own is a teardown
+    /// that leaves the hazard the other half closes.
+    fn kill_all_children(&self) {
         let ids: Vec<String> = match self.children.lock() {
             Ok(guard) => guard.keys().cloned().collect(),
             Err(_) => return,
@@ -739,16 +741,24 @@ impl DownloadManager {
 
     /// Full teardown for app exit, both halves of one hazard.
     ///
-    /// The kill is why no process outlives the app, but it also frees the
-    /// permit a queued job's runner is parked on: that runner would wake, read
-    /// its row as still Pending, and start a download with no teardown left to
-    /// kill it — the process is moments from ending, so nothing reaps the
-    /// child. Abandoning the runners second closes that window. Rows are left
-    /// untouched on purpose: the next launch's recovery owns the transition to
-    /// Paused, so a quit lands the same way a crash does.
+    /// Abandoning the runners comes first, and that order is the point. Killing
+    /// releases the permit a queued job's runner is parked on, and killing is
+    /// not instant — on Windows each child is a blocking `taskkill` spawn, so
+    /// the loop takes real time. A runner woken inside that window would read
+    /// its row as still Pending and start a download that nothing is left to
+    /// reap, because the process is moments from ending. Aborting first removes
+    /// every candidate before the first permit comes free; an aborted task is
+    /// cancelled, so even a permit dropped while the loop runs wakes nothing
+    /// that can proceed. The kill then reaps the process groups, and no runner
+    /// is left alive to register a child it would miss.
+    ///
+    /// Rows are left untouched on purpose: the next launch's recovery owns the
+    /// transition to Paused, so the rows land the same way a crash's do. (The
+    /// process tree does not: a crash leaves yt-dlp alive, this teardown kills
+    /// it.)
     pub fn shutdown_for_exit(&self) {
-        self.kill_all_children();
         self.abort_runners();
+        self.kill_all_children();
     }
 
     /// Drop every runner task without touching its row — what process exit does
@@ -3201,13 +3211,13 @@ mod tests {
 
     /// App exit must take the whole download process group down with it.
     ///
-    /// Value: protects=the RunEvent::Exit teardown (kill_all_children) and the
-    /// registry walk; fails_when=the walk is a no-op or misses an id — the
-    /// spawned child survives and the registry stays populated;
+    /// Value: protects=shutdown_for_exit's kill half on the verb production
+    /// calls, and its registry walk; fails_when=the walk is a no-op or misses
+    /// an id — the spawned child survives and the registry stays populated;
     /// why_new=exit-time teardown had no coverage; seam=none
     #[cfg(unix)]
     #[tokio::test]
-    async fn kill_all_children_empties_the_registry_and_kills_the_tree() {
+    async fn exit_teardown_empties_the_registry_and_kills_the_tree() {
         let dir = tempfile::tempdir().unwrap();
         let (manager, _rx) = test_manager(
             dir.path(),
@@ -3225,7 +3235,7 @@ mod tests {
             crate::ytdlp::RegisteredChild { token: 1, child },
         );
 
-        manager.kill_all_children();
+        manager.shutdown_for_exit();
         assert!(manager.children.lock().unwrap().is_empty());
 
         let mut dead = false;

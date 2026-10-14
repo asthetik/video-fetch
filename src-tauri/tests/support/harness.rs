@@ -167,10 +167,10 @@ impl Harness {
     }
 
     /// The quit half, split out so a test can hold the window between the quit
-    /// and the relaunch. It is the production teardown verbatim: a real quit
-    /// ends the process, and only that ending retires a runner parked on the
-    /// semaphore, so a harness modeling a quit has to tear down the same way or
-    /// the parked runner wakes on the permit the kill frees.
+    /// and the relaunch. It is the production teardown verbatim: that teardown
+    /// abandons every runner, because a real quit ends the process and nothing
+    /// else retires a runner parked on the semaphore — a harness that killed
+    /// the children only would leave it to wake on the freed permit.
     pub fn quit_clean(&mut self) {
         self.manager.shutdown_for_exit();
     }
