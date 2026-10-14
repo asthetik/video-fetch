@@ -100,6 +100,14 @@ jobs:
           CI: true
         run: npx tauri build
 
+      - name: Assert the Linux binary keeps the glibc floor
+        # The 22.04 pin above is what holds this floor; nothing in the build
+        # itself enforces it. The smoke job in ci.yml checks the same thing
+        # on a pull request, so a floor raised by a dependency bump fails
+        # there first and this is the backstop on the artifact that ships.
+        if: runner.os == 'Linux'
+        run: python scripts/check_glibc_floor.py --max 2.34 src-tauri/target/release/video-fetch
+
       - name: Rename installers for Release
         shell: bash
         env:
