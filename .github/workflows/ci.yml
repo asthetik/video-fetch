@@ -34,7 +34,13 @@ jobs:
       - run: npm run test
 
   lint:
-    runs-on: ubuntu-22.04
+    # A one-cell matrix, and the cell is the point: it is what lets the cache
+    # bucket below come from the same label as `runs-on` instead of being a
+    # second copy of it. The job itself does not vary by platform.
+    strategy:
+      matrix:
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     # Two clippy passes now, one per profile. The release pass compiles its
     # dependency graph cold: it shares its cache bucket with `unit` and
     # `integration`, whose winning entry holds no release artifacts.
@@ -51,12 +57,12 @@ jobs:
           # the OS and arch but nothing that moves with the image, so a
           # `target/` built on another image restores here as an exact match:
           # the 24.04 -> 22.04 switch left five Linux cells red on that, and
-          # was cleared by purging the whole cache store by hand. `unit` and
-          # `integration` build the same name from `matrix.os`; this job has
-          # no matrix, so the label is spelled out and has to move with
-          # `runs-on` above. (A floating label cannot do this: `macos-latest`
-          # stays put when the image underneath it changes.)
-          shared-key: src-tauri-ubuntu-22.04
+          # was cleared by purging the whole cache store by hand. Taking the
+          # name from `matrix.os` is what makes an image change move the key
+          # on its own, which a hand-copied label cannot. (A floating label
+          # cannot either: `macos-latest` stays put when the image underneath
+          # it changes.)
+          shared-key: src-tauri-${{ matrix.os }}
       - name: Install Tauri Linux deps
         run: |
           sudo apt-get update
