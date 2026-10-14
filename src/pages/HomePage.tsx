@@ -47,7 +47,7 @@ export function HomePage({
   authRef.current = authStatus;
 
   const handleResolve = useCallback(
-    async (nextUrl: string, force = false, clearExisting = !force) => {
+    async (nextUrl: string, force = false, clearExisting = !force): Promise<boolean> => {
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
       setLoading(true);
@@ -60,7 +60,7 @@ export function HomePage({
       try {
         const kind = await api.detectUrl(nextUrl);
         if (requestIdRef.current !== requestId) {
-          return;
+          return false;
         }
         if (kind.kind === "space") {
           setSpace({ mid: kind.mid });
@@ -69,7 +69,7 @@ export function HomePage({
           setFormatsError(null);
           setError(null);
           setLoading(false);
-          return;
+          return true;
         }
         if (kind.kind === "invalid_space") {
           setSpace(null);
@@ -78,12 +78,12 @@ export function HomePage({
           setFormatsError(null);
           setError("无效的空间链接");
           setLoading(false);
-          return;
+          return false;
         }
         setSpace(null);
         const result = await api.resolveUrl(nextUrl, force, requestId);
         if (requestIdRef.current !== requestId) {
-          return;
+          return false;
         }
         setMeta(result);
         if (result.formats.length > 0) {
@@ -91,14 +91,16 @@ export function HomePage({
           setFormatsError(null);
         }
         // Empty formats: leave formatsLoading/formatsError to complete / formats_failed events.
+        return true;
       } catch (err) {
         if (requestIdRef.current !== requestId) {
-          return;
+          return false;
         }
         if (!metaRef.current) {
           setFormatsLoading(false);
           setError(err instanceof Error ? err.message : String(err));
         }
+        return false;
       } finally {
         if (requestIdRef.current === requestId) {
           setLoading(false);
@@ -198,7 +200,7 @@ export function HomePage({
         loading={loading}
         error={error}
         onUrlChange={setUrl}
-        onResolve={(next) => void handleResolve(next)}
+        onResolve={(next) => handleResolve(next)}
       />
 
       {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
