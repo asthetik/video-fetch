@@ -246,11 +246,29 @@ pub struct DownloadManager {
     semaphore: Arc<Semaphore>,
     /// Configured max concurrent downloads (matches semaphore capacity accounting).
     concurrency_limit: Arc<AtomicUsize>,
+    /// Permits currently issued (the semaphore's real capacity). add_permits
+    /// raises this, forget lowers it; reconcile_semaphore converges it to
+    /// `concurrency_limit`, including the permits a shrink could not reclaim
+    /// while jobs held them.
+    issued_permits: Arc<AtomicUsize>,
     running_tasks: RunningTasks,
     stop_flags: StopFlags,
     runner_tokens: RunnerTokens,
     /// Source of runner tokens; starts at zero so no token is ever `0`.
     next_token: Arc<AtomicU64>,
+}
+
+/// Runs the semaphore bookkeeping once a runner's permit is back in the pool:
+/// the permits a shrink could not reclaim while jobs held them are removed
+/// here, so capacity converges to the configured limit instead of drifting.
+struct ReconcileOnDrop<'a> {
+    manager: &'a DownloadManager,
+}
+
+impl Drop for ReconcileOnDrop<'_> {
+    fn drop(&mut self) {
+        self.manager.reconcile_semaphore();
+    }
 }
 
 /// Structured outcome of one enqueue attempt. The single-video command maps
@@ -303,6 +321,7 @@ impl DownloadManager {
             work_root,
             semaphore: Arc::new(Semaphore::new(concurrency)),
             concurrency_limit: Arc::new(AtomicUsize::new(concurrency)),
+            issued_permits: Arc::new(AtomicUsize::new(concurrency)),
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             stop_flags,
             runner_tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -811,23 +830,45 @@ impl DownloadManager {
     }
 
     /// Grow/shrink the download semaphore to match the configured concurrency.
+    /// The limit is a target, not a snapshot: permits still held by running
+    /// jobs cannot be reclaimed at change time, so the real capacity converges
+    /// in `reconcile_semaphore` as jobs finish. Growth is measured against the
+    /// issued permits, never against the previous target — the two differ
+    /// whenever a shrink is still owed, and counting from the target is how
+    /// capacity once crept upward with every shrink/restore toggle.
     fn resize_concurrency(&self, new_limit: usize) {
-        let old = self.concurrency_limit.swap(new_limit, Ordering::SeqCst);
-        if new_limit > old {
-            self.semaphore.add_permits(new_limit - old);
-        } else if new_limit < old {
-            // Permanently remove idle permits. If permits are currently held by
-            // running jobs, try_acquire fails and we leave the extra capacity
-            // until the next settings change (or process restart).
-            let mut to_remove = old - new_limit;
-            while to_remove > 0 {
-                match self.semaphore.try_acquire() {
-                    Ok(permit) => {
-                        permit.forget();
-                        to_remove -= 1;
-                    }
-                    Err(_) => break,
+        self.concurrency_limit.store(new_limit, Ordering::SeqCst);
+        self.reconcile_semaphore();
+    }
+
+    /// Move the issued permits toward `concurrency_limit`. Runs at every
+    /// settings change and at every runner release, so a shrink that was
+    /// impossible at change time still lands once the held permits return.
+    fn reconcile_semaphore(&self) {
+        loop {
+            let target = self.concurrency_limit.load(Ordering::SeqCst);
+            let issued = self.issued_permits.load(Ordering::SeqCst);
+            if issued < target {
+                if self
+                    .issued_permits
+                    .compare_exchange(issued, target, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    self.semaphore.add_permits(target - issued);
                 }
+                continue;
+            }
+            if issued == target {
+                return;
+            }
+            match self.semaphore.try_acquire() {
+                Ok(permit) => {
+                    permit.forget();
+                    self.issued_permits.fetch_sub(1, Ordering::SeqCst);
+                }
+                // Every permit is held: the runners holding them pass through
+                // here when they finish, and the shrink lands then.
+                Err(_) => return,
             }
         }
     }
@@ -929,6 +970,9 @@ impl DownloadManager {
     }
 
     async fn run_job(&self, job_id: String, token: u64) {
+        // Declared before the permit so it drops after the permit returns:
+        // the shrink bookkeeping must see the freed permit.
+        let _reconcile = ReconcileOnDrop { manager: self };
         let _permit = match self.semaphore.acquire().await {
             Ok(permit) => permit,
             Err(_) => return,
@@ -2536,6 +2580,139 @@ mod tests {
             .find(|j| j.id == job.id)
             .unwrap();
         assert_eq!(done.status, JobStatus::Done);
+    }
+
+    /// Value: protects=the semaphore's real capacity converging to the
+    /// configured limit on both changes; fails_when=the release-time
+    /// reconciliation is removed (a shrink at full load never lands, and a
+    /// later restore stacks phantom permits); why_new=try_acquire-based
+    /// shrink dropped every reclaim at full load while the limit counter
+    /// moved anyway, silently inflating capacity; seam=none
+    #[tokio::test]
+    async fn a_full_load_shrink_takes_effect_once_the_held_jobs_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::slow_success(1_500)),
+        );
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 2;
+        manager.update_settings(settings.clone()).unwrap();
+
+        for (id, page) in [("job-shrink-a", 1), ("job-shrink-b", 2)] {
+            let mut job = sample_job(id);
+            job.page_index = page;
+            manager.enqueue(job, false).unwrap();
+        }
+        let mut saw_full_load = false;
+        for _ in 0..100 {
+            let jobs = manager.list().unwrap();
+            if jobs.iter().filter(|j| j.status == JobStatus::Running).count() == 2 {
+                saw_full_load = true;
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(saw_full_load, "expected both jobs running under concurrency 2");
+
+        // Shrink at full load: nothing can be reclaimed right now.
+        settings.concurrency = 1;
+        manager.update_settings(settings).unwrap();
+        for _ in 0..250 {
+            let jobs = manager.list().unwrap();
+            if jobs.iter().all(|j| j.status == JobStatus::Done) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        // The shrink must have landed once the held permits came back.
+        for (id, page) in [("job-shrink-c", 3), ("job-shrink-d", 4)] {
+            let mut job = sample_job(id);
+            job.page_index = page;
+            manager.enqueue(job, false).unwrap();
+        }
+        let mut max_running = 0;
+        for _ in 0..250 {
+            let jobs = manager.list().unwrap();
+            let running = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+            max_running = max_running.max(running);
+            if jobs
+                .iter()
+                .filter(|j| matches!(j.status, JobStatus::Running | JobStatus::Pending))
+                .count()
+                == 0
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            max_running <= 1,
+            "the shrink to 1 never landed: saw {max_running} concurrent"
+        );
+    }
+
+    /// Value: protects=the limit counter and the real permit count staying in
+    /// step across a shrink-then-restore; fails_when=resize computes growth
+    /// from the counter instead of the issued permits (2→1 at full load→2
+    /// creeps the real capacity to 3); why_new=the drift was invisible to the
+    /// per-change tests, it only shows across a toggle; seam=none
+    #[tokio::test]
+    async fn restoring_the_limit_after_a_full_load_shrink_does_not_inflate_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::slow_success(1_500)),
+        );
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 2;
+        manager.update_settings(settings.clone()).unwrap();
+
+        for (id, page) in [("job-toggle-a", 1), ("job-toggle-b", 2), ("job-toggle-c", 3)] {
+            let mut job = sample_job(id);
+            job.page_index = page;
+            manager.enqueue(job, false).unwrap();
+        }
+        let mut saw_full_load = false;
+        for _ in 0..100 {
+            let jobs = manager.list().unwrap();
+            let running = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+            let pending = jobs.iter().filter(|j| j.status == JobStatus::Pending).count();
+            if running == 2 && pending == 1 {
+                saw_full_load = true;
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(saw_full_load, "expected two running and one pending");
+
+        settings.concurrency = 1;
+        manager.update_settings(settings.clone()).unwrap();
+        settings.concurrency = 2;
+        manager.update_settings(settings).unwrap();
+
+        let mut max_running = 0;
+        for _ in 0..250 {
+            let jobs = manager.list().unwrap();
+            let running = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+            max_running = max_running.max(running);
+            if jobs
+                .iter()
+                .filter(|j| matches!(j.status, JobStatus::Running | JobStatus::Pending))
+                .count()
+                == 0
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            max_running <= 2,
+            "capacity inflated across the toggle: saw {max_running} concurrent"
+        );
     }
 
     #[tokio::test]
