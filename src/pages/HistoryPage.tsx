@@ -139,14 +139,22 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     if (!job.output_path) {
       return;
     }
-    await api.openPath(job.output_path);
+    try {
+      await api.openPath(job.output_path);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function handleOpenFolder(job: DownloadJob) {
     if (!job.output_path) {
       return;
     }
-    await api.openPath(parentDir(job.output_path));
+    try {
+      await api.openPath(parentDir(job.output_path));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function handleCancel(id: string) {

@@ -217,7 +217,11 @@ export function DownloadQueue({
     if (!job.output_path) {
       return;
     }
-    await api.openPath(parentDir(job.output_path));
+    try {
+      await api.openPath(parentDir(job.output_path));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function handleCancelAll() {

@@ -28,12 +28,23 @@ const AUTOSAVE_DEBOUNCE_MS = 400;
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const { mode, setMode } = useTheme();
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSettingsRef = useRef<AppSettings | null>(null);
+
+  const fetchSettings = useCallback(() => {
+    setLoadError(null);
+    void api
+      .getSettings()
+      .then(setSettings)
+      .catch((err) =>
+        setLoadError(err instanceof Error ? err.message : String(err)),
+      );
+  }, []);
 
   const persist = useCallback(async (next: AppSettings) => {
     try {
@@ -45,7 +56,7 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    void api.getSettings().then(setSettings);
+    fetchSettings();
   }, []);
 
   useEffect(() => {
@@ -132,6 +143,21 @@ export function SettingsPage() {
   }
 
   if (!settings) {
+    if (loadError) {
+      return (
+        <p className="url-hint error">
+          加载设置失败：{loadError}
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ marginLeft: "0.5rem" }}
+            onClick={fetchSettings}
+          >
+            重试
+          </button>
+        </p>
+      );
+    }
     return <p className="queue-empty">加载设置中…</p>;
   }
 

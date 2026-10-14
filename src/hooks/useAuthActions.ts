@@ -37,9 +37,16 @@ export function useAuthActions(
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let active = true;
-    void api.getAuthStatus().then((next) => {
-      if (active) applyStatus(next);
-    });
+    void api
+      .getAuthStatus()
+      .then((next) => {
+        if (active) applyStatus(next);
+      })
+      .catch(() => {
+        // Never fall through to the initial "logged_out": a failed fetch would
+        // otherwise read as "not logged in" and misguide download decisions.
+        if (active) setHint("登录状态获取失败，请稍后重试");
+      });
     void listen<AuthStatusType>("auth://status", (event) => {
       applyStatus(event.payload);
       if (event.payload === "logged_in") {

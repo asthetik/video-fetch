@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 import { FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "../lib/tauri";
 import { parseLogLine } from "../lib/activityLog";
@@ -110,7 +111,11 @@ export function LogsPage() {
               label="打开日志目录"
               action="open-log-dir"
               disabled={!dir}
-              onClick={() => void api.openPath(dir)}
+              onClick={() =>
+                void api.openPath(dir).catch((err) =>
+                  toast.error(err instanceof Error ? err.message : String(err)),
+                )
+              }
             />
             <IconButton
               icon={Trash2}
