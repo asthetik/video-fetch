@@ -1,6 +1,8 @@
 mod activity_log;
 mod auth;
 mod bilibili_view;
+#[cfg(test)]
+mod build_pins;
 mod commands;
 mod cookies;
 mod db;
