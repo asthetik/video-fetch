@@ -294,6 +294,43 @@ pub fn default_save_dir(app: &AppHandle, app_dir: &Path) -> PathBuf {
         .unwrap_or_else(|_| fallback_save_dir(app_dir))
 }
 
+/// Decide the startup save directory and whether the settings file changes.
+/// Returns `(save_dir for this session, persist)`.
+///
+/// Bootstrap (empty setting) adopts the OS default — or the app fallback when
+/// the default cannot round-trip through the JSON settings (non-UTF-8 path) —
+/// and persists. A configured directory that cannot be created falls back for
+/// THIS SESSION ONLY and must not persist: a transient failure (unplugged
+/// external drive, network share down) rewriting the user's save location is
+/// exactly the silent data-shift this shape prevents.
+fn startup_save_dir(app_dir: &Path, configured: &str, default_dir: &Path) -> (String, bool) {
+    if configured.is_empty() {
+        let chosen = match default_dir.to_str() {
+            Some(dir) => dir.to_string(),
+            None => {
+                // Explicitly not to_string_lossy: baking U+FFFD garbage into
+                // the setting would fail every following startup.
+                tracing::warn!(
+                    target: "core",
+                    "settings: 默认保存目录不是合法 UTF-8，改用回退目录"
+                );
+                fallback_save_dir(app_dir).to_string_lossy().into_owned()
+            }
+        };
+        return (chosen, true);
+    }
+    if std::fs::create_dir_all(configured).is_err() {
+        let fb = fallback_save_dir(app_dir);
+        let _ = std::fs::create_dir_all(&fb);
+        tracing::warn!(
+            target: "core",
+            "settings: 保存目录不可用（{configured}），本次会话使用回退目录"
+        );
+        return (fb.to_string_lossy().into_owned(), false);
+    }
+    (configured.to_string(), false)
+}
+
 fn rematerialize_cookies(state: &AppState) -> AppResult<Option<PathBuf>> {
     state.auth.materialize_cookies_file()
 }
@@ -1610,14 +1647,13 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let cookies_file = cache_dir.join("cookies.txt");
 
     let mut settings = settings_store::load_settings(&app_dir)?;
-    if settings.save_dir.is_empty() {
-        settings.save_dir = default_save_dir(app, &app_dir).to_string_lossy().into();
-        let _ = settings_store::save_settings(&app_dir, &settings);
-    }
-    if std::fs::create_dir_all(&settings.save_dir).is_err() {
-        let fb = fallback_save_dir(&app_dir);
-        std::fs::create_dir_all(&fb)?;
-        settings.save_dir = fb.to_string_lossy().into();
+    let (session_save_dir, persist_save_dir) = startup_save_dir(
+        &app_dir,
+        &settings.save_dir,
+        &default_save_dir(app, &app_dir),
+    );
+    settings.save_dir = session_save_dir;
+    if persist_save_dir {
         let _ = settings_store::save_settings(&app_dir, &settings);
     }
 
@@ -1946,6 +1982,62 @@ mod tests {
         assert_eq!(
             page_url("https://www.bilibili.com/video/BV1xx?p=2", 1),
             "https://www.bilibili.com/video/BV1xx"
+        );
+    }
+
+    /// Value: protects=the save-dir startup decision: a configured location
+    /// that fails only transiently must not be rewritten; fails_when=the
+    /// fallback path persists (the old bug — an unplugged drive permanently
+    /// moved every download into app data) or the session does not fall back;
+    /// why_new=the rewrite was silent, sticky and untested; seam=none
+    #[test]
+    fn a_transiently_unusable_save_dir_falls_back_for_the_session_only() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let default_dir = app_dir.path().join("Downloads");
+        // A regular file in the way: create_dir_all under it must fail.
+        let blocker = app_dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let configured = blocker.join("downloads").to_string_lossy().into_owned();
+        let (session, persist) = startup_save_dir(app_dir.path(), &configured, &default_dir);
+        assert!(!persist, "a transient failure must not rewrite the setting");
+        assert_eq!(
+            session,
+            fallback_save_dir(app_dir.path()).to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn an_empty_save_dir_bootstraps_from_the_default_and_persists() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let default_dir = app_dir.path().join("Downloads");
+        let (session, persist) = startup_save_dir(app_dir.path(), "", &default_dir);
+        assert!(persist);
+        assert_eq!(session, default_dir.to_string_lossy());
+    }
+
+    #[test]
+    fn an_existing_save_dir_is_kept_and_never_rewritten() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let configured_dir = tempfile::tempdir().unwrap();
+        let configured = configured_dir.path().to_string_lossy().into_owned();
+        let default_dir = app_dir.path().join("Downloads");
+        let (session, persist) = startup_save_dir(app_dir.path(), &configured, &default_dir);
+        assert!(!persist);
+        assert_eq!(session, configured);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_default_dir_takes_the_fallback_instead_of_lossy_garbage() {
+        use std::os::unix::ffi::OsStringExt;
+        let app_dir = tempfile::tempdir().unwrap();
+        let weird = PathBuf::from(std::ffi::OsString::from_vec(b"bad/\xff\xfe".to_vec()));
+        let (session, persist) = startup_save_dir(app_dir.path(), "", &weird);
+        assert!(persist);
+        assert!(!session.contains('\u{FFFD}'), "no lossy garbage: {session}");
+        assert_eq!(
+            session,
+            fallback_save_dir(app_dir.path()).to_string_lossy()
         );
     }
 
