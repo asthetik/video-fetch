@@ -4015,9 +4015,11 @@ mod tests {
             err.contains(&product.to_string_lossy().into_owned()),
             "the message must name where the finished download sits: {err}"
         );
+        // Read through `ok()` so a destination that a regression deleted fails
+        // this assertion with its own message rather than a NotFound panic.
         assert_eq!(
-            std::fs::read(&occupied).unwrap(),
-            b"someone else's file",
+            std::fs::read(&occupied).ok().as_deref(),
+            Some(&b"someone else's file"[..]),
             "a blocked move must not touch the file already at the destination"
         );
         assert!(product.is_file(), "the product must stay in the work dir");
