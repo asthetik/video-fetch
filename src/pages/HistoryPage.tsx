@@ -65,6 +65,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
+  const [pendingCancel, setPendingCancel] = useState<DownloadJob | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
@@ -244,7 +245,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
               icon={X}
               label="取消"
               action="cancel-job"
-              onClick={() => void handleCancel(job.id)}
+              onClick={() => setPendingCancel(job)}
             />
           )}
           {job.status === "failed" && (
@@ -362,6 +363,23 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
           if (!bulkBusy) setConfirmClear(false);
         }}
         onConfirm={() => void handleClearFinished()}
+      />
+
+      <ConfirmDialog
+        open={pendingCancel !== null}
+        title="取消任务"
+        message="将取消该任务，已下载的部分会被删除。"
+        confirmLabel="取消任务"
+        cancelLabel="关闭"
+        danger
+        onCancel={() => setPendingCancel(null)}
+        onConfirm={() => {
+          const job = pendingCancel;
+          setPendingCancel(null);
+          if (job) {
+            void handleCancel(job.id);
+          }
+        }}
       />
 
       <DeleteConfirmDialog

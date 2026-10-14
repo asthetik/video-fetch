@@ -77,7 +77,7 @@ export function DownloadQueue({
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
-  const [pendingPauseCancel, setPendingPauseCancel] = useState<DownloadJob | null>(null);
+  const [pendingCancel, setPendingCancel] = useState<DownloadJob | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
@@ -293,7 +293,7 @@ export function DownloadQueue({
                   icon={X}
                   label="取消"
                   action="cancel-job"
-                  onClick={() => void handleCancel(job.id)}
+                  onClick={() => setPendingCancel(job)}
                 />
               </>
             )}
@@ -309,7 +309,7 @@ export function DownloadQueue({
                   icon={X}
                   label="取消"
                   action="cancel-job"
-                  onClick={() => setPendingPauseCancel(job)}
+                  onClick={() => setPendingCancel(job)}
                 />
               </>
             )}
@@ -454,16 +454,16 @@ export function DownloadQueue({
       />
 
       <ConfirmDialog
-        open={pendingPauseCancel !== null}
-        title="取消暂停的任务"
-        message="将取消该暂停任务，已下载的部分会被删除。"
+        open={pendingCancel !== null}
+        title="取消任务"
+        message="将取消该任务，已下载的部分会被删除。"
         confirmLabel="取消任务"
         cancelLabel="关闭"
         danger
-        onCancel={() => setPendingPauseCancel(null)}
+        onCancel={() => setPendingCancel(null)}
         onConfirm={() => {
-          const job = pendingPauseCancel;
-          setPendingPauseCancel(null);
+          const job = pendingCancel;
+          setPendingCancel(null);
           if (job) {
             void handleCancel(job.id);
           }
