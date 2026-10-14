@@ -1024,6 +1024,10 @@ pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishe
 #[tauri::command]
 pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 重试 {id}");
+    // Same as enqueue: a stale or missing cookies.txt would silently send
+    // yt-dlp out as a guest (360p / login errors) while the UI shows LoggedIn.
+    // A materialize failure is this command's error, never a guest downgrade.
+    let _ = rematerialize_cookies(&state)?;
     state
         .downloads
         .retry(&id)
@@ -1042,6 +1046,8 @@ pub fn pause_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJo
 #[tauri::command]
 pub fn resume_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 继续 {id}");
+    // Same as enqueue: see retry_job for why the jar is re-materialized here.
+    let _ = rematerialize_cookies(&state)?;
     state
         .downloads
         .resume(&id)
@@ -1675,7 +1681,15 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     // Open the DB only after the subscriber exists so migration records land.
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
-    let _ = auth.materialize_cookies_file();
+    // Loud, not fatal: the app must still start, but a failure here used to
+    // disappear entirely and leave the session downloading as a guest.
+    if let Err(e) = auth.materialize_cookies_file() {
+        tracing::warn!(
+            target: "core",
+            "cookies: 启动物化失败（下载前将重试）: {}",
+            crate::activity_log::clean_log_message(&e.to_string())
+        );
+    }
 
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
@@ -2039,6 +2053,38 @@ mod tests {
             session,
             fallback_save_dir(app_dir.path()).to_string_lossy()
         );
+    }
+
+    /// Value: protects=every command that starts or restarts a download
+    /// re-materializing the cookie jar first; fails_when=any listed command's
+    /// body drops its materialize call (resume/retry once launched yt-dlp as
+    /// a guest after a restart while the UI showed LoggedIn); why_new=command
+    /// bodies wrap a Tauri State and are not unit-testable, and the wiring
+    /// already broke silently once; seam=none
+    #[test]
+    fn every_download_start_command_rematerializes_cookies() {
+        let src = include_str!("commands.rs");
+        for name in [
+            "enqueue_download",
+            "space_enqueue_batch",
+            "resolve_url",
+            "retry_job",
+            "resume_job",
+        ] {
+            let start = src
+                .find(&format!("\npub fn {name}("))
+                .or_else(|| src.find(&format!("\npub async fn {name}(")))
+                .unwrap_or_else(|| panic!("{name} not found"));
+            let rest = &src[start + 1..];
+            let body = match rest.find("\npub ") {
+                Some(end) => &rest[..end],
+                None => rest,
+            };
+            assert!(
+                body.contains("materialize"),
+                "{name} must re-materialize the cookie jar before starting a download"
+            );
+        }
     }
 
     #[test]
