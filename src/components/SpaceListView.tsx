@@ -73,6 +73,9 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     setItems([]);
     setSummary(null);
     setFailedItems([]);
+    // The selection is scoped to the current view: rows that disappear under a
+    // new keyword/order must not survive into "下载已选" unseen.
+    setSelected(new Map());
     void loadPage(1, false, keyword, order);
     void api
       .spaceInfo(mid)
