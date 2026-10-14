@@ -713,11 +713,15 @@ impl DownloadManager {
         Ok(job)
     }
 
-    /// Rows left Running when the app quit have no runner after a relaunch;
+    /// Rows left Running or Pending when the app quit have no runner after a
+    /// relaunch (a Pending row's queued runner died with the process too);
     /// surface them as Paused (progress and .part files are kept; resume picks
-    /// them up) instead of leaving a zombie running row with a frozen bar.
+    /// them up) instead of leaving zombie rows that nothing will ever start.
     pub fn reconcile_interrupted_runs(&self) -> AppResult<u64> {
-        self.db.lock().map_err(lock_err)?.mark_running_as_paused()
+        self.db
+            .lock()
+            .map_err(lock_err)?
+            .mark_running_and_pending_as_paused()
     }
 
     /// Best-effort teardown for app exit: kill every live download's whole
@@ -730,6 +734,23 @@ impl DownloadManager {
         };
         for id in ids {
             kill_download(&self.children, &id);
+        }
+    }
+
+    /// Abandon every runner task without touching its row — what process exit
+    /// does for free. A runner parked on the semaphore has no child to kill and
+    /// no checkpoint to reach, so no command can retire it: killing the
+    /// children only frees the permit it is parked on. Test-only: the harness
+    /// models a quit with it (see `tests/support/harness.rs`), or the parked
+    /// runner wakes up and downloads beside the one the relaunch spawns.
+    #[cfg(feature = "test-utils")]
+    pub fn abort_runners(&self) {
+        let handles: Vec<JoinHandle<()>> = match self.running_tasks.lock() {
+            Ok(mut tasks) => tasks.drain().map(|(_, (_, handle))| handle).collect(),
+            Err(_) => return,
+        };
+        for handle in handles {
+            handle.abort();
         }
     }
 
@@ -3084,16 +3105,17 @@ mod tests {
         );
     }
 
-    /// A relaunch must not leave zombie running rows: interrupted runs come
-    /// back as paused with their progress kept, and only Running rows change.
+    /// A relaunch must not leave zombie rows: interrupted runs and queued
+    /// pendings come back as paused with their progress kept, and only those
+    /// two statuses flip.
     ///
     /// Value: protects=the startup reconciliation build_app_state runs, and its
-    /// status filter; fails_when=mark_running_as_paused widens or narrows its
-    /// WHERE (pending/paused/done rows flipped, or the running row left
-    /// behind); why_new=quit-while-running previously left a frozen
-    /// running row with no runner and had no coverage; seam=none
+    /// status filter; fails_when=mark_running_and_pending_as_paused widens or
+    /// narrows its WHERE (paused/done rows flipped, or running/pending rows
+    /// left behind); why_new=quit-while-running left a frozen running row and
+    /// quit-while-pending a forever-waiting one, neither covered; seam=none
     #[test]
-    fn reconcile_interrupted_runs_turns_only_running_into_paused() {
+    fn reconcile_interrupted_runs_turns_running_and_pending_into_paused() {
         let dir = tempfile::tempdir().unwrap();
         let (manager, _rx) = test_manager(
             dir.path(),
@@ -3112,7 +3134,7 @@ mod tests {
             manager.db.lock().unwrap().insert_job(&job).unwrap();
         }
 
-        assert_eq!(manager.reconcile_interrupted_runs().unwrap(), 1);
+        assert_eq!(manager.reconcile_interrupted_runs().unwrap(), 2);
 
         let jobs = manager.list().unwrap();
         let by_id = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
@@ -3122,7 +3144,9 @@ mod tests {
             (run.progress - 0.42).abs() < f64::EPSILON,
             "progress must survive the interrupted-to-paused flip"
         );
-        assert_eq!(by_id("pending-1").status, JobStatus::Pending);
+        // A pending row lost its queued runner to the restart too; it must be
+        // resumable, not a forever-waiting zombie.
+        assert_eq!(by_id("pending-1").status, JobStatus::Paused);
         assert_eq!(by_id("paused-1").status, JobStatus::Paused);
         assert_eq!(by_id("done-1").status, JobStatus::Done);
     }
