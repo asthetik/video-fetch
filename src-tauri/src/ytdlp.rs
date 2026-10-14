@@ -1965,6 +1965,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             format_id: "80".into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: String::new(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: crate::models::JobStatus::Running,
             progress: 0.0,

@@ -792,6 +792,7 @@ pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppRes
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title: title.clone(),
+            uploader: uploader.clone(),
             output_template: page_template,
             status: JobStatus::Pending,
             progress: 0.0,
@@ -921,6 +922,9 @@ pub async fn space_enqueue_batch(
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title,
+            // Batch enqueue has no per-video resolve, so no uploader name is at
+            // hand; leave it empty and predict the path the same way below.
+            uploader: String::new(),
             output_template: settings.filename_template.clone(),
             status: JobStatus::Pending,
             progress: 0.0,
