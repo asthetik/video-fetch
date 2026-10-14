@@ -251,6 +251,10 @@ pub struct DownloadManager {
     /// `concurrency_limit`, including the permits a shrink could not reclaim
     /// while jobs held them.
     issued_permits: Arc<AtomicUsize>,
+    /// Serializes permit bookkeeping: the CAS-then-add window in
+    /// reconcile_semaphore is fine when a single reconciler runs at a time,
+    /// and a concurrent shrink inside that window could over-issue.
+    reconcile_lock: Arc<Mutex<()>>,
     running_tasks: RunningTasks,
     stop_flags: StopFlags,
     runner_tokens: RunnerTokens,
@@ -322,6 +326,7 @@ impl DownloadManager {
             semaphore: Arc::new(Semaphore::new(concurrency)),
             concurrency_limit: Arc::new(AtomicUsize::new(concurrency)),
             issued_permits: Arc::new(AtomicUsize::new(concurrency)),
+            reconcile_lock: Arc::new(Mutex::new(())),
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             stop_flags,
             runner_tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -847,6 +852,9 @@ impl DownloadManager {
     /// settings change and at every runner release, so a shrink that was
     /// impossible at change time still lands once the held permits return.
     fn reconcile_semaphore(&self) {
+        let Ok(_guard) = self.reconcile_lock.lock() else {
+            return;
+        };
         loop {
             let target = self.concurrency_limit.load(Ordering::SeqCst);
             let issued = self.issued_permits.load(Ordering::SeqCst);

@@ -43,8 +43,8 @@ export function useAuthActions(
         if (active) applyStatus(next);
       })
       .catch(() => {
-        // Never fall through to the initial "logged_out": a failed fetch would
-        // otherwise read as "not logged in" and misguide download decisions.
+        // Say the fetch failed. (status stays at its initial "logged_out"
+        // until a later fetch or event lands — the hint is the only signal.)
         if (active) setHint("登录状态获取失败，请稍后重试");
       });
     void listen<AuthStatusType>("auth://status", (event) => {

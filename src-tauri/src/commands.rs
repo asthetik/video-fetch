@@ -659,16 +659,10 @@ pub async fn resolve_url(
     }
     for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
         if let Err(e) = state.downloads.upsert_resolve_cache(&key, &final_meta, now) {
-            // Same channel as the fallback failure: a cache write error after
-            // the formats arrived must not leave the spinner running.
-            let _ = app.emit(
-                RESOLVE_FORMATS_FAILED_EVENT,
-                &ResolveFormatsFailedEvent {
-                    request_id,
-                    error: e.to_string(),
-                },
-            );
-            return Err(e);
+            // Best-effort: the resolve itself succeeded and the meta below is
+            // fully usable — failing here used to surface as "清晰度获取失败"
+            // and disable every download button over a cache-table error.
+            warn_cmd("resolve: 缓存写入失败", &e);
         }
     }
     let _ = app.emit(
@@ -1015,7 +1009,11 @@ pub async fn space_enqueue_batch(
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title,
-            uploader: args.uploader.clone(),
+            // Empty means unknown (space_info can fail): store None so the
+            // prediction treats it exactly like a legacy row.
+            uploader: (!args.uploader.as_deref().unwrap_or("").is_empty())
+                .then(|| args.uploader.clone())
+                .flatten(),
             output_template: settings.filename_template.clone(),
             status: JobStatus::Pending,
             progress: 0.0,
@@ -1137,6 +1135,8 @@ pub async fn pause_all_jobs(state: State<'_, AppState>) -> AppResult<PauseAllRes
 
 #[tauri::command]
 pub async fn resume_all_jobs(state: State<'_, AppState>) -> AppResult<ResumeAllResult> {
+    // Same as resume_job: every runner this starts must see a fresh jar.
+    let _ = rematerialize_cookies(&state)?;
     let downloads = state.downloads.clone();
     let result = tokio::task::spawn_blocking(move || downloads.resume_all())
         .await
@@ -2328,6 +2328,7 @@ mod tests {
             "resolve_url",
             "retry_job",
             "resume_job",
+            "resume_all_jobs",
         ] {
             let start = src
                 .find(&format!("\npub fn {name}("))
