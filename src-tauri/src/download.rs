@@ -1268,7 +1268,17 @@ impl DownloadManager {
             return Err("下载相对路径非法，已拒绝写出保存目录外".into());
         }
         let dest = save_dir.join(&rel);
-        fsutil::relocate_file(work_path, &dest).map_err(|e| format!("搬迁到保存目录失败: {e}"))?;
+        // Name both ends when the move cannot land. The destination is what the
+        // user has to deal with; the work dir is where the finished download
+        // stays until they do, and the UI never shows that path — a bare
+        // "destination exists" leaves them with an undeliverable download and
+        // no way to find it.
+        fsutil::relocate_file(work_path, &dest).map_err(|e| {
+            format!(
+                "搬迁到保存目录失败: {e}；下载好的文件仍在 {}",
+                work_path.display()
+            )
+        })?;
         let _ = fsutil::remove_job_work_dir(&self.work_root, job_id);
         let mut done = running.clone();
         done.status = JobStatus::Done;
@@ -3956,6 +3966,61 @@ mod tests {
             "the resumed row must be left alone"
         );
         assert!(owns_job(&manager.runner_tokens, "job-late", owner));
+    }
+
+    /// A relocation that cannot land has to name both ends: the destination the
+    /// user must deal with, and the work dir holding the finished download —
+    /// nothing in the UI ever shows that directory, so a bare "destination
+    /// exists" leaves them with an undeliverable file and no way to find it.
+    /// The blocked move must also leave both files alone.
+    ///
+    /// Value: protects=complete_relocation's failure message and its
+    /// no-clobber behaviour; fails_when=the message drops the work path (the
+    /// download is stranded invisibly) or the move overwrites the file already
+    /// at the destination; why_new=the relocation tests cover a successful move
+    /// and the ownership check, never the failure text; seam=none
+    #[test]
+    fn a_blocked_relocation_names_the_destination_and_the_stranded_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let mut job = sample_job("job-blocked");
+        job.video_id = "BV1blocked".into();
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        let work = fsutil::work_dir_for(&work_root, "job-blocked");
+        std::fs::create_dir_all(&work).unwrap();
+        let product = work.join("demo.mp4");
+        std::fs::write(&product, b"video").unwrap();
+        let occupied = save_dir.join("demo.mp4");
+        std::fs::write(&occupied, b"someone else's file").unwrap();
+
+        let token = manager.mint_runner_token("job-blocked");
+        let err = manager
+            .complete_relocation("job-blocked", token, &job, &product, &save_dir)
+            .unwrap_err();
+
+        assert!(
+            err.contains(&occupied.to_string_lossy().into_owned()),
+            "the message must name the blocked destination: {err}"
+        );
+        assert!(
+            err.contains(&product.to_string_lossy().into_owned()),
+            "the message must name where the finished download sits: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&occupied).unwrap(),
+            b"someone else's file",
+            "a blocked move must not touch the file already at the destination"
+        );
+        assert!(product.is_file(), "the product must stay in the work dir");
     }
 
     /// The same race one step later: the runner a pause aborted can already be
