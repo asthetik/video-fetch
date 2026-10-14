@@ -80,6 +80,8 @@ pub struct AppState {
     /// later (the Bilibili login window) read it at creation so they do not
     /// lag one switch behind.
     pub window_theme: std::sync::Mutex<WindowTheme>,
+    /// Memoized openable-root resolution, keyed by its raw inputs.
+    pub openable_roots_cache: std::sync::Mutex<Option<OpenableRootsCache>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,6 +213,11 @@ fn warn_cmd(scope: &str, e: &AppError) {
         "{scope}: {}",
         crate::activity_log::clean_log_message(&e.to_string())
     );
+}
+
+/// Map a panicked blocking task to the same error family as command failures.
+fn join_err(e: tokio::task::JoinError) -> AppError {
+    AppError::Message(format!("任务异常终止: {e}"))
 }
 
 fn normalize_audio_format(value: Option<String>) -> AppResult<Option<String>> {
@@ -757,7 +764,12 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
 }
 
 #[tauri::command]
-pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppResult<DownloadJob> {
+// Async so the per-item DB/disk loop never blocks the main thread on large
+// batches (same shape as space_enqueue_batch).
+pub async fn enqueue_download(
+    state: State<'_, AppState>,
+    args: EnqueueArgs,
+) -> AppResult<DownloadJob> {
     if args.page_indexes.is_empty() {
         return Err(AppError::Message("请至少选择一个分 P".into()));
     }
@@ -993,19 +1005,25 @@ pub fn list_jobs(state: State<'_, AppState>) -> AppResult<Vec<DownloadJob>> {
 }
 
 #[tauri::command]
-pub fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 取消 {id}");
-    state
-        .downloads
-        .cancel(&id)
+    // Blocking work (taskkill waits, work-dir deletes) runs on the blocking
+    // pool: as a sync command this ran on the main thread and froze the whole
+    // window for the duration.
+    let downloads = state.downloads.clone();
+    let scoped_id = id.clone();
+    tokio::task::spawn_blocking(move || downloads.cancel(&scoped_id))
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd(&format!("download: 取消失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
-    let result = state
-        .downloads
-        .cancel_all()
+pub async fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
+    let downloads = state.downloads.clone();
+    let result = tokio::task::spawn_blocking(move || downloads.cancel_all())
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd("download: 取消全部失败", e))?;
     tracing::info!(target: "core", "download: 取消全部（{} 个）", result.cancelled);
     Ok(result)
@@ -1022,53 +1040,61 @@ pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishe
 }
 
 #[tauri::command]
-pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 重试 {id}");
     // Same as enqueue: a stale or missing cookies.txt would silently send
     // yt-dlp out as a guest (360p / login errors) while the UI shows LoggedIn.
     // A materialize failure is this command's error, never a guest downgrade.
     let _ = rematerialize_cookies(&state)?;
-    state
-        .downloads
-        .retry(&id)
+    let downloads = state.downloads.clone();
+    let scoped_id = id.clone();
+    tokio::task::spawn_blocking(move || downloads.retry(&scoped_id))
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd(&format!("download: 重试失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn pause_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn pause_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 暂停 {id}");
-    state
-        .downloads
-        .pause(&id)
+    let downloads = state.downloads.clone();
+    let scoped_id = id.clone();
+    tokio::task::spawn_blocking(move || downloads.pause(&scoped_id))
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd(&format!("download: 暂停失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn resume_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn resume_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 继续 {id}");
     // Same as enqueue: see retry_job for why the jar is re-materialized here.
     let _ = rematerialize_cookies(&state)?;
-    state
-        .downloads
-        .resume(&id)
+    let downloads = state.downloads.clone();
+    let scoped_id = id.clone();
+    tokio::task::spawn_blocking(move || downloads.resume(&scoped_id))
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd(&format!("download: 继续失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn pause_all_jobs(state: State<'_, AppState>) -> AppResult<PauseAllResult> {
-    let result = state
-        .downloads
-        .pause_all()
+pub async fn pause_all_jobs(state: State<'_, AppState>) -> AppResult<PauseAllResult> {
+    let downloads = state.downloads.clone();
+    let result = tokio::task::spawn_blocking(move || downloads.pause_all())
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd("download: 暂停全部失败", e))?;
     tracing::info!(target: "core", "download: 暂停全部（{} 个）", result.paused);
     Ok(result)
 }
 
 #[tauri::command]
-pub fn resume_all_jobs(state: State<'_, AppState>) -> AppResult<ResumeAllResult> {
-    let result = state
-        .downloads
-        .resume_all()
+pub async fn resume_all_jobs(state: State<'_, AppState>) -> AppResult<ResumeAllResult> {
+    let downloads = state.downloads.clone();
+    let result = tokio::task::spawn_blocking(move || downloads.resume_all())
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd("download: 继续全部失败", e))?;
     tracing::info!(target: "core", "download: 继续全部（{} 个）", result.resumed);
     Ok(result)
@@ -1084,11 +1110,14 @@ pub struct DeleteJobArgs {
 }
 
 #[tauri::command]
-pub fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
+pub async fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
     tracing::info!(target: "core", "download: 删除 {}（含文件={}）", args.id, args.delete_file);
-    state
-        .downloads
-        .delete(&args.id, args.delete_file)
+    let downloads = state.downloads.clone();
+    let scoped_id = args.id.clone();
+    let delete_file = args.delete_file;
+    tokio::task::spawn_blocking(move || downloads.delete(&scoped_id, delete_file))
+        .await
+        .map_err(join_err)?
         .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {}", args.id), e))
 }
 
@@ -1435,6 +1464,36 @@ fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
     Ok(resolved)
 }
 
+/// Resolved openable roots, kept while their raw inputs are unchanged. The
+/// inputs themselves are the cache key: a changed save dir or a different set
+/// of historical output directories re-resolves immediately, while repeated
+/// opens skip the per-job canonicalize round-trips.
+pub struct OpenableRootsCache {
+    inputs: Vec<String>,
+    roots: Vec<PathBuf>,
+}
+
+fn roots_from_cache(
+    cache: &std::sync::Mutex<Option<OpenableRootsCache>>,
+    inputs: Vec<String>,
+    compute: impl FnOnce() -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    if let Ok(mut slot) = cache.lock() {
+        if let Some(hit) = slot.as_ref()
+            && hit.inputs == inputs
+        {
+            return hit.roots.clone();
+        }
+        let roots = compute();
+        *slot = Some(OpenableRootsCache {
+            inputs,
+            roots: roots.clone(),
+        });
+        return roots;
+    }
+    compute()
+}
+
 /// The directories the app writes into: the log folder, the current save
 /// folder, and wherever earlier downloads landed — the save folder can have
 /// been changed since those rows were written.
@@ -1454,30 +1513,47 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
             }
         }
     }
-    let mut roots: Vec<PathBuf> = Vec::new();
-    roots.extend(resolve(state.activity_log.logs_dir(), "日志目录"));
+    // The cache key is the raw input set, gathered before resolution.
+    let mut inputs: Vec<String> =
+        vec![state.activity_log.logs_dir().to_string_lossy().into_owned()];
     match state.settings.lock() {
-        Ok(settings) => roots.extend(resolve(Path::new(&settings.save_dir), "保存目录")),
+        Ok(settings) => inputs.push(settings.save_dir.clone()),
         Err(_) => tracing::warn!("open_path: settings 锁中毒，保存目录不计入可打开范围"),
     }
     let jobs = state.downloads.list().unwrap_or_else(|e| {
         tracing::warn!("open_path: 读取任务列表失败（{e}），历史任务的目录不计入");
         Vec::new()
     });
-    for job in jobs {
+    for job in &jobs {
         if let Some(parent) = job
             .output_path
             .as_deref()
             .and_then(|p| Path::new(p).parent())
         {
-            roots.extend(resolve(parent, "历史任务的保存目录"));
+            inputs.push(parent.to_string_lossy().into_owned());
         }
     }
-    roots
+    roots_from_cache(&state.openable_roots_cache, inputs, move || {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        roots.extend(resolve(state.activity_log.logs_dir(), "日志目录"));
+        if let Ok(settings) = state.settings.lock() {
+            roots.extend(resolve(Path::new(&settings.save_dir), "保存目录"));
+        }
+        for job in &jobs {
+            if let Some(parent) = job
+                .output_path
+                .as_deref()
+                .and_then(|p| Path::new(p).parent())
+            {
+                roots.extend(resolve(parent, "历史任务的保存目录"));
+            }
+        }
+        roots
+    })
 }
 
 #[tauri::command]
-pub fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
+pub async fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
     // Validated as resolved, opened as given. `canonicalize` is what makes the
     // root check sound, but on Windows it also returns a `\\?\`-prefixed path,
     // and the opener hands that to ShellExecuteW, which does not understand the
@@ -1736,6 +1812,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         active_resolve_id: AtomicU64::new(0),
         activity_log,
         window_theme: std::sync::Mutex::new(WindowTheme::System),
+        openable_roots_cache: std::sync::Mutex::new(None),
     })
 }
 
@@ -2061,6 +2138,29 @@ mod tests {
     /// a guest after a restart while the UI showed LoggedIn); why_new=command
     /// bodies wrap a Tauri State and are not unit-testable, and the wiring
     /// already broke silently once; seam=none
+    /// Value: protects=openable_roots caching against its raw inputs;
+    /// fails_when=the cache ignores an input change (stale roots refuse fresh
+    /// paths) or skips caching (every open re-canonicalizes the full history,
+    /// the sync-command freeze A9 removes); why_new=open_path resolved every
+    /// historical job's directory on every click; seam=none
+    #[test]
+    fn openable_roots_recompute_only_when_their_inputs_change() {
+        let cache = std::sync::Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        let compute = || {
+            calls.set(calls.get() + 1);
+            vec![PathBuf::from("/resolved")]
+        };
+        let inputs = vec!["/logs".to_string(), "/downloads".to_string()];
+        assert_eq!(roots_from_cache(&cache, inputs.clone(), compute).len(), 1);
+        assert_eq!(roots_from_cache(&cache, inputs.clone(), compute).len(), 1);
+        assert_eq!(calls.get(), 1, "same inputs must not re-resolve");
+        let mut changed = inputs;
+        changed.push("/old-job-dir".to_string());
+        assert_eq!(roots_from_cache(&cache, changed, compute).len(), 1);
+        assert_eq!(calls.get(), 2, "changed inputs must re-resolve");
+    }
+
     #[test]
     fn every_download_start_command_rematerializes_cookies() {
         let src = include_str!("commands.rs");
