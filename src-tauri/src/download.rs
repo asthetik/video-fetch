@@ -724,10 +724,12 @@ impl DownloadManager {
             .mark_running_and_pending_as_paused()
     }
 
-    /// Best-effort teardown for app exit: kill every live download's whole
-    /// process group so no yt-dlp second stage (or its ffmpeg) outlives the
-    /// app — dropping the Child alone only reaps the direct stage.
-    pub fn kill_all_children(&self) {
+    /// Kill every live download's whole process group so no yt-dlp second stage
+    /// (or its ffmpeg) outlives the app — dropping the Child alone only reaps
+    /// the direct stage. The kill half of `shutdown_for_exit`, private for the
+    /// same reason `abort_runners` is: either half on its own is a teardown
+    /// that leaves the hazard the other half closes.
+    fn kill_all_children(&self) {
         let ids: Vec<String> = match self.children.lock() {
             Ok(guard) => guard.keys().cloned().collect(),
             Err(_) => return,
@@ -737,14 +739,33 @@ impl DownloadManager {
         }
     }
 
-    /// Abandon every runner task without touching its row — what process exit
-    /// does for free. A runner parked on the semaphore has no child to kill and
-    /// no checkpoint to reach, so no command can retire it: killing the
-    /// children only frees the permit it is parked on. Test-only: the harness
-    /// models a quit with it (see `tests/support/harness.rs`), or the parked
-    /// runner wakes up and downloads beside the one the relaunch spawns.
-    #[cfg(feature = "test-utils")]
-    pub fn abort_runners(&self) {
+    /// Full teardown for app exit, both halves of one hazard.
+    ///
+    /// Abandoning the runners comes first, and that order is the point. Killing
+    /// releases the permit a queued job's runner is parked on, and killing is
+    /// not instant — on Windows each child is a blocking `taskkill` spawn, so
+    /// the loop takes real time. A runner woken inside that window would read
+    /// its row as still Pending and start a download that nothing is left to
+    /// reap, because the process is moments from ending. Aborting first removes
+    /// every candidate before the first permit comes free; an aborted task is
+    /// cancelled, so even a permit dropped while the loop runs wakes nothing
+    /// that can proceed. The kill then reaps the process groups, and no runner
+    /// is left alive to register a child it would miss.
+    ///
+    /// Rows are left untouched on purpose: the next launch's recovery owns the
+    /// transition to Paused, so the rows land the same way a crash's do. (The
+    /// process tree does not: a crash leaves yt-dlp alive, this teardown kills
+    /// it.)
+    pub fn shutdown_for_exit(&self) {
+        self.abort_runners();
+        self.kill_all_children();
+    }
+
+    /// Drop every runner task without touching its row — what process exit does
+    /// for free, done early so none of them can be woken by our own teardown.
+    /// A runner parked on the semaphore has no child to kill and no checkpoint
+    /// to reach, so this is the only way to retire it.
+    fn abort_runners(&self) {
         let handles: Vec<JoinHandle<()>> = match self.running_tasks.lock() {
             Ok(mut tasks) => tasks.drain().map(|(_, (_, handle))| handle).collect(),
             Err(_) => return,
@@ -2741,6 +2762,43 @@ mod tests {
         }
     }
 
+    /// Holds the permit until the test releases it, then delivers like
+    /// CountingDownloader. Stands in for the running download whose death is
+    /// what frees the permit a queued job's runner is parked on, without
+    /// needing a real child to kill.
+    struct GatedDownloader {
+        runs: Arc<Mutex<Vec<String>>>,
+        release: Arc<tokio::sync::Notify>,
+        scratch: tempfile::TempDir,
+    }
+
+    impl GatedDownloader {
+        fn new() -> Self {
+            Self {
+                runs: Arc::new(Mutex::new(Vec::new())),
+                release: Arc::new(tokio::sync::Notify::new()),
+                scratch: tempfile::tempdir().unwrap(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Downloader for GatedDownloader {
+        async fn run(
+            &self,
+            job: &DownloadJob,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            if let Ok(mut runs) = self.runs.lock() {
+                runs.push(job.id.clone());
+            }
+            self.release.notified().await;
+            let path = self.scratch.path().join(format!("{}.mp4", job.id));
+            std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
+            Ok(path)
+        }
+    }
+
     #[test]
     fn stop_disposition_covers_both_kinds() {
         assert_eq!(stop_disposition(None), None);
@@ -3153,13 +3211,13 @@ mod tests {
 
     /// App exit must take the whole download process group down with it.
     ///
-    /// Value: protects=the RunEvent::Exit teardown (kill_all_children) and the
-    /// registry walk; fails_when=the walk is a no-op or misses an id — the
-    /// spawned child survives and the registry stays populated;
+    /// Value: protects=shutdown_for_exit's kill half on the verb production
+    /// calls, and its registry walk; fails_when=the walk is a no-op or misses
+    /// an id — the spawned child survives and the registry stays populated;
     /// why_new=exit-time teardown had no coverage; seam=none
     #[cfg(unix)]
     #[tokio::test]
-    async fn kill_all_children_empties_the_registry_and_kills_the_tree() {
+    async fn exit_teardown_empties_the_registry_and_kills_the_tree() {
         let dir = tempfile::tempdir().unwrap();
         let (manager, _rx) = test_manager(
             dir.path(),
@@ -3177,7 +3235,7 @@ mod tests {
             crate::ytdlp::RegisteredChild { token: 1, child },
         );
 
-        manager.kill_all_children();
+        manager.shutdown_for_exit();
         assert!(manager.children.lock().unwrap().is_empty());
 
         let mut dead = false;
@@ -3189,6 +3247,61 @@ mod tests {
             sleep(Duration::from_millis(20)).await;
         }
         assert!(dead, "the spawned download child must not outlive the app");
+    }
+
+    /// Exit teardown must abandon the runners too. Killing the running download
+    /// is what frees the permit a queued job's runner is parked on, and that
+    /// runner would wake, read its row as still Pending, and start a download
+    /// the exit path has no teardown left to kill.
+    ///
+    /// Value: protects=shutdown_for_exit's second half (the window between
+    /// RunEvent::Exit's kill and the process actually ending);
+    /// fails_when=shutdown_for_exit kills children only — job-b's parked runner
+    /// wakes on job-a's freed permit and reaches the downloader;
+    /// why_new=the exit test covers a live child and the pause test covers a
+    /// row-driven standdown, but never the permit a teardown itself frees;
+    /// seam=none
+    #[tokio::test]
+    async fn exit_teardown_abandons_a_runner_parked_on_the_semaphore() {
+        let dir = tempfile::tempdir().unwrap();
+        // concurrency=1 (test_settings): job-a holds the only permit, so job-b
+        // queues behind it with a runner of its own parked on the semaphore.
+        let downloader = Arc::new(GatedDownloader::new());
+        let manager = manager_for(
+            dir.path(),
+            downloader.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let mut a = sample_job("job-a");
+        a.video_id = "BV1a".into();
+        manager.enqueue(a, false).unwrap();
+        let mut b = sample_job("job-b");
+        b.video_id = "BV1b".into();
+        manager.enqueue(b, false).unwrap();
+        wait_for_status(&manager, "job-a", JobStatus::Running).await;
+
+        manager.shutdown_for_exit();
+        // In production the kill frees the permit; here the mock's release
+        // does, so the wake-up a leftover runner would take is offered either
+        // way. A runner the teardown abandoned is gone and takes nothing.
+        downloader.release.notify_one();
+        sleep(Duration::from_millis(300)).await;
+
+        let runs = downloader.runs.lock().unwrap().clone();
+        assert!(
+            !runs.contains(&"job-b".to_string()),
+            "a parked runner started a download after the exit teardown: {runs:?}"
+        );
+        // The teardown writes no rows: the next launch's recovery owns the
+        // transition, so a quit lands the same way a crash does.
+        let status = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == "job-a")
+            .map(|j| j.status);
+        assert_eq!(status, Some(JobStatus::Running));
     }
 
     /// A merge killed mid-flight leaves yt-dlp's `….temp.<ext>` writer file

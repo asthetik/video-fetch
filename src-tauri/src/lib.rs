@@ -130,8 +130,10 @@ pub fn run() {
             {
                 // Quitting must not leave the download tree behind: the
                 // drop-time kill only reaps the direct stage, so the
-                // PyInstaller second stage (and ffmpeg) can keep writing.
-                state.downloads.kill_all_children();
+                // PyInstaller second stage (and ffmpeg) can keep writing. The
+                // teardown also abandons the runners, or the permit that kill
+                // frees starts one more download behind it.
+                state.downloads.shutdown_for_exit();
                 state.activity_log.flush();
             }
         });

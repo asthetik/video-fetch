@@ -208,8 +208,8 @@ async fn resume_does_not_refetch_completed_fragments() {
     support::oracles::assert_no_stray_media_files(&h.work_dir_of(&job.id));
 }
 
-/// Value: protects=the production restart sequence (kill_all_children →
-/// manager lands → rebuild → orphan cleanup with keep-list → reconcile) and
+/// Value: protects=the production restart sequence (shutdown_for_exit →
+/// manager lands → orphan cleanup with keep-list → reconcile) and
 /// the paused job's work dir surviving cleanup_orphan_work_dirs;
 /// fails_when=the restart sequence drops the paused row, orphan cleanup
 /// deletes the paused job's work dir, or the resumed download delivers no

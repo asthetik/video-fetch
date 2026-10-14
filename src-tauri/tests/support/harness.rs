@@ -167,12 +167,12 @@ impl Harness {
     }
 
     /// The quit half, split out so a test can hold the window between the quit
-    /// and the relaunch. A real quit exits the process, and that exit is the
-    /// only thing that retires a runner parked on the semaphore: killing the
-    /// children merely frees the permit the parked runner is waiting for.
+    /// and the relaunch. It is the production teardown verbatim: that teardown
+    /// abandons every runner, because a real quit ends the process and nothing
+    /// else retires a runner parked on the semaphore — a harness that killed
+    /// the children only would leave it to wake on the freed permit.
     pub fn quit_clean(&mut self) {
-        self.manager.kill_all_children();
-        self.manager.abort_runners();
+        self.manager.shutdown_for_exit();
     }
 
     /// Hard-crash flavor: no kill at all. The old manager is replaced and
@@ -210,7 +210,9 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         // Must run on assertion panics too, or a leaked yt-dlp keeps CI busy.
-        self.manager.kill_all_children();
+        // The full teardown: a runner left parked here would wake on the permit
+        // the kill frees and start a download under whatever test runs next.
+        self.manager.shutdown_for_exit();
         super::oracles::kill_processes_containing(&self.marker());
     }
 }
