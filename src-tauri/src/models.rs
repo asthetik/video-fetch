@@ -116,6 +116,11 @@ pub struct DownloadJob {
     #[serde(default)]
     pub audio_format: Option<String>,
     pub title: String,
+    /// UP主 name captured at enqueue time (None for legacy rows and callers
+    /// that never had it); the skip-existing prediction needs it for templates
+    /// containing `%(uploader)s`.
+    #[serde(default)]
+    pub uploader: Option<String>,
     pub output_template: String,
     pub status: JobStatus,
     pub progress: f64,

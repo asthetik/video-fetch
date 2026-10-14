@@ -119,5 +119,6 @@ export const api = {
     items: BatchEnqueueItem[];
     format_id: string;
     audio_format?: string | null;
+    uploader?: string | null;
   }) => invoke<BatchEnqueueResult>("space_enqueue_batch", { args }),
 };

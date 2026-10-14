@@ -46,6 +46,9 @@ export interface DownloadJob {
   format_id: string;
   audio_format?: string | null;
   title: string;
+  /** UP主 name captured at enqueue time; the skip-existing prediction needs it
+   * for templates containing `%(uploader)s`. Absent for legacy rows. */
+  uploader?: string | null;
   output_template: string;
   status: JobStatus;
   progress: number;

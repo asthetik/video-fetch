@@ -140,6 +140,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
         })),
         format_id: formatId,
         audio_format: audioFormat,
+        uploader,
       });
       const failedNote =
         result.failed.length > 0 ? `，失败 ${result.failed.length} 个` : "";

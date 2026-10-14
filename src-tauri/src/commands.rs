@@ -841,6 +841,7 @@ pub async fn enqueue_download(
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title: title.clone(),
+            uploader: (!uploader.is_empty()).then(|| uploader.clone()),
             output_template: page_template,
             status: JobStatus::Pending,
             progress: 0.0,
@@ -881,6 +882,10 @@ pub struct SpaceBatchArgs {
     pub format_id: String,
     #[serde(default)]
     pub audio_format: Option<String>,
+    /// The space's UP主 name, captured by the caller; the skip-existing
+    /// prediction needs it for templates containing `%(uploader)s`.
+    #[serde(default)]
+    pub uploader: Option<String>,
 }
 
 fn record_batch_outcome(
@@ -970,6 +975,7 @@ pub async fn space_enqueue_batch(
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title,
+            uploader: args.uploader.clone(),
             output_template: settings.filename_template.clone(),
             status: JobStatus::Pending,
             progress: 0.0,

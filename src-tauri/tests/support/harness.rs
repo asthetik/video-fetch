@@ -76,6 +76,7 @@ impl Harness {
             format_id: "bestvideo+bestaudio".into(),
             audio_format: None,
             title: format!("clip-{n}"),
+            uploader: None,
             output_template: format!("clip-{n}.%(ext)s"),
             status: JobStatus::Pending,
             progress: 0.0,

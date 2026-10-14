@@ -390,7 +390,9 @@ impl DownloadManager {
                     &job.output_template,
                     &job.title,
                     &job.video_id,
-                    "",
+                    // Same inputs as check_conflict: an empty uploader here
+                    // once made every %(uploader)s template file invisible.
+                    job.uploader.as_deref().unwrap_or(""),
                     job.page_index,
                     naming::conflict_exts(audio_format),
                 )
@@ -1611,6 +1613,7 @@ mod tests {
             format_id: "80".into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: None,
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
             progress: 0.0,
@@ -2779,6 +2782,33 @@ mod tests {
     fn save_dir_must_be_writable() {
         let dir = tempfile::tempdir().unwrap();
         check_save_dir_writable(dir.path()).unwrap();
+    }
+
+    /// Value: protects=the skip-existing prediction matching the name the
+    /// template actually produced — uploader included; fails_when=enqueue
+    /// predicts with an empty uploader again (every UP主/标题 template file was
+    /// invisible to the dedupe and silently re-downloaded); why_new=enqueue
+    /// and check_conflict disagreed about the same file, enqueue losing;
+    /// seam=none
+    #[test]
+    fn skip_existing_sees_files_named_with_the_uploader() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()) as Arc<dyn Downloader>,
+        );
+        let template = "%(uploader)s/%(title)s [%(id)s].%(ext)s";
+        let expected = naming::preview_filename(template, "demo", "BV1xx", "Alice", "mp4", 1);
+        let target = dir.path().join(&expected);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"already here").unwrap();
+
+        let mut job = sample_job("job-uploader");
+        job.output_template = template.into();
+        job.uploader = Some("Alice".into());
+        let kind = manager.enqueue_classified(&mut job, false).unwrap();
+        assert_eq!(kind, EnqueueKind::AlreadyExists);
     }
 
     #[tokio::test]

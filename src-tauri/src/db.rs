@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   duration_secs INTEGER,
   file_size INTEGER,
   title TEXT NOT NULL,
+  uploader TEXT,
   output_template TEXT NOT NULL,
   status TEXT NOT NULL,
   progress REAL NOT NULL DEFAULT 0,
@@ -72,6 +73,7 @@ impl Db {
             ("thumbnail_url", "TEXT"),
             ("duration_secs", "INTEGER"),
             ("file_size", "INTEGER"),
+            ("uploader", "TEXT"),
         ] {
             if !column_exists(&conn, "jobs", col)? {
                 conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {kind}"), [])?;
@@ -110,11 +112,11 @@ impl Db {
     pub fn insert_job(&self, job: &DownloadJob) -> AppResult<()> {
         self.conn.execute(
             "INSERT INTO jobs (
-                id, url, video_id, page_index, format_id, audio_format, title, output_template,
-                status, progress, error, output_path, thumbnail_url, duration_secs, file_size,
-                created_at, updated_at
+                id, url, video_id, page_index, format_id, audio_format, title, uploader,
+                output_template, status, progress, error, output_path, thumbnail_url,
+                duration_secs, file_size, created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                 datetime('now'), datetime('now')
             )",
             params![
@@ -125,6 +127,7 @@ impl Db {
                 job.format_id,
                 job.audio_format,
                 job.title,
+                job.uploader,
                 job.output_template,
                 status_to_str(&job.status),
                 job.progress,
@@ -146,15 +149,16 @@ impl Db {
                 page_index = ?4,
                 format_id = ?5,
                 title = ?6,
-                output_template = ?7,
-                status = ?8,
-                progress = ?9,
-                error = ?10,
-                output_path = ?11,
-                audio_format = ?12,
-                thumbnail_url = ?13,
-                duration_secs = ?14,
-                file_size = ?15,
+                uploader = ?7,
+                output_template = ?8,
+                status = ?9,
+                progress = ?10,
+                error = ?11,
+                output_path = ?12,
+                audio_format = ?13,
+                thumbnail_url = ?14,
+                duration_secs = ?15,
+                file_size = ?16,
                 updated_at = datetime('now')
             WHERE id = ?1",
             params![
@@ -164,6 +168,7 @@ impl Db {
                 job.page_index,
                 job.format_id,
                 job.title,
+                job.uploader,
                 job.output_template,
                 status_to_str(&job.status),
                 job.progress,
@@ -184,14 +189,14 @@ impl Db {
     pub fn list_jobs(&self) -> AppResult<Vec<DownloadJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT
-                id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path, audio_format,
+                id, url, video_id, page_index, format_id, title, uploader,
+                output_template, status, progress, error, output_path, audio_format,
                 thumbnail_url, duration_secs, file_size, created_at
             FROM jobs
             ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let status_str: String = row.get(7)?;
+            let status_str: String = row.get(8)?;
             Ok(DownloadJob {
                 id: row.get(0)?,
                 url: row.get(1)?,
@@ -199,16 +204,17 @@ impl Db {
                 page_index: row.get::<_, i64>(3)? as u32,
                 format_id: row.get(4)?,
                 title: row.get(5)?,
-                output_template: row.get(6)?,
+                uploader: row.get(6)?,
+                output_template: row.get(7)?,
                 status: status_from_str(&status_str)?,
-                progress: row.get(8)?,
-                error: row.get(9)?,
-                output_path: row.get(10)?,
-                audio_format: row.get(11)?,
-                thumbnail_url: row.get(12)?,
-                duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
-                file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
-                created_at: row.get(15)?,
+                progress: row.get(9)?,
+                error: row.get(10)?,
+                output_path: row.get(11)?,
+                audio_format: row.get(12)?,
+                thumbnail_url: row.get(13)?,
+                duration_secs: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                file_size: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+                created_at: row.get(16)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -224,15 +230,15 @@ impl Db {
     pub fn find_job(&self, id: &str) -> AppResult<Option<DownloadJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT
-                id, url, video_id, page_index, format_id, title, output_template,
-                status, progress, error, output_path, audio_format,
+                id, url, video_id, page_index, format_id, title, uploader,
+                output_template, status, progress, error, output_path, audio_format,
                 thumbnail_url, duration_secs, file_size, created_at
             FROM jobs
             WHERE id = ?1",
         )?;
         let job = stmt
             .query_row(params![id], |row| {
-                let status_str: String = row.get(7)?;
+                let status_str: String = row.get(8)?;
                 Ok(DownloadJob {
                     id: row.get(0)?,
                     url: row.get(1)?,
@@ -240,16 +246,17 @@ impl Db {
                     page_index: row.get::<_, i64>(3)? as u32,
                     format_id: row.get(4)?,
                     title: row.get(5)?,
-                    output_template: row.get(6)?,
+                    uploader: row.get(6)?,
+                    output_template: row.get(7)?,
                     status: status_from_str(&status_str)?,
-                    progress: row.get(8)?,
-                    error: row.get(9)?,
-                    output_path: row.get(10)?,
-                    audio_format: row.get(11)?,
-                    thumbnail_url: row.get(12)?,
-                    duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
-                    file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
-                    created_at: row.get(15)?,
+                    progress: row.get(9)?,
+                    error: row.get(10)?,
+                    output_path: row.get(11)?,
+                    audio_format: row.get(12)?,
+                    thumbnail_url: row.get(13)?,
+                    duration_secs: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+                    file_size: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+                    created_at: row.get(16)?,
                 })
             })
             .optional()?;
@@ -607,6 +614,7 @@ mod tests {
             format_id: format_id.into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: None,
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Done,
             progress: 1.0,
@@ -628,6 +636,7 @@ mod tests {
             format_id: "80".into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: None,
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
             progress: 0.0,
@@ -874,6 +883,7 @@ mod tests {
             ("thumbnail_url", "TEXT"),
             ("duration_secs", "INTEGER"),
             ("file_size", "INTEGER"),
+            ("uploader", "TEXT"),
         ] {
             assert_eq!(
                 column_decl_type(&db.conn, col).as_deref(),
