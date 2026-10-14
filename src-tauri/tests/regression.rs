@@ -247,6 +247,47 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
 }
 
+/// Value: protects=queued rows landing in a resumable state across a
+/// relaunch (a queued runner dies with the process and nothing restarts it);
+/// fails_when=startup recovery leaves pending rows pending — they wait
+/// forever and the per-row resume rejects them; why_new=the restart tests
+/// covered only the paused/running shapes, and a pending row after restart
+/// was the queue deadlock; seam=none
+#[tokio::test]
+async fn queued_jobs_survive_a_relaunch_as_paused_and_resume_all() {
+    let mut h = support::harness::Harness::new(1);
+    // One job parks mid-download holding the only permit; the next two queue
+    // behind it as pending — exactly what a big enqueue leaves behind.
+    let _running = h.enqueue(1);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
+    let q2 = h.enqueue(2);
+    let q3 = h.enqueue(3);
+    assert_eq!(h.job(&q2.id).status, JobStatus::Pending);
+    assert_eq!(h.job(&q3.id).status, JobStatus::Pending);
+
+    h.server.release_gate();
+    h.clean_restart();
+
+    // The queued rows lost their runner to the restart; recovery must land
+    // them in the resumable state, not leave them waiting forever.
+    for id in [&q2.id, &q3.id] {
+        assert_eq!(
+            h.job(id).status,
+            JobStatus::Paused,
+            "queued row {id} must be paused after the restart"
+        );
+    }
+
+    h.manager.resume_all().unwrap();
+    for id in [&q2.id, &q3.id] {
+        h.wait_status(id, JobStatus::Done, Duration::from_secs(180))
+            .await;
+    }
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(2));
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(3));
+}
+
 /// Value: protects=cancel kills the whole tree (no orphans still writing),
 /// drops the work dir, and stops all further traffic; fails_when=the group
 /// kill regresses (orphan survives — the 0.4.0 macOS bug class) or cancel
