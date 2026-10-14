@@ -1161,8 +1161,7 @@ pub async fn download(
                             });
                         }
                         if stderr_tail.len() > 8192 {
-                            let split = stderr_tail.len().saturating_sub(4096);
-                            stderr_tail = stderr_tail.split_off(split);
+                            truncate_tail(&mut stderr_tail, 4096);
                         }
                         stderr_tail.push_str(&line);
                         stderr_tail.push('\n');
@@ -1345,9 +1344,44 @@ fn kill_child_process_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
+/// Keep at most `keep` trailing bytes of `s`. The cut must land on a char
+/// boundary: `String::split_off` panics mid-character, and yt-dlp's stderr
+/// lines are full of multi-byte titles.
+fn truncate_tail(s: &mut String, keep: usize) {
+    if s.len() <= keep {
+        return;
+    }
+    let mut split = s.len() - keep;
+    while split < s.len() && !s.is_char_boundary(split) {
+        split += 1;
+    }
+    let tail = s.split_off(split);
+    *s = tail;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_tail_at_a_multibyte_boundary_keeps_valid_utf8() {
+        // 3-byte CJK chars make `len - 4096` land inside one of them.
+        let mut s = "中".repeat(3000); // 9000 bytes
+        truncate_tail(&mut s, 4096);
+        assert!(s.len() <= 4096 + 2, "kept {} bytes", s.len());
+        assert!(s.ends_with('中'));
+        assert!(s.chars().all(|c| c == '中'));
+    }
+
+    #[test]
+    fn truncate_tail_keeps_the_plain_ascii_tail() {
+        let mut s = "a".repeat(9000);
+        truncate_tail(&mut s, 4096);
+        assert_eq!(s.len(), 4096);
+        let mut short = String::from("short");
+        truncate_tail(&mut short, 4096);
+        assert_eq!(short, "short");
+    }
 
     fn command_args(cmd: &Command) -> Vec<String> {
         cmd.as_std()

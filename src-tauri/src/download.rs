@@ -891,8 +891,24 @@ impl DownloadManager {
         let this = self.clone();
         let task_id = job_id.clone();
         // Use Tauri's runtime so sync commands can spawn without a current Tokio handle.
+        // The unwind guard is the runner's safety net: a panic inside must
+        // surface as a Failed row, not a silently dead task whose row stays
+        // Running until the next relaunch.
         let handle = async_runtime::spawn(async move {
-            this.run_job(job_id, token).await;
+            use futures_util::FutureExt;
+            let panicked = std::panic::AssertUnwindSafe(this.run_job(job_id.clone(), token))
+                .catch_unwind()
+                .await
+                .is_err();
+            if panicked {
+                let _ = this.fail_job(
+                    &job_id,
+                    token,
+                    "下载异常终止：内部错误（panic）".into(),
+                    true,
+                );
+                this.unregister_task(&job_id, token);
+            }
         });
 
         if let Ok(mut tasks) = self.running_tasks.lock() {
@@ -4061,6 +4077,44 @@ mod tests {
     /// dropped — a failed job keeps the fragments it will never resume from;
     /// why_new=the downloader-side rule had no behavioural test, only a unit
     /// test of the pure predicate that no longer decides anything; seam=none
+    /// Value: protects=a runner that panics must not leave its row Running
+    /// forever; fails_when=the catch_unwind net in spawn_runner is removed or
+    /// stops writing a terminal row; why_new=a panic inside the spawned task
+    /// used to die silently (stderr truncation did exactly that on multi-byte
+    /// cuts) and the row froze until the next relaunch; seam=none
+    #[tokio::test]
+    async fn a_panicking_runner_marks_the_job_failed_instead_of_leaving_it_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        struct PanickingMock;
+        #[async_trait]
+        impl Downloader for PanickingMock {
+            async fn run(
+                &self,
+                _job: &DownloadJob,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                panic!("mock panic inside the runner");
+            }
+        }
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work_root,
+            Arc::new(PanickingMock) as Arc<dyn Downloader>,
+        );
+        let job = manager.enqueue(sample_job("job-panic"), false).unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Failed).await;
+
+        let jobs = manager.list().unwrap();
+        let failed = jobs.iter().find(|j| j.id == job.id).unwrap();
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert!(
+            failed.error.as_deref().unwrap_or("").contains("内部错误"),
+            "the failure must name the panic, got {:?}",
+            failed.error
+        );
+    }
+
     #[tokio::test]
     async fn a_real_error_removes_the_work_dir_and_fails_the_job() {
         let dir = tempfile::tempdir().unwrap();

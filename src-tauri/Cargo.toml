@@ -40,6 +40,7 @@ thiserror = "2.0.21"
 url = "2.5.8"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { version = "1.53.3", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
+futures-util = "0.3.34"
 async-trait = "0.1.92"
 tauri-plugin-dialog = "2.8.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
