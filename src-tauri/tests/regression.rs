@@ -247,6 +247,54 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
 }
 
+/// Value: protects=the quit half of a relaunch — a runner parked on the
+/// semaphore is abandoned by the quit instead of being left to wake on the
+/// permit the kill frees; fails_when=quit_clean stops abandoning runner tasks,
+/// so the queued job starts downloading before the relaunch and the runner the
+/// relaunch spawns then races it over one work dir; why_new=a quit that only
+/// killed children left queued runners parked and alive, which flaked the
+/// queued-restart test on ubuntu-22.04/arm and windows-latest; seam=none
+#[tokio::test]
+async fn a_clean_quit_leaves_no_runner_to_start_a_queued_job() {
+    let mut h = support::harness::Harness::new(1);
+    // One job parks mid-download holding the only permit; the next queues
+    // behind it with a runner of its own, parked on the semaphore.
+    let _running = h.enqueue(1);
+    h.server.arm_gate_on_next_fragment(1);
+    assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
+    let queued = h.enqueue(2);
+    assert_eq!(h.job(&queued.id).status, JobStatus::Pending);
+
+    h.server.release_gate();
+    h.quit_clean();
+    // The kill frees the only permit, so a runner the quit failed to abandon
+    // starts downloading right here: the row flips to Running and fragments
+    // land in the work dir. Nothing else can move this row while the window is
+    // open, which is what makes the asserts below deterministic.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        h.job(&queued.id).status,
+        JobStatus::Pending,
+        "a runner the quit should have abandoned started the queued job"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(h.work_dir_of(&queued.id))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "the queued job's work dir must stay empty across the quit: {leftovers:?}"
+    );
+
+    // Only the relaunch may put a runner on this row.
+    h.relaunch();
+    assert_eq!(h.job(&queued.id).status, JobStatus::Paused);
+}
+
 /// Value: protects=queued rows landing in a resumable state across a
 /// relaunch (a queued runner dies with the process and nothing restarts it);
 /// fails_when=startup recovery leaves pending rows pending — they wait

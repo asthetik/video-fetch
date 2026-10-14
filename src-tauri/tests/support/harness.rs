@@ -162,8 +162,17 @@ impl Harness {
     /// Production-order restart: quit-kill → manager lands → rebuild → orphan
     /// cleanup with the keep-list → reconcile (mirrors `build_app_state`).
     pub fn clean_restart(&mut self) {
+        self.quit_clean();
+        self.relaunch();
+    }
+
+    /// The quit half, split out so a test can hold the window between the quit
+    /// and the relaunch. A real quit exits the process, and that exit is the
+    /// only thing that retires a runner parked on the semaphore: killing the
+    /// children merely frees the permit the parked runner is waiting for.
+    pub fn quit_clean(&mut self) {
         self.manager.kill_all_children();
-        self.rebuild();
+        self.manager.abort_runners();
     }
 
     /// Hard-crash flavor: no kill at all. The old manager is replaced and
@@ -172,10 +181,12 @@ impl Harness {
     /// still own the children) — recreating "Running rows + live children",
     /// a state the clean path can never produce.
     pub fn crash_restart(&mut self) {
-        self.rebuild();
+        self.relaunch();
     }
 
-    fn rebuild(&mut self) {
+    /// The landing half: a fresh manager over the same db and work root, the
+    /// orphan cleanup with the keep-list, then reconcile.
+    pub fn relaunch(&mut self) {
         let yt_dlp = find_sidecar("yt-dlp");
         let ffmpeg = find_sidecar("ffmpeg");
         let fresh = build_manager(

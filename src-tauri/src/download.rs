@@ -737,6 +737,23 @@ impl DownloadManager {
         }
     }
 
+    /// Abandon every runner task without touching its row — what process exit
+    /// does for free. A runner parked on the semaphore has no child to kill and
+    /// no checkpoint to reach, so no command can retire it: killing the
+    /// children only frees the permit it is parked on. Test-only: the harness
+    /// models a quit with it (see `tests/support/harness.rs`), or the parked
+    /// runner wakes up and downloads beside the one the relaunch spawns.
+    #[cfg(feature = "test-utils")]
+    pub fn abort_runners(&self) {
+        let handles: Vec<JoinHandle<()>> = match self.running_tasks.lock() {
+            Ok(mut tasks) => tasks.drain().map(|(_, (_, handle))| handle).collect(),
+            Err(_) => return,
+        };
+        for handle in handles {
+            handle.abort();
+        }
+    }
+
     /// Pause every Pending/Running job. Counts only jobs whose status actually
     /// changed (same rule as cancel_all).
     pub fn pause_all(&self) -> AppResult<PauseAllResult> {
