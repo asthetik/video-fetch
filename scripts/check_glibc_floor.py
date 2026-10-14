@@ -21,7 +21,17 @@ read from the artifacts the release actually builds.
 Prints the floor each binary needs and exits 0 when all of them are at or
 below --max; exits 1, naming the versions at fault, otherwise. A need this
 script cannot order counts as a failure too, never as a warning: an answer
-it cannot read must not pass for an answer it liked.
+it cannot read must not pass for an answer it liked. `GLIBC_PRIVATE` is the
+name that occurs in the wild — the pinned Linux ffmpeg sidecar carries it —
+and it is genuinely unorderable: it is glibc's private ABI, which no
+distribution guarantees at any version.
+
+One caveat, in the strict direction: a need is read whether or not the
+linker marked it weak (`vna_flags` is not consulted), so a version a binary
+only optionally references is reported as required. ld.so would tolerate
+its absence; this check does not. The failure being prevented is a bundle
+that does not start, so over-reporting is the deliberate side to err on —
+a name that reads like a floor has to be argued down by hand.
 """
 
 from __future__ import annotations
@@ -237,13 +247,19 @@ def check(path: Path, ceiling: tuple[int, ...]) -> bool:
         print(f"  {name} required by {library}, above the {ceiling_text} ceiling")
     for library, name in unreadable:
         print(
-            f"  {name} required by {library}, which this script cannot order "
-            "— teach it the version before trusting the floor"
+            f"  {name} required by {library} carries no version this script "
+            "can order: map it in NAMED_NEEDS, or establish that the binary "
+            "should not carry the need at all"
         )
     if too_new:
         print(
             f"FAIL {path}: this binary does not run on the oldest supported "
             f"distribution; the {ceiling_text} floor is what the CHANGELOG promises"
+        )
+    if unreadable:
+        print(
+            f"FAIL {path}: no floor can be established while a need is "
+            "unreadable, and an unreadable answer is not a passing one"
         )
     return not too_new and not unreadable
 

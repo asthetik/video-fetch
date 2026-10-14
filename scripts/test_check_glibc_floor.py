@@ -43,8 +43,17 @@ def _build(
     order: str = "<",
     extended_count: bool = False,
     with_verneed: bool = True,
+    gap: int = 0,
+    aux_pad: int = 0,
 ) -> tuple[bytearray, int, int]:
     """A 64-bit ELF carrying `needs` as [(library, [versions])].
+
+    `gap` pads each entry with that many zero bytes. Entries are laid out
+    contiguously without it, which makes the next-pointer's two readings
+    (relative to the entry it sits in, or absolute) agree on the first hop:
+    a fixture with a gap is what tells them apart. `aux_pad` does the same
+    for the aux chain, by pushing the first aux entry off the offset an
+    absolute reading would compute.
 
     Returns the bytes, the offset of .gnu.version_r and the offset of the
     section header table, so tests can damage a specific field.
@@ -66,8 +75,9 @@ def _build(
         starts.append(len(verneed))
         count = len(versions)
         verneed += struct.pack(
-            order + "HHIII", 1, count, file_off, 16 if count else 0, 0
+            order + "HHIII", 1, count, file_off, 16 + aux_pad if count else 0, 0
         )
+        verneed += bytes(aux_pad)
         for index, name_off in enumerate(versions):
             verneed += struct.pack(
                 order + "IHHII",
@@ -77,6 +87,7 @@ def _build(
                 name_off,
                 16 if index + 1 < count else 0,
             )
+        verneed += bytes(gap)
     for index, start in enumerate(starts):
         following = starts[index + 1] - start if index + 1 < len(starts) else 0
         struct.pack_into(order + "I", verneed, start + 12, following)
@@ -153,6 +164,40 @@ class ReadVersionNeedsTest(unittest.TestCase):
                 ("libc.so.6", "GLIBC_2.2.5"),
                 ("libgcc_s.so.1", "GCC_3.0"),
             ],
+        )
+
+    def test_walks_a_chain_of_three_libraries_with_gaps(self) -> None:
+        # The third entry is the point: with only two, the first hop's
+        # next-pointer reads the same whether it is taken as relative to the
+        # entry it sits in or as an absolute offset, so a parser that got
+        # that wrong would still agree with the fixture. The gap makes the
+        # second hop land in padding unless the relative reading is used.
+        data = _elf(
+            [
+                ("libc.so.6", ["GLIBC_2.34", "GLIBC_2.2.5"]),
+                ("libm.so.6", ["GLIBC_2.29"]),
+                ("libpthread.so.0", ["GLIBC_2.3.2"]),
+            ],
+            gap=64,
+        )
+        self.assertEqual(
+            read_version_needs(data),
+            [
+                ("libc.so.6", "GLIBC_2.34"),
+                ("libc.so.6", "GLIBC_2.2.5"),
+                ("libm.so.6", "GLIBC_2.29"),
+                ("libpthread.so.0", "GLIBC_2.3.2"),
+            ],
+        )
+
+    def test_reads_an_aux_chain_relative_to_its_own_entry(self) -> None:
+        # vn_aux is relative to the need entry it sits in and vna_next to the
+        # aux entry it sits in. The padding makes an absolute reading land in
+        # zeroes and pick up a version-less name instead of the second one.
+        data = _elf([("libc.so.6", ["GLIBC_2.34", "GLIBC_2.2.5"])], aux_pad=16)
+        self.assertEqual(
+            read_version_needs(data),
+            [("libc.so.6", "GLIBC_2.34"), ("libc.so.6", "GLIBC_2.2.5")],
         )
 
     def test_big_endian(self) -> None:
@@ -364,7 +409,10 @@ class MainTest(unittest.TestCase):
             {"video-fetch": _elf([("libc.so.6", ["GLIBC_PRIVATE"])])}, "--max", "2.34"
         )
         self.assertEqual(code, 1)
-        self.assertIn("cannot order", out)
+        self.assertIn("carries no version this script", out)
+        # A runner scanning the log has to see a failure, not just an
+        # indented note under an otherwise healthy-looking floor line.
+        self.assertIn("FAIL", out)
 
     def test_every_binary_is_checked_not_just_the_first_failure(self) -> None:
         code, out = self.run_main(
