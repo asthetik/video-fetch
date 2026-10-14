@@ -30,23 +30,16 @@ const QUIESCE_TICKS: usize = 12;
 #[tokio::test]
 #[ignore = "soak: run locally, never in CI"]
 async fn soak_churns_downloads_and_asserts_invariants() {
-    let minutes: u64 = std::env::var("SOAK_MINUTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
-    let seed: u64 = std::env::var("SOAK_SEED")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        });
-    let max_jobs: usize = std::env::var("SOAK_JOBS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(6);
+    let minutes: u64 = parse_env_or("SOAK_MINUTES", std::env::var("SOAK_MINUTES").ok(), 5);
+    let seed: u64 = parse_env_or(
+        "SOAK_SEED",
+        std::env::var("SOAK_SEED").ok(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let max_jobs: usize = parse_env_or("SOAK_JOBS", std::env::var("SOAK_JOBS").ok(), 6);
 
     let mut rng = XorShift64::new(seed);
     let mut ledger: Vec<(Op, String)> = Vec::new();
@@ -492,4 +485,51 @@ async fn list_retry(h: &Harness) -> Vec<DownloadJob> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("list() kept failing (sqlite contention) after 2s");
+}
+
+/// Parse one `SOAK_*` override; `raw` is the variable as read from the
+/// environment (`None` when unset). A value that is set but unparseable must
+/// panic and name the original text: `SOAK_MINUTES=1O` (letter O) used to
+/// fall through `parse().ok()` to the default and quietly run a 5-minute
+/// soak that looked deliberate. An unset variable keeps `default`.
+fn parse_env_or<T: std::str::FromStr>(name: &str, raw: Option<String>, default: T) -> T {
+    let Some(raw) = raw else {
+        return default;
+    };
+    raw.parse().unwrap_or_else(|_| {
+        panic!("{name}={raw:?} is not parseable; fix the override instead of silently defaulting")
+    })
+}
+
+#[test]
+fn soak_env_defaults_when_unset() {
+    assert_eq!(parse_env_or("SOAK_MINUTES", None, 5u64), 5);
+    assert_eq!(parse_env_or("SOAK_JOBS", None, 6usize), 6);
+}
+
+#[test]
+fn soak_env_parses_a_valid_override() {
+    assert_eq!(parse_env_or("SOAK_MINUTES", Some("11".into()), 5u64), 11);
+    assert_eq!(parse_env_or("SOAK_SEED", Some("42".into()), 0u64), 42);
+}
+
+/// Value: protects=soak knob parsing; fails_when=`SOAK_MINUTES=1O` (letter
+/// O) silently falls back to the default instead of panicking with the
+/// original value in the message; why_new=review finding A15; seam=none
+#[test]
+#[should_panic(expected = "SOAK_MINUTES=\"1O\"")]
+fn unparseable_soak_override_panics_naming_the_original_value() {
+    let _ = parse_env_or("SOAK_MINUTES", Some("1O".into()), 5u64);
+}
+
+#[test]
+#[should_panic(expected = "SOAK_SEED=\"0x10\"")]
+fn unparseable_soak_seed_panics_naming_the_original_value() {
+    let _ = parse_env_or("SOAK_SEED", Some("0x10".into()), 0u64);
+}
+
+#[test]
+#[should_panic(expected = "SOAK_JOBS=\"many\"")]
+fn unparseable_soak_jobs_panics_naming_the_original_value() {
+    let _ = parse_env_or("SOAK_JOBS", Some("many".into()), 6usize);
 }
