@@ -1598,6 +1598,11 @@ pub async fn pick_cookies_file(app: AppHandle) -> AppResult<String> {
     }
 }
 
+// Log-shape invariant (see the comment on `run` in lib.rs): a healthy
+// startup produces ZERO log lines. The two tracing sites in this function are
+// anomaly-gated (they fire only when a previous session left orphans or
+// interrupted rows behind); do not add routine lifecycle logging here.
+// `startup_silence_guard` in lib.rs pins the call sites and their guards.
 pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let app_dir = app
         .path()
