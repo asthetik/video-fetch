@@ -244,7 +244,8 @@ pub struct DownloadManager {
     children: DownloadChildren,
     work_root: PathBuf,
     semaphore: Arc<Semaphore>,
-    /// Configured max concurrent downloads (matches semaphore capacity accounting).
+    /// Configured max concurrent downloads; a target that reconcile_semaphore
+    /// converges the real permit count toward.
     concurrency_limit: Arc<AtomicUsize>,
     /// Permits currently issued (the semaphore's real capacity). add_permits
     /// raises this, forget lowers it; reconcile_semaphore converges it to
@@ -262,15 +263,26 @@ pub struct DownloadManager {
     next_token: Arc<AtomicU64>,
 }
 
-/// Runs the semaphore bookkeeping once a runner's permit is back in the pool:
-/// the permits a shrink could not reclaim while jobs held them are removed
-/// here, so capacity converges to the configured limit instead of drifting.
-struct ReconcileOnDrop<'a> {
+/// Owns a runner's permit and retires it on the way out. A shrink that could
+/// not reclaim permits while jobs held them is settled HERE: if the permit
+/// count is over the limit when the runner finishes, the permit is forgotten
+/// instead of returned — a returned permit goes straight to a queued waiter
+/// and the shrink would never land under load. Otherwise the permit returns
+/// normally and the general reconcile runs.
+struct PermitReconciler<'a> {
     manager: &'a DownloadManager,
+    permit: Option<tokio::sync::SemaphorePermit<'a>>,
 }
 
-impl Drop for ReconcileOnDrop<'_> {
+impl Drop for PermitReconciler<'_> {
     fn drop(&mut self) {
+        let target = self.manager.concurrency_limit.load(Ordering::SeqCst);
+        if self.manager.issued_permits.load(Ordering::SeqCst) > target
+            && let Some(permit) = self.permit.take()
+        {
+            permit.forget();
+            self.manager.issued_permits.fetch_sub(1, Ordering::SeqCst);
+        }
         self.manager.reconcile_semaphore();
     }
 }
@@ -370,52 +382,51 @@ impl DownloadManager {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
         let save_dir = PathBuf::from(&settings.save_dir);
 
-        // Never allow a second active job for the same video page (not bypassed by save_as_copy).
-        {
-            let active = self.db.lock().map_err(lock_err)?.has_active_job(
-                &job.video_id,
-                job.page_index,
-                job.audio_format.as_deref(),
-            )?;
+        // One critical section across the active check and the insert: two
+        // concurrent enqueues (a double-click, or single + batch racing) must
+        // not both pass the check and spawn duplicate runners for one page.
+        let prepared = {
+            let db = self.db.lock().map_err(lock_err)?;
+            // Never allow a second active job for the same video page (not
+            // bypassed by save_as_copy).
+            let active =
+                db.has_active_job(&job.video_id, job.page_index, job.audio_format.as_deref())?;
             if active {
                 return Ok(EnqueueKind::DuplicateActive);
             }
-        }
 
-        if !save_as_copy && settings.skip_existing {
-            let recorded = self
-                .db
-                .lock()
-                .map_err(lock_err)?
-                .find_done_output_paths(&job.video_id, job.page_index)?;
-            let audio_format = job.audio_format.as_deref();
-            if recorded_output_exists(&recorded, audio_format)
-                || local_output_exists(
-                    &save_dir,
-                    &job.output_template,
-                    &job.title,
-                    &job.video_id,
-                    // Same inputs as check_conflict: an empty uploader here
-                    // once made every %(uploader)s template file invisible.
-                    job.uploader.as_deref().unwrap_or(""),
-                    job.page_index,
-                    naming::conflict_exts(audio_format),
-                )
-            {
-                return Ok(EnqueueKind::AlreadyExists);
+            if !save_as_copy && settings.skip_existing {
+                let recorded = db.find_done_output_paths(&job.video_id, job.page_index)?;
+                let audio_format = job.audio_format.as_deref();
+                if recorded_output_exists(&recorded, audio_format)
+                    || local_output_exists(
+                        &save_dir,
+                        &job.output_template,
+                        &job.title,
+                        &job.video_id,
+                        // Same inputs as check_conflict: an empty uploader here
+                        // once made every %(uploader)s template file invisible.
+                        job.uploader.as_deref().unwrap_or(""),
+                        job.page_index,
+                        naming::conflict_exts(audio_format),
+                    )
+                {
+                    return Ok(EnqueueKind::AlreadyExists);
+                }
             }
-        }
 
-        if job.id.is_empty() {
-            job.id = new_job_id();
-        }
-        job.status = JobStatus::Pending;
-        job.progress = 0.0;
-        job.error = None;
-        job.output_path = None;
+            if job.id.is_empty() {
+                job.id = new_job_id();
+            }
+            job.status = JobStatus::Pending;
+            job.progress = 0.0;
+            job.error = None;
+            job.output_path = None;
 
-        let prepared = job.clone();
-        self.db.lock().map_err(lock_err)?.insert_job(job)?;
+            let prepared = job.clone();
+            db.insert_job(job)?;
+            prepared
+        };
         self.emit(&prepared);
         self.spawn_runner(prepared.id.clone());
         Ok(EnqueueKind::Enqueued)
@@ -980,12 +991,15 @@ impl DownloadManager {
     }
 
     async fn run_job(&self, job_id: String, token: u64) {
-        // Declared before the permit so it drops after the permit returns:
-        // the shrink bookkeeping must see the freed permit.
-        let _reconcile = ReconcileOnDrop { manager: self };
-        let _permit = match self.semaphore.acquire().await {
+        // The guard owns the permit so the release path itself can retire it
+        // when the limit was lowered while this job ran (see PermitReconciler).
+        let permit = match self.semaphore.acquire().await {
             Ok(permit) => permit,
             Err(_) => return,
+        };
+        let _permit = PermitReconciler {
+            manager: self,
+            permit: Some(permit),
         };
 
         if let Some(d) = self.stop_disposition_for(&job_id, token) {
@@ -2681,6 +2695,154 @@ mod tests {
     /// from the counter instead of the issued permits (2→1 at full load→2
     /// creeps the real capacity to 3); why_new=the drift was invisible to the
     /// per-change tests, it only shows across a toggle; seam=none
+    /// Value: protects=a shrink landing on the release path itself, even
+    /// when waiters are queued; fails_when=the released permit is returned to
+    /// the pool first (a queued waiter grabs it before any reconcile can
+    /// reclaim, so the limit never drops under load); why_new=the drift tests
+    /// only asserted after a full drain; seam=none
+    #[tokio::test]
+    async fn a_shrink_lands_on_release_even_with_queued_waiters() {
+        use tokio::sync::Notify;
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        // Each runner parks on its own gate: the test decides who finishes
+        // when, so "did the queued waiter start early" is observable without
+        // timing luck.
+        struct GateMock {
+            gates: Mutex<HashMap<String, Arc<Notify>>>,
+            work_root: PathBuf,
+        }
+        impl GateMock {
+            fn gate(&self, id: &str) -> Arc<Notify> {
+                self.gates
+                    .lock()
+                    .unwrap()
+                    .entry(id.to_string())
+                    .or_insert_with(|| Arc::new(Notify::new()))
+                    .clone()
+            }
+        }
+        #[async_trait]
+        impl Downloader for GateMock {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                self.gate(&job.id).notified().await;
+                let work = fsutil::work_dir_for(&self.work_root, &job.id);
+                std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+                let path = work.join(format!("{}.mp4", job.id));
+                std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
+                Ok(path)
+            }
+        }
+        let mock = Arc::new(GateMock {
+            gates: Mutex::new(HashMap::new()),
+            work_root: work_root.clone(),
+        });
+        let (manager, _rx) =
+            test_manager(dir.path(), &work_root, mock.clone() as Arc<dyn Downloader>);
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 2;
+        manager.update_settings(settings.clone()).unwrap();
+
+        for (id, page) in [("job-q-a", 1), ("job-q-b", 2), ("job-q-c", 3)] {
+            let mut job = sample_job(id);
+            job.page_index = page;
+            // Distinct titles: the shared template would otherwise send all
+            // three to the same destination name.
+            job.title = format!("demo-{page}");
+            manager.enqueue(job, false).unwrap();
+        }
+        let mut saw_full_load = false;
+        for _ in 0..100 {
+            let jobs = manager.list().unwrap();
+            if jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count()
+                == 2
+            {
+                saw_full_load = true;
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(saw_full_load, "expected two running and one queued");
+
+        // Lower the limit with a waiter queued.
+        settings.concurrency = 1;
+        manager.update_settings(settings).unwrap();
+
+        // Which two runners got the permits is a scheduling detail; discover
+        // them and treat the third job as the queued waiter.
+        let (holders, waiter) = {
+            let jobs = manager.list().unwrap();
+            let mut holders: Vec<String> = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .map(|j| j.id.clone())
+                .collect();
+            holders.sort();
+            let waiter = jobs
+                .iter()
+                .find(|j| j.status == JobStatus::Pending)
+                .unwrap()
+                .id
+                .clone();
+            (holders, waiter)
+        };
+
+        // Finish the first holder: its permit must be RETIRED, not handed to
+        // the waiter, so the queued job must still be waiting afterwards.
+        mock.gate(&holders[0]).notify_one();
+        let mut first_done = false;
+        for _ in 0..100 {
+            let jobs = manager.list().unwrap();
+            let by_id = |id: &str| jobs.iter().find(|j| j.id == id).unwrap().status.clone();
+            if by_id(&holders[0]) == JobStatus::Done {
+                first_done = true;
+            }
+            if first_done {
+                assert_ne!(
+                    by_id(&waiter),
+                    JobStatus::Running,
+                    "the queued waiter must not take the retired permit"
+                );
+                assert_eq!(by_id(&holders[1]), JobStatus::Running);
+            }
+            if first_done && by_id(&waiter) == JobStatus::Pending {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(first_done, "the first holder should have finished");
+
+        // Finish the second holder: its permit returns (issued == target now),
+        // the waiter runs and the engine drains to zero.
+        mock.gate(&holders[1]).notify_one();
+        mock.gate(&waiter).notify_one();
+        for _ in 0..200 {
+            let jobs = manager.list().unwrap();
+            if jobs
+                .iter()
+                .all(|j| matches!(j.status, JobStatus::Done | JobStatus::Failed))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        let jobs = manager.list().unwrap();
+        assert!(
+            jobs.iter().all(|j| j.status == JobStatus::Done),
+            "all three jobs should complete: {:?}",
+            jobs.iter()
+                .map(|j| (j.id.as_str(), j.status.clone(), j.error.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn restoring_the_limit_after_a_full_load_shrink_does_not_inflate_capacity() {
         let dir = tempfile::tempdir().unwrap();
@@ -4304,13 +4466,6 @@ mod tests {
         assert!(manager.running_tasks.lock().unwrap().is_empty());
     }
 
-    /// A real failure still takes the work dir with it: the fragments a failed
-    /// attempt left behind are not a resumable product, and a retry starts the
-    /// transfer over anyway. That rule used to sit in YtDlpDownloader's Err
-    /// branch, where only a real yt-dlp process could exercise it; run_job
-    /// applies it now, because the manager is what knows whether the error
-    /// belongs to the job's current owner.
-    ///
     /// Value: protects=a runner that panics must not leave its row Running
     /// forever; fails_when=the catch_unwind net in spawn_runner is removed or
     /// stops writing a terminal row; why_new=a panic inside the spawned task
@@ -4349,6 +4504,13 @@ mod tests {
         );
     }
 
+    /// A real failure still takes the work dir with it: the fragments a failed
+    /// attempt left behind are not a resumable product, and a retry starts the
+    /// transfer over anyway. That rule used to sit in YtDlpDownloader's Err
+    /// branch, where only a real yt-dlp process could exercise it; run_job
+    /// applies it now, because the manager is what knows whether the error
+    /// belongs to the job's current owner.
+    ///
     /// Value: protects=the None arm of run_job's Err dispatch (work-dir removal
     /// plus Failed carrying the downloader's message); fails_when=the removal is
     /// dropped — a failed job keeps the fragments it will never resume from;

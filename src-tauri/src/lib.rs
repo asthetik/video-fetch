@@ -45,6 +45,12 @@ pub mod testing {
     pub use crate::ytdlp::YtDlpConfig;
 }
 
+// Shared with build.rs via #[path]; compiled here so its unit tests run
+// (cargo never runs #[cfg(test)] code inside build.rs).
+#[cfg(test)]
+#[path = "build_support.rs"]
+mod build_support;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 // Product decision (2026-09-15): a healthy launch logs zero lines — no
 // startup timing, no engine-environment noise; failures still log (the panic

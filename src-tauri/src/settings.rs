@@ -78,8 +78,12 @@ fn migrate_filename_template(settings: &mut AppSettings) -> bool {
 pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     fs::create_dir_all(app_dir)?;
     let path = settings_path(app_dir);
+    // The warning is computed output: it must never land on disk even when a
+    // caller hands back a get_settings snapshot verbatim.
+    let mut settings = settings.clone();
+    settings.save_dir_warning = None;
     let json =
-        serde_json::to_string_pretty(settings).map_err(|e| AppError::Message(e.to_string()))?;
+        serde_json::to_string_pretty(&settings).map_err(|e| AppError::Message(e.to_string()))?;
     // Written beside the real file and renamed into place: `fs::write` truncates
     // first, so an interrupted save left a settings.json that every later launch
     // failed to parse — before the window ever opened.
@@ -190,6 +194,24 @@ mod tests {
         let second = fs::metadata(settings_path(dir.path())).unwrap().ino();
 
         assert_ne!(first, second);
+    }
+
+    /// Value: protects=save_dir_warning never landing on disk; fails_when=the
+    /// store serializes the computed warning into settings.json; why_new=the
+    /// contract was held only by the settings command's manual strip; seam=none
+    #[test]
+    fn a_save_dir_warning_never_lands_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = AppSettings {
+            save_dir_warning: Some("保存目录当前不可用".into()),
+            ..AppSettings::default()
+        };
+        save_settings(dir.path(), &s).unwrap();
+        let raw = std::fs::read_to_string(settings_path(dir.path())).unwrap();
+        assert!(
+            !raw.contains("save_dir_warning"),
+            "computed field must never persist: {raw}"
+        );
     }
 
     #[test]

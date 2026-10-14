@@ -1932,3 +1932,11 @@ class TestFetchFfmpegMacos(TmpDirTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestOpenUrlTimeout(unittest.TestCase):
+    def test_open_url_sets_a_socket_timeout(self) -> None:
+        # A stalled mirror must not hold a CI job for the platform-default
+        # timeout: the kwarg is the guard, so pin it.
+        with mock.patch.object(fetch_sidecars.urllib.request, "urlopen") as urlopen:
+            fetch_sidecars._open_url("https://example.invalid/blob")
+        self.assertEqual(urlopen.call_args.kwargs.get("timeout"), 60)

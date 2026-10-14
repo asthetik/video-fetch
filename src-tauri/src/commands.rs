@@ -337,11 +337,9 @@ fn startup_save_dir(app_dir: &Path, configured: &str, default_dir: &Path) -> (St
             Some(dir) => dir.to_string(),
             None => {
                 // Explicitly not to_string_lossy: baking U+FFFD garbage into
-                // the setting would fail every following startup.
-                tracing::warn!(
-                    target: "core",
-                    "settings: 默认保存目录不是合法 UTF-8，改用回退目录"
-                );
+                // the setting would fail every following startup. eprintln,
+                // not tracing: no subscriber is installed yet at this point.
+                eprintln!("videofetch: 默认保存目录不是合法 UTF-8，改用回退目录");
                 fallback_save_dir(app_dir).to_string_lossy().into_owned()
             }
         };
@@ -350,10 +348,8 @@ fn startup_save_dir(app_dir: &Path, configured: &str, default_dir: &Path) -> (St
     if std::fs::create_dir_all(configured).is_err() {
         let fb = fallback_save_dir(app_dir);
         let _ = std::fs::create_dir_all(&fb);
-        tracing::warn!(
-            target: "core",
-            "settings: 保存目录不可用（{configured}），本次会话使用回退目录"
-        );
+        // eprintln, not tracing: this runs before the subscriber exists.
+        eprintln!("videofetch: 保存目录不可用（{configured}），本次会话使用回退目录");
         return (fb.to_string_lossy().into_owned(), false);
     }
     (configured.to_string(), false)
@@ -848,7 +844,16 @@ pub async fn enqueue_download(
 
     let save_as_copy = args.save_as_copy;
     let uploader = args.uploader;
-    let save_dir = Path::new(&settings.save_dir);
+    // The copy-numbering probe must scan the directory downloads actually
+    // land in: when startup fell back for this session, the configured dir is
+    // unusable and probing it would hand out an already-taken name.
+    let effective_save_dir = state
+        .save_dir_fallback
+        .lock()
+        .ok()
+        .and_then(|fb| fb.clone())
+        .unwrap_or_else(|| settings.save_dir.clone());
+    let save_dir = Path::new(&effective_save_dir);
     let page_count = args.page_indexes.len();
 
     let mut last = None;
@@ -1887,7 +1892,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     if removed_orphans > 0 {
         tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed_orphans} 个");
     }
-    // A row left Running by the previous session has no runner: surface it as
+    // Rows left Running or Pending by the previous session have no runner: surface it as
     // Paused so the UI offers resume instead of a frozen "downloading" bar.
     let reconciled = downloads.reconcile_interrupted_runs()?;
     if reconciled > 0 {
@@ -2319,6 +2324,41 @@ mod tests {
     /// a guest after a restart while the UI showed LoggedIn); why_new=command
     /// bodies wrap a Tauri State and are not unit-testable, and the wiring
     /// already broke silently once; seam=none
+    /// Value: protects=the save-dir fallback staying out of the kept settings
+    /// (get_settings hands the configured dir out; save_settings strips the
+    /// computed warning before the store write); fails_when=either command's
+    /// body drops one of those steps (the leak path was get_settings returning
+    /// the fallback, which the UI autosave then persisted); why_new=the leak
+    /// lived in this wiring, which only source inspection can pin; seam=none
+    #[test]
+    fn settings_commands_never_leak_the_session_fallback_into_the_kept_save_dir() {
+        let src = include_str!("commands.rs");
+        let get_start = src.find("pub fn get_settings(").expect("get_settings");
+        let save_start = src.find("pub fn save_settings(").expect("save_settings");
+        let get = &src[get_start..save_start];
+        assert!(
+            !get.contains("settings.save_dir ="),
+            "get_settings must not overwrite save_dir with the fallback"
+        );
+        assert!(
+            get.contains("save_dir_warning = Some"),
+            "get_settings must surface the fallback as a warning"
+        );
+        let save_end = src[save_start..]
+            .find("\npub ")
+            .map(|i| save_start + i)
+            .unwrap_or(src.len());
+        let save = &src[save_start..save_end];
+        assert!(
+            save.contains("save_dir_warning = None"),
+            "save_settings must strip the computed warning before persisting"
+        );
+        assert!(
+            save.contains("save_dir_fallback"),
+            "save_settings must reconcile the session fallback (clear on explicit change, keep otherwise)"
+        );
+    }
+
     #[test]
     fn every_download_start_command_rematerializes_cookies() {
         let src = include_str!("commands.rs");
@@ -2339,9 +2379,16 @@ mod tests {
                 Some(end) => &rest[..end],
                 None => rest,
             };
+            // Match the CALL, not the word: explanatory comments must not
+            // satisfy the guard (mutation-pinning requirement).
+            let call_token = if name == "resolve_url" {
+                "materialize_cookies_file_from("
+            } else {
+                "rematerialize_cookies("
+            };
             assert!(
-                body.contains("materialize"),
-                "{name} must re-materialize the cookie jar before starting a download"
+                body.contains(call_token),
+                "{name} must call {call_token}; comment text must not satisfy the guard"
             );
         }
     }

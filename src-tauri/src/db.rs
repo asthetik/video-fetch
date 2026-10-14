@@ -361,9 +361,6 @@ impl Db {
         Ok(ids)
     }
 
-    /// Startup reconciliation: a row left Running cannot have a live runner
-    /// after a relaunch, so surface it as Paused (progress and the work dir
-    /// are kept; resume picks it up). Returns how many rows changed.
     /// Pause every row whose runner died with the app: Running rows freeze
     /// mid-download, Pending rows lose the queued runner that was waiting on a
     /// permit. Both must land in a resumable state instead of waiting forever.
@@ -834,7 +831,13 @@ mod tests {
                     status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0,
                     error TEXT, output_path TEXT,
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );",
+                );
+                INSERT INTO jobs (id, url, video_id, page_index, format_id, audio_format,
+                    title, output_template, status, progress, error, output_path,
+                    created_at, updated_at)
+                VALUES ('old-1', 'u', 'BV1old', 1, '80', NULL, 'legacy',
+                    '%(title)s [%(id)s].%(ext)s', 'done', 1.0, NULL, NULL,
+                    datetime('now'), datetime('now'));",
             )
             .unwrap();
         }
@@ -843,6 +846,38 @@ mod tests {
         job.thumbnail_url = None;
         db.insert_job(&job).unwrap();
         assert!(db.get_job("legacy-meta-job").is_ok());
+        // A row written before the uploader column existed must read back as
+        // None, not error and not garbage.
+        assert_eq!(db.get_job("old-1").unwrap().uploader, None);
+    }
+
+    /// Value: protects=uploader surviving the full SQL round trip (the
+    /// parameter/column offsets shifted once already and silently);
+    /// fails_when=insert/list/find/update drop or swap the uploader column;
+    /// why_new=every fixture kept uploader None, so a swapped mapping passed
+    /// the whole suite; seam=none
+    #[test]
+    fn uploader_column_roundtrips_through_insert_list_find_and_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut job = sample_job_for_db("up-job");
+        job.uploader = Some("Alice".into());
+        db.insert_job(&job).unwrap();
+        assert_eq!(
+            db.list_jobs().unwrap()[0].uploader.as_deref(),
+            Some("Alice")
+        );
+        assert_eq!(
+            db.find_job("up-job").unwrap().unwrap().uploader.as_deref(),
+            Some("Alice")
+        );
+        let mut updated = db.find_job("up-job").unwrap().unwrap();
+        updated.uploader = Some("Bob".into());
+        db.update_job(&updated).unwrap();
+        assert_eq!(
+            db.find_job("up-job").unwrap().unwrap().uploader.as_deref(),
+            Some("Bob")
+        );
     }
 
     fn column_decl_type(conn: &Connection, column: &str) -> Option<String> {

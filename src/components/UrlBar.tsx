@@ -64,7 +64,12 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
   function handleChange(value: string) {
     onUrlChange(value);
     if (!value.trim()) {
-      // The link is gone: forget both memories so a re-paste resolves again.
+      // The link is gone: drop the pending debounce and forget both memories
+      // so a re-paste resolves again. Without the clearTimeout a timer armed by
+      // the deleted URL still fired and resolved it into an empty box.
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
       gateRef.current?.clear();
       return;
     }

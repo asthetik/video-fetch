@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+#[path = "src/build_support.rs"]
+mod build_support;
+
 fn main() {
     // The pin files live outside the src-tauri package dir, and emitting any
     // rerun-if-changed replaces cargo's default rebuild policy, so both files
@@ -15,7 +18,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("failed to read scripts/fetch_sidecars.py: {e}"));
 
     let ytdlp = normalize_ytdlp_pin(&requirements);
-    let ffmpeg = extract_ffmpeg_version(&fetch_script);
+    let ffmpeg = build_support::extract_ffmpeg_version(&fetch_script);
 
     println!("cargo:rustc-env=SIDECAR_YTDLP_VERSION={ytdlp}");
     println!("cargo:rustc-env=SIDECAR_FFMPEG_VERSION={ffmpeg}");
@@ -81,54 +84,4 @@ fn normalize_version_tag(raw: &str) -> Option<String> {
         return None;
     }
     Some(format!("{year}.{month:02}.{day:02}"))
-}
-
-/// ffmpeg pin: find the `FFMPEG_VERSION` assignment in
-/// scripts/fetch_sidecars.py and take the first quoted value on that line;
-/// trailing content (e.g. a comment) is tolerated. Mentions without a quoted
-/// value (e.g. the module docstring) are skipped.
-fn extract_ffmpeg_version(source: &str) -> String {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        // Assignment shape: the line must start with the constant name
-        // (leading indentation and trailing content are tolerated), so a
-        // mention elsewhere can never hijack the injection.
-        let Some(rest) = trimmed.strip_prefix("FFMPEG_VERSION") else {
-            continue;
-        };
-        // Anchor on the assignment: a longer constant that merely starts with
-        // FFMPEG_VERSION (e.g. FFMPEG_VERSION_FALLBACK) must never be read as
-        // this one.
-        let Some(rest) = rest.trim_start().strip_prefix('=') else {
-            continue;
-        };
-        let Some(value) = quoted_value(rest) else {
-            continue;
-        };
-        if !is_x_y_z(&value) {
-            panic!(
-                "unsupported ffmpeg version {value:?} in scripts/fetch_sidecars.py; \
-                 expected a full x.y.z release like 9.0.1"
-            );
-        }
-        return value;
-    }
-    panic!("no FFMPEG_VERSION = \"x.y.z\" assignment found in scripts/fetch_sidecars.py");
-}
-
-fn quoted_value(s: &str) -> Option<String> {
-    let start = s.find('"')? + 1;
-    let end = s[start..].find('"')? + start;
-    Some(s[start..end].to_string())
-}
-
-fn is_x_y_z(value: &str) -> bool {
-    let parts: Vec<&str> = value.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
