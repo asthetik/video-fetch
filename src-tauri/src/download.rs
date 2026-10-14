@@ -3595,6 +3595,81 @@ mod tests {
         );
     }
 
+    /// why_new=every other test template is ASCII-only, while CJK templates
+    /// are a supported, user-visible settings shape whose bytes a byte-wise
+    /// bake would turn into Latin-1 mojibake; seam=none
+    #[tokio::test]
+    async fn resume_keeps_a_non_ascii_template_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        struct TemplateCapturingDownloader {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl Downloader for TemplateCapturingDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                if let Ok(mut seen) = self.seen.lock() {
+                    seen.push(job.output_template.clone());
+                }
+                sleep(Duration::from_millis(5000)).await;
+                Err("unreachable".into())
+            }
+        }
+
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(TemplateCapturingDownloader {
+                seen: Arc::clone(&seen),
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let job_id = "job-cjk-template";
+        let template = "【%(uploader)s】%(title)s.%(ext)s";
+        let mut job = sample_job(job_id);
+        job.output_template = template.into();
+        manager.enqueue(job, false).unwrap();
+        wait_for_status(&manager, job_id, JobStatus::Running).await;
+
+        for _ in 0..200 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        manager.pause(job_id).unwrap();
+        // No clock crossing here: for a CJK template the resume drift under
+        // the old bake came from re-encoding mojibake, not from the clock.
+        manager.resume(job_id).unwrap();
+        for _ in 0..200 {
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "the resume must re-run the downloader");
+        assert_eq!(
+            seen[0], template,
+            "the first run must see the template with its non-ASCII bytes intact"
+        );
+        assert_eq!(
+            seen[1], seen[0],
+            "resume must not re-encode the template into mojibake"
+        );
+        let jobs = manager.list().unwrap();
+        let row = jobs.iter().find(|j| j.id == job_id).unwrap();
+        assert_eq!(
+            row.output_template, template,
+            "the job row must persist the template with its non-ASCII bytes intact"
+        );
+    }
+
     /// Queue-level pause/resume: pause_all covers exactly Pending|Running and
     /// resume_all covers exactly Paused; counts reflect actual changes.
     ///
