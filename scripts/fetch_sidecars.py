@@ -539,7 +539,9 @@ def request_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 def _open_url(url: str, headers: dict[str, str] | None = None):
     request = urllib.request.Request(url, headers=request_headers(headers))
-    return urllib.request.urlopen(request)
+    # Socket-level timeout: a stalled mirror must not hold a CI job for the
+    # platform-default 360 minutes.
+    return urllib.request.urlopen(request, timeout=60)
 
 
 def fetch_bytes(url: str, headers: dict[str, str] | None = None) -> bytes:

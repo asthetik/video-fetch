@@ -66,6 +66,16 @@ xattr -cr "/Applications/Video Fetch.app"
 chmod +x Video-Fetch-*-Linux-*.AppImage
 ```
 
+### 校验下载文件
+
+每个 Release 都附带 `SHA256SUMS`，记录全部安装包的 SHA-256 校验和。下载后先校验再安装：
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+macOS 使用 `shasum -a 256 -c SHA256SUMS`。在没有官方签名的情况下，校验和是确认「拿到的就是发布产物」的唯一手段：它能发现下载损坏与传输途中的篡改，但保护范围以校验和列表本身来自可信的发布页面为前提。
+
 ## 使用
 
 1. 粘贴视频链接，等待解析；粘贴 UP 主空间链接则会列出该 UP 主的全部投稿

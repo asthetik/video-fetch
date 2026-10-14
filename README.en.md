@@ -66,6 +66,16 @@ A `.AppImage` usually runs as-is; if it complains about missing execute permissi
 chmod +x Video-Fetch-*-Linux-*.AppImage
 ```
 
+### Verifying downloads
+
+Every release ships a `SHA256SUMS` file recording the SHA-256 of each installer. Verify before installing:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+On macOS use `shasum -a 256 -c SHA256SUMS`. With no official code signing in place, the checksum file is the only way to confirm you got exactly what was released: it catches corrupted downloads and tampering in transit, but only as far as the checksum list itself came from the trusted release page.
+
 ## Usage
 
 1. Paste a video link and wait for it to resolve; pasting a creator’s page link lists all of their uploads
