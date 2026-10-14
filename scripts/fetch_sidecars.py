@@ -102,6 +102,11 @@ FFMPEG_MACOS_TEAM_ID = "KU3N25YGLU"
 
 # martin-riedl.de answers Python-urllib's default User-Agent with 403.
 HTTP_USER_AGENT = "videofetch-fetch-sidecars/1.0"
+# Every request carries a finite timeout so a black-holed connection fails
+# the fetch instead of hanging the calling job forever. It bounds each
+# blocking socket operation (connect, and every read), not the whole
+# download: a large artifact keeps downloading as long as bytes keep moving.
+HTTP_TIMEOUT_SECONDS = 60
 
 # FFmpeg release branch to ship (x.y.z). Linux/Windows use the pinned BtbN
 # snapshot's matching release-branch builds (n<x.y>); macOS uses the
@@ -539,7 +544,7 @@ def request_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 def _open_url(url: str, headers: dict[str, str] | None = None):
     request = urllib.request.Request(url, headers=request_headers(headers))
-    return urllib.request.urlopen(request)
+    return urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS)
 
 
 def fetch_bytes(url: str, headers: dict[str, str] | None = None) -> bytes:

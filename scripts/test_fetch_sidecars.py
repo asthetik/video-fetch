@@ -1433,6 +1433,35 @@ class TestHttpUserAgent(unittest.TestCase):
         self.assertNotIn("urllib", fetch_sidecars.HTTP_USER_AGENT.lower())
 
 
+class TestHttpTimeout(unittest.TestCase):
+    """A black-holed TCP connection must fail the fetch instead of hanging
+    the calling job: urlopen without a timeout can block forever."""
+
+    def test_open_url_passes_a_finite_timeout(self) -> None:
+        with mock.patch.object(
+            fetch_sidecars.urllib.request, "urlopen"
+        ) as urlopen:
+            fetch_sidecars._open_url("https://example.com/blob")
+        timeout = urlopen.call_args.kwargs.get("timeout")
+        self.assertIsNotNone(timeout, "urlopen must be called with a timeout")
+        self.assertGreater(timeout, 0)
+        self.assertEqual(timeout, fetch_sidecars.HTTP_TIMEOUT_SECONDS)
+
+    def test_download_streams_through_the_same_timeout(self) -> None:
+        # download() is the bulk path (multi-hundred-MB ffmpeg zips); it
+        # must go through the same bounded open, not a bare urlopen.
+        with mock.patch.object(
+            fetch_sidecars.urllib.request, "urlopen",
+            return_value=io.BytesIO(b"payload"),
+        ) as urlopen:
+            with tempfile.TemporaryDirectory() as td:
+                dest = Path(td) / "artifact.bin"
+                fetch_sidecars.download("https://example.com/blob", dest)
+                self.assertEqual(dest.read_bytes(), b"payload")
+        timeout = urlopen.call_args.kwargs.get("timeout")
+        self.assertEqual(timeout, fetch_sidecars.HTTP_TIMEOUT_SECONDS)
+
+
 def thin_arm64_header() -> bytes:
     return (
         (0xFEEDFACF).to_bytes(4, "little")

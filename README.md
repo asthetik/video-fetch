@@ -66,6 +66,26 @@ xattr -cr "/Applications/Video Fetch.app"
 chmod +x Video-Fetch-*-Linux-*.AppImage
 ```
 
+### 校验安装包（可选）
+
+每个 Release 都附带一份 `SHA256SUMS`，列着全部安装包的 SHA-256 摘要。安装前可以先核对（示例文件名换成你下载的那一份）：
+
+```bash
+# macOS
+shasum -a 256 Video-Fetch-v0.4.3-macOS.dmg
+
+# Linux
+sha256sum Video-Fetch-v0.4.3-Linux-x86_64.AppImage
+```
+
+Windows（PowerShell）：
+
+```powershell
+Get-FileHash .\Video-Fetch-v0.4.3-Windows-x64.msi -Algorithm SHA256
+```
+
+把输出的 SHA-256 与 `SHA256SUMS` 里同一文件名那行对照，一致即可安装。要说明的是：`SHA256SUMS` 与安装包出自同一份发布，它能证明文件在下载途中没有被改动，证明不了发布者本身可信——macOS 一节的 `xattr -cr` 会绕过系统对未签名应用的拦截，是否执行仍请自行判断。摘要对不上时请勿安装，重新下载，或到 [Issues](https://github.com/asthetik/video-fetch/issues) 反馈。
+
 ## 使用
 
 1. 粘贴视频链接，等待解析；粘贴 UP 主空间链接则会列出该 UP 主的全部投稿
