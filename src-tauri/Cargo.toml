@@ -29,23 +29,23 @@ name = "soak"
 required-features = ["test-utils"]
 
 [build-dependencies]
-tauri-build = { version = "2.7.1", features = [] }
+tauri-build = { version = "2.7.2", features = [] }
 
 [dependencies]
-tauri = { version = "2.12.1", features = [] }
-tauri-plugin-opener = "2.7.0"
+tauri = { version = "2.12.3", features = [] }
+tauri-plugin-opener = "2.7.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 url = "2.5.8"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-tokio = { version = "1.53.2", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
+tokio = { version = "1.53.3", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
 async-trait = "0.1.92"
-tauri-plugin-dialog = "2.8.1"
+tauri-plugin-dialog = "2.8.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 which = "8.0.6"
-tauri-plugin-shell = "2.4.0"
-tauri-plugin-single-instance = "2.5.2"
+tauri-plugin-shell = "2.5.0"
+tauri-plugin-single-instance = "2.5.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
 md-5 = "0.11.0"
 percent-encoding = "2.3.2"
