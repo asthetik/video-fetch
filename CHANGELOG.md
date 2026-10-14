@@ -2,7 +2,7 @@
 
 本项目的版本说明集中记录于此，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.4.2] - 未发布
+## [0.4.2] - 2026-10-14
 
 ### Fixed
 
@@ -23,6 +23,7 @@
 - Linux 构建基线切回 `ubuntu-22.04`：0.4.0 起 Linux 产物在 24.04 上构建，glibc 地板从 2.34 升到 2.39，Ubuntu 22.04、Debian 12、RHEL 9 上无法启动（v0.4.0 发布说明中的「Linux 兼容性提示」即因此而设）。趁 GitHub 尚未淘汰 22.04 镜像（2027-04-17 退役）换回旧基线后，产物 glibc 地板回落到 2.34，上述发行版恢复支持。
 - CI 的 Rust 缓存桶名带上运行镜像：`Swatinem/rust-cache` 的缓存 key 只含系统与架构、不含镜像，而缓存内容是编译产物——切回 22.04 时旧镜像构建的 `target/` 被整份还原，五个 Linux 格子因此变红，当时只能人工清空整个缓存存储才通过。现在四个 Rust 任务的桶名都由 `matrix.os` 派生（`lint` 为此改成单格矩阵，让桶名与 `runs-on` 同源，不再是人工复制的第二份标签），镜像标签一变 key 即失效，不再依赖带外清理。浮动标签不在此列：`macos-latest` / `windows-latest` 的标签不随镜像滚动而变，key 也就不会动——这是浮动本身要付的代价。
 - Linux 应用二进制（`video-fetch`）的 glibc 地板改为构建期断言：新增 `scripts/check_glibc_floor.py`，读取该二进制的 `.gnu.version_r`，只要有高于 2.34 的 `GLIBC_` 版本需求即失败——PR 上的 release-smoke 与发布流程都跑它。此前「地板回落到 2.34」这条承诺没有任何东西守着：升级 tauri 或 WebView 绑定就可能把它抬高，而第一个发现的人会是 RHEL 9 上的用户。版本按数值比较（`2.9` 旧于 `2.34`），认不出序的版本需求一律算失败而非警告——读不出来的答案不能当作通过；不带数字的 `GLIBC_ABI_DT_RELR` 按它引入的 2.36 计。随包的 yt-dlp 与 ffmpeg 是另外两个 ELF，不在本断言内：它们的地板由上游构建决定（2026-10-13 实测为 2.14 与 2.28，均低于 2.34），要纳入需先决定 `GLIBC_PRIVATE` 这类无版本号需求的处理方式。
+- 前后端依赖小版本例行更新：npm 侧 `@tauri-apps/api` / `@tauri-apps/cli` / `plugin-opener`、`vite`、`react` 19.2→19.3、`lucide-react`、`motion` 等，cargo 侧 `tauri` / `tauri-build` / 各 tauri 插件、`serde_json`、`tokio`。全部落在既有语义化版本范围内，无 major 升级，锁文件同步刷新传递依赖。
 
 ### 已知行为
 
