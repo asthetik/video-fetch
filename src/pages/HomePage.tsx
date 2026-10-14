@@ -96,9 +96,16 @@ export function HomePage({
         if (requestIdRef.current !== requestId) {
           return false;
         }
-        if (!metaRef.current) {
-          setFormatsLoading(false);
-          setError(err instanceof Error ? err.message : String(err));
+        // Always stop the formats spinner: a refresh failing after the card
+        // once rendered used to leave "正在获取清晰度…" spinning forever with
+        // every download button disabled. With the card on screen the error
+        // folds into its formats slot, which carries the retry button.
+        setFormatsLoading(false);
+        const message = err instanceof Error ? err.message : String(err);
+        if (metaRef.current) {
+          setFormatsError(message);
+        } else {
+          setError(message);
         }
         return false;
       } finally {

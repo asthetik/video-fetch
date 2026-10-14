@@ -617,6 +617,16 @@ pub async fn resolve_url(
                         "resolve: 失败 {}",
                         crate::activity_log::clean_log_message(&e.to_string())
                     );
+                    // Also announce on the event channel: the invoke rejects,
+                    // but a UI whose spinner keys on formats_failed must not
+                    // be left waiting.
+                    let _ = app.emit(
+                        RESOLVE_FORMATS_FAILED_EVENT,
+                        &ResolveFormatsFailedEvent {
+                            request_id,
+                            error: e.to_string(),
+                        },
+                    );
                     return Err(e);
                 }
             }
@@ -627,9 +637,18 @@ pub async fn resolve_url(
         return Err(AppError::Message("解析已取消（有更新的请求）".into()));
     }
     for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
-        state
-            .downloads
-            .upsert_resolve_cache(&key, &final_meta, now)?;
+        if let Err(e) = state.downloads.upsert_resolve_cache(&key, &final_meta, now) {
+            // Same channel as the fallback failure: a cache write error after
+            // the formats arrived must not leave the spinner running.
+            let _ = app.emit(
+                RESOLVE_FORMATS_FAILED_EVENT,
+                &ResolveFormatsFailedEvent {
+                    request_id,
+                    error: e.to_string(),
+                },
+            );
+            return Err(e);
+        }
     }
     let _ = app.emit(
         RESOLVE_COMPLETE_EVENT,
