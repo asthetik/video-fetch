@@ -4303,11 +4303,6 @@ mod tests {
     /// applies it now, because the manager is what knows whether the error
     /// belongs to the job's current owner.
     ///
-    /// Value: protects=the None arm of run_job's Err dispatch (work-dir removal
-    /// plus Failed carrying the downloader's message); fails_when=the removal is
-    /// dropped — a failed job keeps the fragments it will never resume from;
-    /// why_new=the downloader-side rule had no behavioural test, only a unit
-    /// test of the pure predicate that no longer decides anything; seam=none
     /// Value: protects=a runner that panics must not leave its row Running
     /// forever; fails_when=the catch_unwind net in spawn_runner is removed or
     /// stops writing a terminal row; why_new=a panic inside the spawned task
@@ -4346,6 +4341,11 @@ mod tests {
         );
     }
 
+    /// Value: protects=the None arm of run_job's Err dispatch (work-dir removal
+    /// plus Failed carrying the downloader's message); fails_when=the removal is
+    /// dropped — a failed job keeps the fragments it will never resume from;
+    /// why_new=the downloader-side rule had no behavioural test, only a unit
+    /// test of the pure predicate that no longer decides anything; seam=none
     #[tokio::test]
     async fn a_real_error_removes_the_work_dir_and_fails_the_job() {
         let dir = tempfile::tempdir().unwrap();

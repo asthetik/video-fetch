@@ -46,6 +46,7 @@ impl Harness {
         std::fs::create_dir_all(&save_dir).unwrap();
         let db_path = tmp.path().join("jobs.db");
         let settings = AppSettings {
+            save_dir_warning: None,
             save_dir: save_dir.to_string_lossy().into_owned(),
             concurrency,
             filename_template: "%(title)s [%(id)s].%(ext)s".into(),

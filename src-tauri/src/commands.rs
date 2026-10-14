@@ -82,6 +82,9 @@ pub struct AppState {
     pub window_theme: std::sync::Mutex<WindowTheme>,
     /// Memoized openable-root resolution, keyed by its raw inputs.
     pub openable_roots_cache: std::sync::Mutex<Option<OpenableRootsCache>>,
+    /// Set when startup fell back to another save dir for this session only:
+    /// downloads run here while settings keep (and persist) the user's choice.
+    pub save_dir_fallback: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +216,24 @@ fn warn_cmd(scope: &str, e: &AppError) {
         "{scope}: {}",
         crate::activity_log::clean_log_message(&e.to_string())
     );
+}
+
+/// Split the startup save-dir decision into what the user keeps (state and
+/// disk) and what this session runs on. A transient failure's fallback must
+/// never replace the configured value: the settings UI round-trips the whole
+/// struct through its autosave, so anything handed out here gets persisted on
+/// the next unrelated save — a flaky mount used to relocate every future
+/// download that way. Bootstrap (persist) adopts its choice for good.
+pub(crate) fn split_save_dir(
+    mut settings: AppSettings,
+    session_dir: String,
+    persist: bool,
+) -> (AppSettings, Option<String>) {
+    if !persist && session_dir != settings.save_dir {
+        return (settings, Some(session_dir));
+    }
+    settings.save_dir = session_dir;
+    (settings, None)
 }
 
 /// Map a panicked blocking task to the same error family as command failures.
@@ -1148,19 +1169,28 @@ pub async fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppR
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
-    let settings = state
+    let mut settings = state
         .settings
         .lock()
         .map_err(|_| AppError::Message("settings lock poisoned".into()))?
         .clone();
+    if let Ok(fallback) = state.save_dir_fallback.lock()
+        && let Some(path) = fallback.as_deref()
+    {
+        settings.save_dir_warning = Some(format!(
+            "保存目录当前不可用；本次会话的下载会落到 {path}，配置的目录未被改动"
+        ));
+    }
     Ok(settings)
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<()> {
+pub fn save_settings(state: State<'_, AppState>, mut settings: AppSettings) -> AppResult<()> {
     naming::validate_output_template(&settings.filename_template)
         .map_err(AppError::Message)
         .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
+    // Computed output, never part of the stored file.
+    settings.save_dir_warning = None;
     let old = state
         .settings
         .lock()
@@ -1179,15 +1209,28 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
     if old.skip_existing != settings.skip_existing {
         changed.push("skip_existing");
     }
+    let save_dir_changed = old.save_dir != settings.save_dir;
     settings_store::save_settings(&state.app_dir, &settings)
         .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
     *state
         .settings
         .lock()
         .map_err(|_| AppError::Message("settings lock poisoned".into()))? = settings.clone();
+    if save_dir_changed {
+        // An explicit new save dir wins for this session too.
+        if let Ok(mut fallback) = state.save_dir_fallback.lock() {
+            *fallback = None;
+        }
+    }
+    let mut effective = settings.clone();
+    if let Ok(fallback) = state.save_dir_fallback.lock()
+        && let Some(path) = fallback.as_deref()
+    {
+        effective.save_dir = path.to_string();
+    }
     state
         .downloads
-        .update_settings(settings)
+        .update_settings(effective)
         .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
     // A no-op save logs nothing: "nothing happened" fails the record criteria.
     if !changed.is_empty() {
@@ -1501,7 +1544,7 @@ pub struct OpenableRootsCache {
 fn roots_from_cache(
     cache: &std::sync::Mutex<Option<OpenableRootsCache>>,
     inputs: Vec<String>,
-    compute: impl FnOnce() -> Vec<PathBuf>,
+    compute: impl FnOnce() -> (Vec<PathBuf>, bool),
 ) -> Vec<PathBuf> {
     if let Ok(mut slot) = cache.lock() {
         if let Some(hit) = slot.as_ref()
@@ -1509,14 +1552,20 @@ fn roots_from_cache(
         {
             return hit.roots.clone();
         }
-        let roots = compute();
-        *slot = Some(OpenableRootsCache {
-            inputs,
-            roots: roots.clone(),
-        });
+        // `cacheable = false` means the resolution was incomplete (a root that
+        // would not resolve is mount state, not a stable fact): return what
+        // resolved but cache nothing, so the next call retries instead of
+        // serving a false "not openable" until some unrelated change.
+        let (roots, cacheable) = compute();
+        if cacheable {
+            *slot = Some(OpenableRootsCache {
+                inputs,
+                roots: roots.clone(),
+            });
+        }
         return roots;
     }
-    compute()
+    compute().0
 }
 
 /// The directories the app writes into: the log folder, the current save
@@ -1560,9 +1609,27 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
     }
     roots_from_cache(&state.openable_roots_cache, inputs, move || {
         let mut roots: Vec<PathBuf> = Vec::new();
-        roots.extend(resolve(state.activity_log.logs_dir(), "日志目录"));
+        let mut complete = true;
+        let push =
+            |dir: &Path, what: &str, roots: &mut Vec<PathBuf>, complete: &mut bool| match resolve(
+                dir, what,
+            ) {
+                Some(path) => roots.push(path),
+                None => *complete = false,
+            };
+        push(
+            state.activity_log.logs_dir(),
+            "日志目录",
+            &mut roots,
+            &mut complete,
+        );
         if let Ok(settings) = state.settings.lock() {
-            roots.extend(resolve(Path::new(&settings.save_dir), "保存目录"));
+            push(
+                Path::new(&settings.save_dir),
+                "保存目录",
+                &mut roots,
+                &mut complete,
+            );
         }
         for job in &jobs {
             if let Some(parent) = job
@@ -1570,10 +1637,10 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
                 .as_deref()
                 .and_then(|p| Path::new(p).parent())
             {
-                roots.extend(resolve(parent, "历史任务的保存目录"));
+                push(parent, "历史任务的保存目录", &mut roots, &mut complete);
             }
         }
-        roots
+        (roots, complete)
     })
 }
 
@@ -1753,15 +1820,24 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     std::fs::create_dir_all(&cache_dir)?;
     let cookies_file = cache_dir.join("cookies.txt");
 
-    let mut settings = settings_store::load_settings(&app_dir)?;
+    let settings = settings_store::load_settings(&app_dir)?;
     let (session_save_dir, persist_save_dir) = startup_save_dir(
         &app_dir,
         &settings.save_dir,
         &default_save_dir(app, &app_dir),
     );
-    settings.save_dir = session_save_dir;
+    let (settings, save_dir_fallback) =
+        split_save_dir(settings, session_save_dir.clone(), persist_save_dir);
     if persist_save_dir {
         let _ = settings_store::save_settings(&app_dir, &settings);
+    }
+    let _ = std::fs::create_dir_all(&session_save_dir);
+    // The session downloads into the effective dir even when a fallback is in
+    // play; get_settings keeps reporting (and saves keep storing) the user's
+    // configured one.
+    let mut session_settings = settings.clone();
+    if let Some(fb) = &save_dir_fallback {
+        session_settings.save_dir = fb.clone();
     }
 
     let logs_dir = app_dir.join("logs");
@@ -1799,7 +1875,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let progress: Arc<dyn ProgressEmitter> = Arc::new(TauriProgressEmitter::new(app.clone()));
     let downloads = DownloadManager::with_ytdlp(
         db,
-        settings.clone(),
+        session_settings,
         ytdlp.clone(),
         Some(cookies_file.clone()),
         progress,
@@ -1838,6 +1914,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         activity_log,
         window_theme: std::sync::Mutex::new(WindowTheme::System),
         openable_roots_cache: std::sync::Mutex::new(None),
+        save_dir_fallback: std::sync::Mutex::new(save_dir_fallback),
     })
 }
 
@@ -2151,12 +2228,46 @@ mod tests {
         assert_eq!(session, fallback_save_dir(app_dir.path()).to_string_lossy());
     }
 
-    /// Value: protects=every command that starts or restarts a download
-    /// re-materializing the cookie jar first; fails_when=any listed command's
-    /// body drops its materialize call (resume/retry once launched yt-dlp as
-    /// a guest after a restart while the UI showed LoggedIn); why_new=command
-    /// bodies wrap a Tauri State and are not unit-testable, and the wiring
-    /// already broke silently once; seam=none
+    /// Value: protects=the user's configured save dir surviving a transient
+    /// startup failure; fails_when=split_save_dir puts the session fallback
+    /// into the kept settings (the settings UI would persist it on its next
+    /// autosave and permanently relocate every download); why_new=A7's first
+    /// fix kept the file correct at startup but leaked the fallback through
+    /// get_settings + autosave; seam=none
+    #[test]
+    fn a_transient_fallback_never_replaces_the_kept_save_dir() {
+        let settings = AppSettings {
+            save_dir: "/media/usb/downloads".into(),
+            ..AppSettings::default()
+        };
+        let (kept, fallback) = split_save_dir(settings, "/app-data/downloads".into(), false);
+        assert_eq!(kept.save_dir, "/media/usb/downloads");
+        assert_eq!(fallback.as_deref(), Some("/app-data/downloads"));
+    }
+
+    #[test]
+    fn bootstrap_adopts_the_default_dir_without_a_fallback() {
+        let settings = AppSettings {
+            save_dir: String::new(),
+            ..AppSettings::default()
+        };
+        let (kept, fallback) = split_save_dir(settings, "/home/u/Downloads".into(), true);
+        assert_eq!(kept.save_dir, "/home/u/Downloads");
+        assert!(fallback.is_none());
+    }
+
+    #[test]
+    fn a_usable_save_dir_passes_through_unchanged() {
+        let settings = AppSettings {
+            save_dir: "/media/usb/downloads".into(),
+            ..AppSettings::default()
+        };
+        let (kept, fallback) =
+            split_save_dir(settings.clone(), "/media/usb/downloads".into(), false);
+        assert_eq!(kept.save_dir, settings.save_dir);
+        assert!(fallback.is_none());
+    }
+
     /// Value: protects=openable_roots caching against its raw inputs;
     /// fails_when=the cache ignores an input change (stale roots refuse fresh
     /// paths) or skips caching (every open re-canonicalizes the full history,
@@ -2168,18 +2279,46 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let compute = || {
             calls.set(calls.get() + 1);
-            vec![PathBuf::from("/resolved")]
+            (vec![PathBuf::from("/resolved")], true)
         };
         let inputs = vec!["/logs".to_string(), "/downloads".to_string()];
         assert_eq!(roots_from_cache(&cache, inputs.clone(), compute).len(), 1);
         assert_eq!(roots_from_cache(&cache, inputs.clone(), compute).len(), 1);
         assert_eq!(calls.get(), 1, "same inputs must not re-resolve");
-        let mut changed = inputs;
+        let mut changed = inputs.clone();
         changed.push("/old-job-dir".to_string());
         assert_eq!(roots_from_cache(&cache, changed, compute).len(), 1);
         assert_eq!(calls.get(), 2, "changed inputs must re-resolve");
+        // An incomplete resolution is mount state: never cached.
+        assert_eq!(
+            roots_from_cache(&cache, inputs.clone(), || {
+                calls.set(calls.get() + 1);
+                (vec![PathBuf::from("/partial")], false)
+            })
+            .len(),
+            1
+        );
+        assert_eq!(
+            roots_from_cache(&cache, inputs, || {
+                calls.set(calls.get() + 1);
+                (vec![PathBuf::from("/resolved")], true)
+            })
+            .len(),
+            1
+        );
+        assert_eq!(
+            calls.get(),
+            4,
+            "an uncached result must recompute next time"
+        );
     }
 
+    /// Value: protects=every command that starts or restarts a download
+    /// re-materializing the cookie jar first; fails_when=any listed command's
+    /// body drops its materialize call (resume/retry once launched yt-dlp as
+    /// a guest after a restart while the UI showed LoggedIn); why_new=command
+    /// bodies wrap a Tauri State and are not unit-testable, and the wiring
+    /// already broke silently once; seam=none
     #[test]
     fn every_download_start_command_rematerializes_cookies() {
         let src = include_str!("commands.rs");

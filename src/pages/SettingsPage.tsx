@@ -213,6 +213,9 @@ export function SettingsPage() {
               打开
             </button>
           </div>
+          {settings.save_dir_warning && (
+            <p className="url-hint error">{settings.save_dir_warning}</p>
+          )}
         </label>
 
         <div className="settings-row-block concurrency-row">

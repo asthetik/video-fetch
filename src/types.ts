@@ -71,6 +71,9 @@ export interface DownloadJob {
 
 export interface AppSettings {
   save_dir: string;
+  /** Computed, never persisted: set when this session runs on a fallback save
+   * dir because the configured one was unusable at startup. */
+  save_dir_warning?: string | null;
   concurrency: number;
   filename_template: string;
   skip_existing: boolean;

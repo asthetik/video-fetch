@@ -143,6 +143,11 @@ pub struct DownloadJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub save_dir: String,
+    /// Computed, never persisted: get_settings sets it when this session runs
+    /// on a fallback save dir (the configured one was unusable at startup);
+    /// save_settings strips it before writing the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_dir_warning: Option<String>,
     pub concurrency: u32,
     pub filename_template: String,
     pub skip_existing: bool,
@@ -152,6 +157,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             save_dir: String::new(),
+            save_dir_warning: None,
             concurrency: 3,
             filename_template: "%(title)s [%(id)s].%(ext)s".into(),
             skip_existing: true,

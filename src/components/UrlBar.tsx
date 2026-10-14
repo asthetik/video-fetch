@@ -24,12 +24,16 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
   const dispatch = useCallback(
     (nextUrl: string) => {
       const gate = gateRef.current;
-      if (!gate || !gate.shouldDispatch(nextUrl)) {
+      if (!gate) {
+        return;
+      }
+      const id = gate.begin(nextUrl);
+      if (id === null) {
         return;
       }
       void onResolve(nextUrl).then(
-        (ok) => gate.settle(nextUrl, ok),
-        () => gate.settle(nextUrl, false),
+        (ok) => gate.settle(id, ok),
+        () => gate.settle(id, false),
       );
     },
     [onResolve],
