@@ -161,18 +161,43 @@ pub fn relocate_file(src: &Path, dest: &Path) -> std::io::Result<()> {
     }
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            if let Err(copy_err) = std::fs::copy(src, dest) {
-                let _ = std::fs::remove_file(dest);
-                return Err(copy_err);
-            }
-            if let Err(remove_err) = std::fs::remove_file(src) {
-                let _ = std::fs::remove_file(dest);
-                return Err(remove_err);
-            }
-            Ok(())
-        }
+        Err(_) => copy_across_volumes(src, dest),
     }
+}
+
+/// The fallback for a `rename` that cannot cross volumes (the save dir on
+/// another mount). The copy lands on a sibling `….tmp` first and is renamed
+/// into place, because a copy straight to `dest` is only atomic in name: a
+/// death mid-copy (SIGKILL, panic abort, power loss) leaves a truncated file
+/// where the delivered one belongs. The next launch's recovery would then
+/// find the work dir's complete product, try to relocate it, fail
+/// `destination exists`, and fail the job — and that failure drops the work
+/// dir, taking the finished file it was about to deliver with it. Renaming
+/// into place leaves either no `dest` or the whole file, and the leftover
+/// temp only costs the next attempt a truncate.
+fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let Some(name) = dest.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("destination has no file name: {}", dest.display()),
+        ));
+    };
+    let tmp = dest.with_file_name(format!("{}.tmp", name.to_string_lossy()));
+    if let Err(copy_err) = std::fs::copy(src, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(copy_err);
+    }
+    if let Err(rename_err) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(rename_err);
+    }
+    // Same rule as the copy: a source that would not go away removes the
+    // destination again, so a retry still sees one complete copy and not two.
+    if let Err(remove_err) = std::fs::remove_file(src) {
+        let _ = std::fs::remove_file(dest);
+        return Err(remove_err);
+    }
+    Ok(())
 }
 
 pub fn remove_job_work_dir(work_root: &Path, job_id: &str) -> std::io::Result<()> {
@@ -455,5 +480,84 @@ mod tests {
         assert!(dest.is_file());
         assert!(!src.exists());
         assert_eq!(fs::read(&dest).unwrap(), b"video");
+    }
+
+    /// The cross-volume fallback is a rename into place, so the destination is
+    /// only ever the whole file — that is what a death mid-copy cannot
+    /// guarantee, and the truncated file it would leave makes the next
+    /// relocation fail (and that failure drops the work dir). These drive the
+    /// fallback directly: a unit test cannot make `rename` fail with EXDEV.
+    ///
+    /// The death window itself is unpinnable here — it needs the process to
+    /// die between the copy's first byte and its last, which no assertion can
+    /// stage. What is pinned is the mechanism that closes it: delivery through
+    /// a temp, no leftovers, and the temp's own failure paths.
+    fn cross_volume_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("work/a.mp4");
+        let dest = dir.path().join("save/sub/a.mp4");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&src, b"video").unwrap();
+        (dir, src, dest)
+    }
+
+    #[test]
+    fn copy_across_volumes_delivers_the_whole_file_and_no_temp() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        copy_across_volumes(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"video");
+        assert!(
+            !src.exists(),
+            "the source must not outlive a delivered copy"
+        );
+        assert!(
+            !dest.with_file_name("a.mp4.tmp").exists(),
+            "the temp must not survive a successful copy"
+        );
+    }
+
+    #[test]
+    fn copy_across_volumes_overwrites_a_temp_left_by_a_dead_copy() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        // What a death mid-copy leaves behind under the new scheme: a partial
+        // temp, which the next attempt must truncate rather than trip over.
+        fs::write(dest.with_file_name("a.mp4.tmp"), b"half").unwrap();
+        copy_across_volumes(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"video");
+        assert!(!dest.with_file_name("a.mp4.tmp").exists());
+    }
+
+    #[test]
+    fn copy_across_volumes_leaves_no_destination_when_the_copy_fails() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        fs::remove_file(&src).unwrap();
+        assert!(copy_across_volumes(&src, &dest).is_err());
+        assert!(
+            !dest.exists(),
+            "a failed copy must not leave a file where the delivered one belongs"
+        );
+        assert!(!dest.with_file_name("a.mp4.tmp").exists());
+    }
+
+    /// The source not going away removes the destination again, so a retry
+    /// sees one complete copy rather than two files with the same name.
+    #[cfg(unix)]
+    #[test]
+    fn copy_across_volumes_removes_the_destination_when_the_source_stays() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, src, dest) = cross_volume_fixture();
+        // A read-only parent lets the copy read the source but not unlink it.
+        let src_dir = src.parent().unwrap();
+        fs::set_permissions(src_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = copy_across_volumes(&src, &dest);
+        fs::set_permissions(src_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err(), "an unremovable source must fail the move");
+        assert!(src.exists());
+        assert!(
+            !dest.exists(),
+            "a source that stayed must take the destination with it"
+        );
+        assert!(!dest.with_file_name("a.mp4.tmp").exists());
     }
 }
