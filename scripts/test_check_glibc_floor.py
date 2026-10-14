@@ -310,6 +310,51 @@ class ReadVersionNeedsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not terminated"):
             read_version_needs(bytes(data))
 
+    def test_rejects_truncated_extended_section_count(self) -> None:
+        data, _verneed_off, shoff = _build(
+            [("libc.so.6", ["GLIBC_2.34"])], extended_count=True
+        )
+        # Cut inside section 0's header: the real section count is unreadable,
+        # and an unreadable count must fail the check, not find zero sections.
+        with self.assertRaisesRegex(ValueError, "extended section count"):
+            read_version_needs(bytes(data[: shoff + 0x10]))
+
+    def test_rejects_extended_section_count_of_zero(self) -> None:
+        data, _verneed_off, shoff = _build(
+            [("libc.so.6", ["GLIBC_2.34"])], extended_count=True
+        )
+        struct.pack_into("<Q", data, shoff + 0x20, 0)  # section 0's sh_size
+        with self.assertRaisesRegex(ValueError, "records no section count"):
+            read_version_needs(bytes(data))
+
+    def test_rejects_needs_without_an_auxiliary_entry(self) -> None:
+        data, verneed_off, _ = _build(
+            [("libc.so.6", ["GLIBC_2.34"]), ("libm.so.6", ["GLIBC_2.39"])]
+        )
+        # vn_aux of the second Verneed: its need must fail the check, not
+        # vanish — a zero offset here once walked the Verneed itself as a
+        # Vernaux and swallowed GLIBC_2.39.
+        struct.pack_into("<I", data, verneed_off + 32 + 8, 0)
+        with self.assertRaisesRegex(ValueError, "no auxiliary entry"):
+            read_version_needs(bytes(data))
+
+    def test_rejects_aux_offset_overlapping_the_entry(self) -> None:
+        data, verneed_off, _ = _build([("libc.so.6", ["GLIBC_2.34"])])
+        # vn_aux lands inside the Verneed itself: the walk would read the
+        # entry's own tail as a Vernaux.
+        struct.pack_into("<I", data, verneed_off + 8, 8)
+        with self.assertRaisesRegex(ValueError, "overlaps its entry"):
+            read_version_needs(bytes(data))
+
+    def test_accepts_a_library_without_needs_after_one_with(self) -> None:
+        data, _verneed_off, _ = _build(
+            [("libc.so.6", ["GLIBC_2.34"]), ("libm.so.6", [])]
+        )
+        self.assertEqual(
+            read_version_needs(bytes(data)),
+            [("libc.so.6", "GLIBC_2.34")],
+        )
+
 
 class EvaluateTest(unittest.TestCase):
     def test_floor_is_the_highest_glibc_version(self) -> None:

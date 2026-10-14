@@ -110,7 +110,16 @@ def _read_verneed(
             order + "HHIII", data, offset + at
         )
         library = _string(data, str_off, str_size, file_off)
-        aux_at = at + aux
+        # A zero vn_aux means "no aux entries" only when the entry really
+        # lists none; walking on would parse the Verneed itself as a Vernaux
+        # and swallow this library's needs.
+        if count and not aux:
+            raise ValueError(
+                "a .gnu.version_r entry lists needs but carries no auxiliary entry"
+            )
+        if aux and aux < 16:
+            raise ValueError("a .gnu.version_r auxiliary offset overlaps its entry")
+        aux_at = at + aux if aux else 0
         seen = 0
         while aux_at:
             if offset + aux_at + 16 > end:
@@ -164,8 +173,14 @@ def read_version_needs(data: bytes) -> list[tuple[str, str]]:
         raise ValueError(f"unexpected section header size {shentsize}")
     if shnum == 0:
         # ELF's escape hatch: when the count does not fit in the header
-        # field, the real one lives in section 0's sh_size.
+        # field, the real one lives in section 0's sh_size. An unreadable
+        # or zero value there must fail closed: zero sections would read as
+        # "records no version needs" and pass the check.
+        if shoff + SHDR_SIZE > len(data):
+            raise ValueError("truncated section 0 for the extended section count")
         shnum = int.from_bytes(data[shoff + 0x20 : shoff + 0x28], byte_order)
+        if shnum == 0:
+            raise ValueError("section 0 records no section count")
     if shoff + shnum * SHDR_SIZE > len(data):
         raise ValueError("the section header table runs past the end of the file")
 
