@@ -161,18 +161,64 @@ pub fn relocate_file(src: &Path, dest: &Path) -> std::io::Result<()> {
     }
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            if let Err(copy_err) = std::fs::copy(src, dest) {
-                let _ = std::fs::remove_file(dest);
-                return Err(copy_err);
-            }
-            if let Err(remove_err) = std::fs::remove_file(src) {
-                let _ = std::fs::remove_file(dest);
-                return Err(remove_err);
-            }
-            Ok(())
-        }
+        Err(_) => copy_across_volumes(src, dest),
     }
+}
+
+/// Where a cross-volume copy is staged: a sibling of `dest`, so the rename
+/// that publishes it stays on one volume and stays atomic. The app-owned
+/// prefix keeps it out of the way twice over — it is not a name the user
+/// would plausibly have in their own save dir, and it does not read as a
+/// delivered `<name>.*` to anything scanning for one.
+fn copy_temp_for(dest: &Path) -> std::io::Result<PathBuf> {
+    let Some(name) = dest.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("destination has no file name: {}", dest.display()),
+        ));
+    };
+    Ok(dest.with_file_name(format!(".videofetch-{}.tmp", name.to_string_lossy())))
+}
+
+/// The fallback for a `rename` that cannot cross volumes (the save dir on
+/// another mount). The copy is staged in a temp and renamed into place,
+/// because copying straight to `dest` is only atomic in name: a death
+/// mid-copy (SIGKILL, panic abort, power loss) leaves a truncated file where
+/// the delivered one belongs. That file then blocks every later attempt: the
+/// relocation fails `destination exists`, the row sticks at Failed, `retry`
+/// re-enters the same failure, and the finished product sits in the work dir
+/// with nowhere to go until the row is cleared and the work dir leaves with
+/// it as an orphan. Renaming into place leaves either no `dest` or the whole
+/// file, and a leftover temp only costs the next attempt a truncate.
+fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let tmp = copy_temp_for(dest)?;
+    if let Err(copy_err) = std::fs::copy(src, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(copy_err);
+    }
+    // Land the bytes before the rename publishes them: on a delayed-allocation
+    // filesystem the rename can otherwise reach the disk first and leave a
+    // zero-length destination — the very blocker this temp exists to avoid.
+    // The settings store flushes its own temp-and-rename the same way.
+    let synced = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
+        .and_then(|file| file.sync_all());
+    if let Err(sync_err) = synced {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(sync_err);
+    }
+    if let Err(rename_err) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(rename_err);
+    }
+    // Same rule as the copy: a source that would not go away removes the
+    // destination again, so a retry still sees one complete copy and not two.
+    if let Err(remove_err) = std::fs::remove_file(src) {
+        let _ = std::fs::remove_file(dest);
+        return Err(remove_err);
+    }
+    Ok(())
 }
 
 pub fn remove_job_work_dir(work_root: &Path, job_id: &str) -> std::io::Result<()> {
@@ -455,5 +501,112 @@ mod tests {
         assert!(dest.is_file());
         assert!(!src.exists());
         assert_eq!(fs::read(&dest).unwrap(), b"video");
+    }
+
+    /// The cross-volume fallback publishes a rename, so the destination is
+    /// only ever the whole file — that is what a death mid-copy cannot
+    /// guarantee, and the truncated file it leaves blocks every later attempt
+    /// (see `copy_across_volumes`). These drive the fallback directly: a unit
+    /// test cannot make `rename` fail with EXDEV.
+    ///
+    /// The death window itself is unpinnable here — it needs the process to
+    /// die between the copy's first byte and its last, which no assertion can
+    /// stage. What is pinned is the mechanism that closes it: delivery through
+    /// a temp, no leftovers, and the temp's own failure paths.
+    fn cross_volume_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("work/a.mp4");
+        let dest = dir.path().join("save/sub/a.mp4");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&src, b"video").unwrap();
+        (dir, src, dest)
+    }
+
+    #[test]
+    fn copy_across_volumes_delivers_the_whole_file_and_no_temp() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        let tmp = copy_temp_for(&dest).unwrap();
+        copy_across_volumes(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"video");
+        assert!(
+            !src.exists(),
+            "the source must not outlive a delivered copy"
+        );
+        assert!(!tmp.exists(), "the temp must not survive a successful copy");
+    }
+
+    /// The temp must not be mistakable for the delivered file: the save dir
+    /// may hold a user's own `<name>.tmp`, and the harness and soak oracles
+    /// list the save dir by `<name>.*` prefix.
+    #[test]
+    fn copy_temp_does_not_collide_with_a_user_file_or_a_product_scan() {
+        let (_dir, _src, dest) = cross_volume_fixture();
+        let tmp = copy_temp_for(&dest).unwrap();
+        assert_ne!(tmp, dest.with_file_name("a.mp4.tmp"));
+        assert!(
+            !tmp.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("a.mp4."),
+            "a leftover temp must not read as a delivered a.mp4 to a prefix scan"
+        );
+    }
+
+    #[test]
+    fn copy_across_volumes_overwrites_a_temp_left_by_a_dead_copy() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        // What a death mid-copy leaves behind under the new scheme: a partial
+        // temp, which the next attempt must truncate rather than trip over.
+        let tmp = copy_temp_for(&dest).unwrap();
+        fs::write(&tmp, b"half").unwrap();
+        copy_across_volumes(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"video");
+        assert!(
+            !tmp.exists(),
+            "the temp must not outlive the attempt that used it"
+        );
+    }
+
+    #[test]
+    fn copy_across_volumes_leaves_no_destination_when_the_copy_fails() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        fs::remove_file(&src).unwrap();
+        assert!(copy_across_volumes(&src, &dest).is_err());
+        assert!(
+            !dest.exists(),
+            "a failed copy must not leave a file where the delivered one belongs"
+        );
+        assert!(!copy_temp_for(&dest).unwrap().exists());
+    }
+
+    /// The source not going away removes the destination again, so a retry
+    /// sees one complete copy rather than two files with the same name.
+    ///
+    /// The error kind is asserted so a failure raised earlier — the copy
+    /// itself, rather than the unlink this test stages — cannot satisfy it.
+    /// Under euid 0 the unlink succeeds and this fails outright, which is the
+    /// same exposure the other permission tests here carry; CI runs unprivileged.
+    #[cfg(unix)]
+    #[test]
+    fn copy_across_volumes_removes_the_destination_when_the_source_stays() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, src, dest) = cross_volume_fixture();
+        // A read-only parent lets the copy read the source but not unlink it.
+        let src_dir = src.parent().unwrap();
+        fs::set_permissions(src_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = copy_across_volumes(&src, &dest);
+        fs::set_permissions(src_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the staged failure is the unlink, not the copy"
+        );
+        assert!(src.exists());
+        assert!(
+            !dest.exists(),
+            "a source that stayed must take the destination with it"
+        );
+        assert!(!copy_temp_for(&dest).unwrap().exists());
     }
 }
