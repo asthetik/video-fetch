@@ -1,19 +1,13 @@
 import { useEffect } from "react";
 import { toast } from "sonner";
 import { useAuthActions } from "../hooks/useAuthActions";
+import { authChipView } from "../lib/authUi";
 import { LogoutConfirmDialog } from "./LogoutConfirmDialog";
-import type { AuthStatus as AuthStatusType } from "../types";
-
-const TITLE: Record<AuthStatusType, string> = {
-  logged_in: "已登录 · 点击退出登录",
-  logged_out: "未登录 · 点击登录 B 站",
-  possibly_expired: "登录可能过期 · 点击退出登录",
-};
 
 /** Single header button: colored dot shows auth state, label shows the action. */
 export function AuthChip() {
   const {
-    status,
+    authState,
     loggingIn,
     loggingOut,
     confirmLogout,
@@ -21,6 +15,7 @@ export function AuthChip() {
     dismissHint,
     login,
     logout,
+    retryStatus,
     requestLogout,
     cancelLogout,
   } = useAuthActions();
@@ -33,26 +28,34 @@ export function AuthChip() {
     }
   }, [hint, dismissHint]);
 
-  const loggedIn = status !== "logged_out";
+  const view = authChipView(authState);
+
+  function handleClick() {
+    if (view.action === "retry") {
+      void retryStatus();
+    } else if (view.action === "logout") {
+      requestLogout();
+    } else {
+      void login();
+    }
+  }
 
   return (
     <>
       <button
         type="button"
-        className={`auth-chip ${status}`}
-        data-action={loggedIn ? "auth-logout" : "auth-login"}
-        onClick={loggedIn ? requestLogout : () => void login()}
-        disabled={loggingIn || loggingOut}
-        title={TITLE[status]}
+        className={`auth-chip ${view.stateClass}`}
+        data-action={`auth-${view.action}`}
+        onClick={handleClick}
+        disabled={view.disabled || loggingIn || loggingOut}
+        title={view.title}
       >
         <span className="auth-chip-dot" />
-        {loggedIn
-          ? loggingOut
+        {loggingIn
+          ? "登录中…"
+          : loggingOut
             ? "登出中…"
-            : "登出"
-          : loggingIn
-            ? "登录中…"
-            : "登录"}
+            : view.label}
       </button>
 
       <LogoutConfirmDialog

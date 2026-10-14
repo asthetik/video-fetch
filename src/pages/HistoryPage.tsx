@@ -19,6 +19,7 @@ import { EmptyState } from "../components/EmptyState";
 import { IconButton } from "../components/IconButton";
 import { Segmented } from "../components/Segmented";
 import { ThumbTile } from "../components/ThumbTile";
+import { withToast } from "../lib/asyncAction";
 import {
   type DownloadProgressPayload,
   mergeJob,
@@ -135,17 +136,25 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const showActive = activeJobs.length > 0 && statusFilter === "all";
 
   async function handleOpenFile(job: DownloadJob) {
-    if (!job.output_path) {
+    const path = job.output_path;
+    if (!path) {
       return;
     }
-    await api.openPath(job.output_path);
+    await withToast(
+      () => api.openPath(path),
+      (message) => toast.error(message),
+    );
   }
 
   async function handleOpenFolder(job: DownloadJob) {
-    if (!job.output_path) {
+    const path = job.output_path;
+    if (!path) {
       return;
     }
-    await api.openPath(parentDir(job.output_path));
+    await withToast(
+      () => api.openPath(parentDir(path)),
+      (message) => toast.error(message),
+    );
   }
 
   async function handleCancel(id: string) {
