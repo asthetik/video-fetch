@@ -167,6 +167,11 @@ pub fn bake_local_datetime_tokens(template: &str, when: &DateTime<Local>) -> Str
 fn expand_datetime_tokens(template: &str, when: &DateTime<Local>) -> String {
     let mut out = String::with_capacity(template.len());
     let bytes = template.as_bytes();
+    // Non-token text is copied as whole spans, never byte-by-byte: the bytes
+    // of a multi-byte character pushed through `u8 as char` would mojibake the
+    // template and break idempotence (a baked template gets baked again on the
+    // way to `-o`, and each pass must be a no-op on the output of the last).
+    let mut plain_start = 0;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
@@ -176,24 +181,28 @@ fn expand_datetime_tokens(template: &str, when: &DateTime<Local>) -> String {
         {
             let inner = &template[i + 2..i + 2 + rel_end];
             let token_end = i + 2 + rel_end + 2;
-            if let Some((field, fmt)) = inner.split_once('>') {
-                if matches!(
+            let rendered = if let Some((field, fmt)) = inner.split_once('>') {
+                matches!(
                     field,
                     "timestamp" | "release_timestamp" | "epoch" | "upload_date"
-                ) {
-                    out.push_str(&when.format(fmt).to_string());
-                    i = token_end;
-                    continue;
-                }
+                )
+                .then(|| when.format(fmt).to_string())
             } else if inner == "upload_date" || inner == "timestamp" {
-                out.push_str(&when.format("%Y-%m-%dT%H-%M-%S").to_string());
+                Some(when.format("%Y-%m-%dT%H-%M-%S").to_string())
+            } else {
+                None
+            };
+            if let Some(value) = rendered {
+                out.push_str(&template[plain_start..i]);
+                out.push_str(&value);
                 i = token_end;
+                plain_start = token_end;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
         i += 1;
     }
+    out.push_str(&template[plain_start..]);
     out
 }
 
@@ -540,6 +549,29 @@ mod tests {
             &sample_local(),
         );
         assert_eq!(name, "Alice/t [BV1].mp4");
+    }
+
+    #[test]
+    fn bake_keeps_non_ascii_template_literals_intact() {
+        // The template body is user text: CJK, brackets and emoji must come
+        // through byte-identical, only the datetime token may change.
+        let when = sample_local();
+        let baked = bake_local_datetime_tokens("【视频】%(upload_date)s🎉/完", &when);
+        assert_eq!(
+            baked,
+            format!("【视频】{}🎉/完", when.format("%Y-%m-%dT%H-%M-%S"))
+        );
+    }
+
+    #[test]
+    fn bake_is_idempotent_for_non_ascii_templates() {
+        // A baked template is stored on the job row and baked again on the way
+        // to `-o`; a second pass must not change it (it once re-encoded every
+        // non-ASCII byte and invalidated .part resume on each pause/resume).
+        let when = sample_local();
+        let once = bake_local_datetime_tokens("【%(uploader)s】%(upload_date)s_%(title)s.%(ext)s", &when);
+        let twice = bake_local_datetime_tokens(&once, &when);
+        assert_eq!(once, twice);
     }
 
     #[test]
