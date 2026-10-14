@@ -2611,13 +2611,21 @@ mod tests {
         let mut saw_full_load = false;
         for _ in 0..100 {
             let jobs = manager.list().unwrap();
-            if jobs.iter().filter(|j| j.status == JobStatus::Running).count() == 2 {
+            if jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count()
+                == 2
+            {
                 saw_full_load = true;
                 break;
             }
             sleep(Duration::from_millis(20)).await;
         }
-        assert!(saw_full_load, "expected both jobs running under concurrency 2");
+        assert!(
+            saw_full_load,
+            "expected both jobs running under concurrency 2"
+        );
 
         // Shrink at full load: nothing can be reclaimed right now.
         settings.concurrency = 1;
@@ -2639,7 +2647,10 @@ mod tests {
         let mut max_running = 0;
         for _ in 0..250 {
             let jobs = manager.list().unwrap();
-            let running = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+            let running = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
             max_running = max_running.max(running);
             if jobs
                 .iter()
@@ -2674,7 +2685,11 @@ mod tests {
         settings.concurrency = 2;
         manager.update_settings(settings.clone()).unwrap();
 
-        for (id, page) in [("job-toggle-a", 1), ("job-toggle-b", 2), ("job-toggle-c", 3)] {
+        for (id, page) in [
+            ("job-toggle-a", 1),
+            ("job-toggle-b", 2),
+            ("job-toggle-c", 3),
+        ] {
             let mut job = sample_job(id);
             job.page_index = page;
             manager.enqueue(job, false).unwrap();
@@ -2682,8 +2697,14 @@ mod tests {
         let mut saw_full_load = false;
         for _ in 0..100 {
             let jobs = manager.list().unwrap();
-            let running = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
-            let pending = jobs.iter().filter(|j| j.status == JobStatus::Pending).count();
+            let running = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
+            let pending = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Pending)
+                .count();
             if running == 2 && pending == 1 {
                 saw_full_load = true;
                 break;
@@ -2700,7 +2721,10 @@ mod tests {
         let mut max_running = 0;
         for _ in 0..250 {
             let jobs = manager.list().unwrap();
-            let running = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+            let running = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
             max_running = max_running.max(running);
             if jobs
                 .iter()

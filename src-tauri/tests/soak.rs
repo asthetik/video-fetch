@@ -27,26 +27,56 @@ const REROLL_LIMIT: usize = 8;
 /// Post-crash quiesce budget: 300ms ticks, ~3.6s total.
 const QUIESCE_TICKS: usize = 12;
 
+fn default_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Env override that refuses to be silently wrong: a value that is set but
+/// unparseable panics with the raw text (SOAK_MINUTES=1O used to run the
+/// default five-minute soak and report success).
+fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} must be parseable, got {raw:?}")),
+        Err(_) => default,
+    }
+}
+
+/// Value: protects=soak env overrides failing loudly on typos;
+/// fails_when=env_or silently falls back (SOAK_MINUTES=1O ran the default
+/// five-minute soak and reported success); why_new=the silent fallback made
+/// mis-typed soaks measure nothing while looking green; seam=none
+#[test]
+fn env_overrides_refuse_unparseable_values() {
+    // Safety: this test is the only mutator of these private names and runs
+    // in the soak binary's own process.
+    unsafe {
+        std::env::set_var("SOAK_TEST_UNPARSEABLE", "1O");
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env_or::<u64>("SOAK_TEST_UNPARSEABLE", 5)
+    }));
+    assert!(result.is_err(), "a typo must panic, not fall back");
+    unsafe {
+        std::env::remove_var("SOAK_TEST_UNPARSEABLE");
+        std::env::set_var("SOAK_TEST_OK", "42");
+    }
+    assert_eq!(env_or("SOAK_TEST_OK", 5u64), 42);
+    unsafe {
+        std::env::remove_var("SOAK_TEST_OK");
+    }
+}
+
 #[tokio::test]
 #[ignore = "soak: run locally, never in CI"]
 async fn soak_churns_downloads_and_asserts_invariants() {
-    let minutes: u64 = std::env::var("SOAK_MINUTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
-    let seed: u64 = std::env::var("SOAK_SEED")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        });
-    let max_jobs: usize = std::env::var("SOAK_JOBS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(6);
+    let minutes: u64 = env_or("SOAK_MINUTES", 5);
+    let seed: u64 = env_or("SOAK_SEED", default_seed());
+    let max_jobs: usize = env_or("SOAK_JOBS", 6);
 
     let mut rng = XorShift64::new(seed);
     let mut ledger: Vec<(Op, String)> = Vec::new();

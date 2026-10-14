@@ -569,7 +569,8 @@ mod tests {
         // to `-o`; a second pass must not change it (it once re-encoded every
         // non-ASCII byte and invalidated .part resume on each pause/resume).
         let when = sample_local();
-        let once = bake_local_datetime_tokens("【%(uploader)s】%(upload_date)s_%(title)s.%(ext)s", &when);
+        let once =
+            bake_local_datetime_tokens("【%(uploader)s】%(upload_date)s_%(title)s.%(ext)s", &when);
         let twice = bake_local_datetime_tokens(&once, &when);
         assert_eq!(once, twice);
     }

@@ -2116,10 +2116,7 @@ mod tests {
         let configured = blocker.join("downloads").to_string_lossy().into_owned();
         let (session, persist) = startup_save_dir(app_dir.path(), &configured, &default_dir);
         assert!(!persist, "a transient failure must not rewrite the setting");
-        assert_eq!(
-            session,
-            fallback_save_dir(app_dir.path()).to_string_lossy()
-        );
+        assert_eq!(session, fallback_save_dir(app_dir.path()).to_string_lossy());
     }
 
     #[test]
@@ -2151,10 +2148,7 @@ mod tests {
         let (session, persist) = startup_save_dir(app_dir.path(), "", &weird);
         assert!(persist);
         assert!(!session.contains('\u{FFFD}'), "no lossy garbage: {session}");
-        assert_eq!(
-            session,
-            fallback_save_dir(app_dir.path()).to_string_lossy()
-        );
+        assert_eq!(session, fallback_save_dir(app_dir.path()).to_string_lossy());
     }
 
     /// Value: protects=every command that starts or restarts a download

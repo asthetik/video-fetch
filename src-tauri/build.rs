@@ -99,6 +99,12 @@ fn extract_ffmpeg_version(source: &str) -> String {
         let Some(rest) = trimmed.strip_prefix("FFMPEG_VERSION") else {
             continue;
         };
+        // Anchor on the assignment: a longer constant that merely starts with
+        // FFMPEG_VERSION (e.g. FFMPEG_VERSION_FALLBACK) must never be read as
+        // this one.
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
         let Some(value) = quoted_value(rest) else {
             continue;
         };

@@ -46,6 +46,11 @@ pub mod testing {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// Product decision (2026-09-15): a healthy launch logs zero lines — no
+// startup timing, no engine-environment noise; failures still log (the panic
+// hook and the explicit error paths). The timing line was added by #133 and
+// removed again by #138 before anyone noticed it violated this. Do not add
+// routine startup logging back without revisiting that decision.
 pub fn run() {
     tauri::Builder::default()
         // A second instance would fight over jobs.db and the log rotator;
