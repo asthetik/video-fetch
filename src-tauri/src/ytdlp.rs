@@ -135,6 +135,21 @@ fn notable_stderr_lines(tail: &str, limit: usize) -> Vec<String> {
     notable
 }
 
+/// Cap the stderr tail to its last `keep` bytes, cutting only at a UTF-8
+/// character boundary. `String::split_off` panics on a non-boundary index, and
+/// yt-dlp's WARNING/ERROR lines carry multi-byte titles: a raw byte cut of a
+/// tail past the cap can land mid-character and kill the runner task.
+fn trim_stderr_tail(tail: &mut String, keep: usize) {
+    if tail.len() <= keep * 2 {
+        return;
+    }
+    let mut split = tail.len() - keep;
+    while split < tail.len() && !tail.is_char_boundary(split) {
+        split += 1;
+    }
+    tail.drain(..split);
+}
+
 pub fn video_meta_from_yt_dlp_json(v: &serde_json::Value) -> AppResult<VideoMeta> {
     map_video_meta(v)
 }
@@ -1160,10 +1175,7 @@ pub async fn download(
                                 ..Default::default()
                             });
                         }
-                        if stderr_tail.len() > 8192 {
-                            let split = stderr_tail.len().saturating_sub(4096);
-                            stderr_tail = stderr_tail.split_off(split);
-                        }
+                        trim_stderr_tail(&mut stderr_tail, 4096);
                         stderr_tail.push_str(&line);
                         stderr_tail.push('\n');
                     }
@@ -1914,6 +1926,35 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(notable_stderr_lines("[download] 42% of 1MiB\n", 5).is_empty());
     }
 
+    /// The tail cap must never cut mid multi-byte character: `String::split_off`
+    /// panics on a non-boundary index, and a stderr full of Chinese titles hits
+    /// exactly that. The cap keeps byte counts (threshold `2 * keep`), so the
+    /// contract to pin is: the result stays a suffix-shaped buffer of at most
+    /// `keep` bytes made of whole characters, even when the raw cut index is
+    /// adversarial.
+    #[test]
+    fn stderr_tail_trim_only_cuts_at_character_boundaries() {
+        // 2732 × 3-byte chars = 8196 bytes > 2 × 4096; the raw cut index
+        // 8196 - 4096 = 4100 is not a char boundary (4100 % 3 == 2).
+        let mut tail = "测".repeat(2732);
+        assert_eq!(tail.len(), 8196);
+        assert!(!tail.is_char_boundary(4100), "the cut must be adversarial");
+        trim_stderr_tail(&mut tail, 4096);
+        assert!(tail.len() <= 4096, "over keep: {}", tail.len());
+        assert!(tail.len() >= 4096 - 3, "cut too far back: {}", tail.len());
+        assert!(tail.chars().all(|c| c == '测'), "cut split a character");
+
+        // A tail within the cap is left alone.
+        let mut small = "测".repeat(2000);
+        trim_stderr_tail(&mut small, 4096);
+        assert_eq!(small, "测".repeat(2000));
+
+        // ASCII-only tails cut straight to `keep` bytes.
+        let mut ascii = "a".repeat(9000);
+        trim_stderr_tail(&mut ascii, 4096);
+        assert_eq!(ascii, "a".repeat(4096));
+    }
+
     /// The PyInstaller yt-dlp is two processes (bootloader + python) with
     /// ffmpeg as a grandchild, so a pause must terminate the whole process
     /// group — killing only the direct child leaves the real downloader
@@ -2086,5 +2127,95 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         let mut mine = take_child(&children, JOB_ID, owner).unwrap();
         let _ = mine.kill().await;
         assert!(children.lock().unwrap().is_empty());
+    }
+
+    /// The stderr tail is capped with a raw byte index (`split_off(len -
+    /// 4096)`), and `String::split_off` panics when that index lands mid
+    /// multi-byte character. yt-dlp WARNING/ERROR lines carry Chinese titles,
+    /// so a tail over 8KB whose cut misses a char boundary kills the runner
+    /// task: the job silently freezes at "downloading" with no auto-recovery.
+    /// Every line here is `ERROR: ` + 100 × `测` (308 bytes with the newline),
+    /// so 27 accumulated lines are 8316 bytes and the next trim cuts at byte
+    /// 4220 — offset 216 inside a line, the middle of a `测` — which panics
+    /// unless the cut is walked to a character boundary.
+    ///
+    /// Value: protects=the boundary-safe stderr tail cap; fails_when=the cap
+    /// cuts at a raw byte index again (the download panics and the caller
+    /// joins a panicked task instead of getting an error); why_new=no test
+    /// drove ytdlp::download with stderr large enough to trigger the tail
+    /// trim; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_huge_multibyte_stderr_tail_fails_instead_of_panicking() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let payload_path = dir.path().join("stderr.txt");
+        let mut payload = String::new();
+        for _ in 0..40 {
+            payload.push_str("ERROR: ");
+            payload.push_str(&"测".repeat(100));
+            payload.push('\n');
+        }
+        std::fs::write(&payload_path, &payload).unwrap();
+
+        let script = dir.path().join("fake-yt-dlp");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             cat \"$(dirname \"$0\")/stderr.txt\" >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let work_root = dir.path().join("work");
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
+
+        const JOB_ID: &str = "job-stderr-tail";
+        let job = crate::models::DownloadJob {
+            id: JOB_ID.into(),
+            url: "https://www.bilibili.com/video/BV1xx".into(),
+            video_id: "BV1xx".into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: crate::models::JobStatus::Running,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        };
+        let downloader = crate::download::YtDlpDownloader::new(
+            YtDlpConfig {
+                yt_dlp_path: script,
+                ffmpeg_path: None,
+            },
+            work_root,
+            None,
+            children,
+            stop_flags,
+        );
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            use crate::download::Downloader as _;
+            downloader.run(&job, Box::new(|_| {})).await
+        })
+        .await
+        .expect("the download must not hang on a panicking tail trim")
+        .expect_err("a failing yt-dlp run returns its stderr tail as the error");
+        assert!(err.contains("yt-dlp 下载失败"), "unexpected error: {err}");
+        // The tail keeps the newest lines: the final ERROR line (written by
+        // the fake yt-dlp at the very end of a 12KB stream) must survive.
+        assert!(
+            err.contains("ERROR: 测测测"),
+            "the trimmed tail lost the newest stderr lines: {err}"
+        );
     }
 }
