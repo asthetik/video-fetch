@@ -3249,30 +3249,17 @@ mod tests {
         assert!(dead, "the spawned download child must not outlive the app");
     }
 
-    /// Exit teardown must abandon the runners too. Killing the running download
-    /// is what frees the permit a queued job's runner is parked on, and that
-    /// runner would wake, read its row as still Pending, and start a download
-    /// the exit path has no teardown left to kill.
-    ///
-    /// Value: protects=shutdown_for_exit's second half (the window between
-    /// RunEvent::Exit's kill and the process actually ending);
-    /// fails_when=shutdown_for_exit kills children only — job-b's parked runner
-    /// wakes on job-a's freed permit and reaches the downloader;
-    /// why_new=the exit test covers a live child and the pause test covers a
-    /// row-driven standdown, but never the permit a teardown itself frees;
-    /// seam=none
-    #[tokio::test]
-    async fn exit_teardown_abandons_a_runner_parked_on_the_semaphore() {
+    /// The fixture both exit-teardown tests need: concurrency=1
+    /// (test_settings), so job-a holds the only permit and job-b queues behind
+    /// it with a runner of its own parked on the semaphore.
+    async fn exit_teardown_fixture() -> (tempfile::TempDir, Arc<GatedDownloader>, DownloadManager) {
         let dir = tempfile::tempdir().unwrap();
-        // concurrency=1 (test_settings): job-a holds the only permit, so job-b
-        // queues behind it with a runner of its own parked on the semaphore.
         let downloader = Arc::new(GatedDownloader::new());
         let manager = manager_for(
             dir.path(),
             downloader.clone(),
             Arc::new(Mutex::new(HashMap::new())),
         );
-
         let mut a = sample_job("job-a");
         a.video_id = "BV1a".into();
         manager.enqueue(a, false).unwrap();
@@ -3280,11 +3267,36 @@ mod tests {
         b.video_id = "BV1b".into();
         manager.enqueue(b, false).unwrap();
         wait_for_status(&manager, "job-a", JobStatus::Running).await;
+        (dir, downloader, manager)
+    }
+
+    /// Exit teardown must abandon the runners too. Killing the running download
+    /// is what frees the permit a queued job's runner is parked on, and that
+    /// runner would wake, read its row as still Pending, and start a download
+    /// the exit path has no teardown left to kill.
+    ///
+    /// Value: protects=shutdown_for_exit's abandon half (the window between
+    /// RunEvent::Exit's kill and the process actually ending);
+    /// fails_when=shutdown_for_exit kills children only — job-b's parked runner
+    /// wakes on job-a's freed permit and reaches the downloader;
+    /// why_new=the exit test covers a live child and the pause test covers a
+    /// row-driven standdown, but never the permit a teardown itself frees;
+    /// seam=none
+    ///
+    /// This asserts on the downloader rather than on rows, and that is the
+    /// point: the release below can arrive before job-a parks, and then it is
+    /// stored, so job-a runs to completion inside the poll that reaches it —
+    /// cancellation only lands at an await, so a runner already inside a
+    /// synchronous stretch survives the abort and writes its row. job-b's park
+    /// on the semaphore is a real await, so what the teardown decided about it
+    /// is what this reads.
+    #[tokio::test]
+    async fn exit_teardown_abandons_a_runner_parked_on_the_semaphore() {
+        let (_dir, downloader, manager) = exit_teardown_fixture().await;
 
         manager.shutdown_for_exit();
-        // In production the kill frees the permit; here the mock's release
-        // does, so the wake-up a leftover runner would take is offered either
-        // way. A runner the teardown abandoned is gone and takes nothing.
+        // In production the kill frees the permit; here the release does, so a
+        // runner the teardown left behind is offered the wake either way.
         downloader.release.notify_one();
         sleep(Duration::from_millis(300)).await;
 
@@ -3293,15 +3305,38 @@ mod tests {
             !runs.contains(&"job-b".to_string()),
             "a parked runner started a download after the exit teardown: {runs:?}"
         );
-        // The teardown writes no rows: the next launch's recovery owns the
-        // transition, so a quit lands the same way a crash does.
-        let status = manager
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|j| j.id == "job-a")
-            .map(|j| j.status);
-        assert_eq!(status, Some(JobStatus::Running));
+    }
+
+    /// The teardown writes no rows: the next launch's recovery owns the
+    /// transition, so a quit lands the same way a crash does.
+    ///
+    /// Value: protects=shutdown_for_exit leaving every row untouched;
+    /// fails_when=the teardown starts writing rows (pausing, failing or
+    /// reconciling them) — a quit would then land differently from a crash, and
+    /// job-b would learn about the permit job-a's cancellation frees;
+    /// why_new=nothing asserted the teardown's silence about rows; seam=none
+    ///
+    /// Nothing is released here, so no runner has a wake to complete on and the
+    /// row assertions cannot race the scheduling described above.
+    #[tokio::test]
+    async fn exit_teardown_leaves_the_rows_alone() {
+        let (_dir, _downloader, manager) = exit_teardown_fixture().await;
+
+        manager.shutdown_for_exit();
+        sleep(Duration::from_millis(300)).await;
+
+        let jobs = manager.list().unwrap();
+        let status = |id: &str| jobs.iter().find(|j| j.id == id).map(|j| j.status.clone());
+        assert_eq!(
+            status("job-a"),
+            Some(JobStatus::Running),
+            "the running row belongs to the next launch's recovery"
+        );
+        assert_eq!(
+            status("job-b"),
+            Some(JobStatus::Pending),
+            "the queued row belongs to the next launch's recovery"
+        );
     }
 
     /// A merge killed mid-flight leaves yt-dlp's `….temp.<ext>` writer file
