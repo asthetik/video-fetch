@@ -163,6 +163,25 @@ pub fn claim_resolve_id(active: &AtomicU64, request_id: Option<u64>) -> u64 {
     }
 }
 
+/// Event contract for `resolve_url`: once formats are known, the request must
+/// not return without a terminal `complete` or `formats_failed` emission for
+/// its request_id. The cache-write failure path used to `?` out raw — Err with
+/// no event — so a card already rendered from a partial kept its formats
+/// spinner running forever (no error, no retry). The emitter is injected so
+/// the contract is unit-testable without an `AppHandle`.
+fn finish_resolve_on_cache_write(
+    cache_write: AppResult<()>,
+    emit_formats_failed: impl FnOnce(&str),
+) -> AppResult<()> {
+    match cache_write {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            emit_formats_failed(&e.to_string());
+            Err(e)
+        }
+    }
+}
+
 pub struct TauriProgressEmitter {
     app: AppHandle,
 }
@@ -583,9 +602,18 @@ pub async fn resolve_url(
         return Err(AppError::Message("解析已取消（有更新的请求）".into()));
     }
     for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
-        state
-            .downloads
-            .upsert_resolve_cache(&key, &final_meta, now)?;
+        finish_resolve_on_cache_write(
+            state.downloads.upsert_resolve_cache(&key, &final_meta, now),
+            |message| {
+                let _ = app.emit(
+                    RESOLVE_FORMATS_FAILED_EVENT,
+                    &ResolveFormatsFailedEvent {
+                        request_id,
+                        error: message.to_string(),
+                    },
+                );
+            },
+        )?;
     }
     let _ = app.emit(
         RESOLVE_COMPLETE_EVENT,
@@ -1929,6 +1957,33 @@ mod tests {
         let second = claim_resolve_id(&active, Some(2));
         assert!(is_resolve_current(active.load(Ordering::SeqCst), second));
         assert!(!is_resolve_current(active.load(Ordering::SeqCst), first));
+    }
+
+    /// Event contract: a cache-write failure must end the request in a
+    /// `formats_failed` emission before the Err propagates. Returning Err with
+    /// no event (the pre-fix `?`) left a card already rendered from a partial
+    /// on its formats spinner forever: no error, no retry, download disabled.
+    #[test]
+    fn cache_write_failure_emits_formats_failed_before_err() {
+        let emitted: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let result =
+            finish_resolve_on_cache_write(Err(AppError::Message("db locked".into())), |message| {
+                emitted.lock().unwrap().push(message.to_string())
+            });
+        assert!(result.is_err());
+        assert_eq!(*emitted.lock().unwrap(), vec!["db locked".to_string()]);
+    }
+
+    /// Success must not fake a failure event; `complete` is emitted by the
+    /// caller once every cache key is written.
+    #[test]
+    fn cache_write_success_emits_no_formats_failed() {
+        let emitted: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let result = finish_resolve_on_cache_write(Ok(()), |message| {
+            emitted.lock().unwrap().push(message.to_string())
+        });
+        assert!(result.is_ok());
+        assert!(emitted.lock().unwrap().is_empty());
     }
 
     #[test]

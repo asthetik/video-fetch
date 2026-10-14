@@ -6,6 +6,11 @@ import {
   type ResolveFormatsFailedEvent,
   type ResolveMetaEvent,
 } from "../lib/tauri";
+import {
+  initialResolveStatus,
+  reduceResolveStatus,
+  type ResolveStatus,
+} from "../lib/resolveStatus";
 import { DownloadQueue } from "../components/DownloadQueue";
 import { SpaceListView } from "../components/SpaceListView";
 import { UrlBar } from "../components/UrlBar";
@@ -33,9 +38,8 @@ export function HomePage({
   const [meta, setMeta] = useState<VideoMeta | null>(null);
   const [space, setSpace] = useState<{ mid: number } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [formatsLoading, setFormatsLoading] = useState(false);
-  const [formatsError, setFormatsError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [resolveStatus, setResolveStatus] =
+    useState<ResolveStatus>(initialResolveStatus);
   const [authStatus, setAuthStatus] = useState<AuthStatusType>("logged_out");
 
   const urlRef = useRef(url);
@@ -51,9 +55,7 @@ export function HomePage({
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
       setLoading(true);
-      setError(null);
-      setFormatsError(null);
-      setFormatsLoading(true);
+      setResolveStatus((s) => reduceResolveStatus(s, { type: "resolve_started" }));
       if (clearExisting) {
         setMeta(null);
       }
@@ -65,18 +67,19 @@ export function HomePage({
         if (kind.kind === "space") {
           setSpace({ mid: kind.mid });
           setMeta(null);
-          setFormatsLoading(false);
-          setFormatsError(null);
-          setError(null);
+          setResolveStatus((s) => reduceResolveStatus(s, { type: "settled_idle" }));
           setLoading(false);
           return;
         }
         if (kind.kind === "invalid_space") {
           setSpace(null);
           setMeta(null);
-          setFormatsLoading(false);
-          setFormatsError(null);
-          setError("无效的空间链接");
+          setResolveStatus((s) =>
+            reduceResolveStatus(s, {
+              type: "settled_page_error",
+              message: "无效的空间链接",
+            }),
+          );
           setLoading(false);
           return;
         }
@@ -87,18 +90,25 @@ export function HomePage({
         }
         setMeta(result);
         if (result.formats.length > 0) {
-          setFormatsLoading(false);
-          setFormatsError(null);
+          setResolveStatus((s) => reduceResolveStatus(s, { type: "complete" }));
         }
         // Empty formats: leave formatsLoading/formatsError to complete / formats_failed events.
       } catch (err) {
         if (requestIdRef.current !== requestId) {
           return;
         }
-        if (!metaRef.current) {
-          setFormatsLoading(false);
-          setError(err instanceof Error ? err.message : String(err));
-        }
+        // Unconditional: a rejected resolve always ends the formats spinner and
+        // folds the message into formatsError (in-card retry), even when a card
+        // is already rendered. Only the page-level error needs to know about
+        // the card — without one, the URL bar is where the message is read.
+        const message = err instanceof Error ? err.message : String(err);
+        setResolveStatus((s) =>
+          reduceResolveStatus(s, {
+            type: "resolve_rejected",
+            message,
+            hasCard: metaRef.current !== null,
+          }),
+        );
       } finally {
         if (requestIdRef.current === requestId) {
           setLoading(false);
@@ -124,9 +134,7 @@ export function HomePage({
         return;
       }
       setMeta(partial);
-      setFormatsLoading(true);
-      setFormatsError(null);
-      setError(null);
+      setResolveStatus((s) => reduceResolveStatus(s, { type: "partial" }));
       setLoading(false);
     }).then((fn) => unlisteners.push(fn));
 
@@ -136,7 +144,9 @@ export function HomePage({
         return;
       }
       setMeta(progress);
-      setFormatsLoading(true);
+      setResolveStatus((s) =>
+        reduceResolveStatus(s, { type: "formats_progress" }),
+      );
     }).then((fn) => unlisteners.push(fn));
 
     void listen<ResolveMetaEvent>("resolve://complete", (event) => {
@@ -145,8 +155,7 @@ export function HomePage({
         return;
       }
       setMeta(complete);
-      setFormatsLoading(false);
-      setFormatsError(null);
+      setResolveStatus((s) => reduceResolveStatus(s, { type: "complete" }));
       setLoading(false);
     }).then((fn) => unlisteners.push(fn));
 
@@ -155,8 +164,9 @@ export function HomePage({
       if (request_id !== requestIdRef.current) {
         return;
       }
-      setFormatsLoading(false);
-      setFormatsError(message);
+      setResolveStatus((s) =>
+        reduceResolveStatus(s, { type: "formats_failed", message }),
+      );
       setLoading(false);
     }).then((fn) => unlisteners.push(fn));
 
@@ -196,7 +206,7 @@ export function HomePage({
       <UrlBar
         url={url}
         loading={loading}
-        error={error}
+        error={resolveStatus.error}
         onUrlChange={setUrl}
         onResolve={(next) => void handleResolve(next)}
       />
@@ -217,8 +227,8 @@ export function HomePage({
             url={url.trim()}
             active={active}
             refreshing={loading}
-            formatsLoading={formatsLoading}
-            formatsError={formatsError}
+            formatsLoading={resolveStatus.formatsLoading}
+            formatsError={resolveStatus.formatsError}
             onEnqueued={handleEnqueued}
             onRefresh={() => void handleResolve(url.trim(), true)}
           />
