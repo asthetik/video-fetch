@@ -357,10 +357,13 @@ impl Db {
     /// Startup reconciliation: a row left Running cannot have a live runner
     /// after a relaunch, so surface it as Paused (progress and the work dir
     /// are kept; resume picks it up). Returns how many rows changed.
-    pub fn mark_running_as_paused(&self) -> AppResult<u64> {
+    /// Pause every row whose runner died with the app: Running rows freeze
+    /// mid-download, Pending rows lose the queued runner that was waiting on a
+    /// permit. Both must land in a resumable state instead of waiting forever.
+    pub fn mark_running_and_pending_as_paused(&self) -> AppResult<u64> {
         let changed = self.conn.execute(
             "UPDATE jobs SET status = 'paused', updated_at = datetime('now')
-             WHERE status = 'running'",
+             WHERE status IN ('running', 'pending')",
             [],
         )?;
         Ok(changed as u64)
