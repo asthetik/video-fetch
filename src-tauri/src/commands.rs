@@ -83,6 +83,8 @@ pub struct AppState {
     /// later (the Bilibili login window) read it at creation so they do not
     /// lag one switch behind.
     pub window_theme: std::sync::Mutex<WindowTheme>,
+    /// Cached openable roots for `open_path`; invalidated on settings save.
+    pub openable_roots_cache: OpenableRootsCache,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,7 +352,11 @@ pub(crate) fn apply_save_dir(
 }
 
 fn rematerialize_cookies(state: &AppState) -> AppResult<Option<PathBuf>> {
-    state.auth.materialize_cookies_file()
+    state.auth.materialize_cookies_file().map_err(|e| {
+        // Explicit text: the raw io string ("Is a directory") would reach the
+        // user's toast as-is with no mention of what actually failed.
+        AppError::Message(format!("Cookie 文件准备失败，请稍后重试: {e}"))
+    })
 }
 
 /// Build a Bilibili page URL using 1-based `?p=` (page 1 omits the query).
@@ -774,8 +780,13 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
     }
 }
 
+/// Async so the per-item DB/FS loop of a multi-P selection runs on the async
+/// runtime (the `space_enqueue_batch` precedent) instead of the main thread.
 #[tauri::command]
-pub fn enqueue_download(state: State<'_, AppState>, args: EnqueueArgs) -> AppResult<DownloadJob> {
+pub async fn enqueue_download(
+    state: State<'_, AppState>,
+    args: EnqueueArgs,
+) -> AppResult<DownloadJob> {
     if args.page_indexes.is_empty() {
         return Err(AppError::Message("请至少选择一个分 P".into()));
     }
@@ -1013,19 +1024,21 @@ pub fn list_jobs(state: State<'_, AppState>) -> AppResult<Vec<DownloadJob>> {
 }
 
 #[tauri::command]
-pub fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn cancel_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 取消 {id}");
     state
         .downloads
         .cancel(&id)
+        .await
         .inspect_err(|e| warn_cmd(&format!("download: 取消失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
+pub async fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllResult> {
     let result = state
         .downloads
         .cancel_all()
+        .await
         .inspect_err(|e| warn_cmd("download: 取消全部失败", e))?;
     tracing::info!(target: "core", "download: 取消全部（{} 个）", result.cancelled);
     Ok(result)
@@ -1043,46 +1056,79 @@ pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishe
 
 #[tauri::command]
 pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+    retry_job_impl(&state, &id)
+}
+
+/// [`retry_job`] body, split out so tests can drive the restart path without
+/// a Tauri `State`.
+fn retry_job_impl(state: &AppState, id: &str) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 重试 {id}");
+    // Same cookie remedy as enqueue: rewrite cookies.txt before the runner
+    // spawns yt-dlp, and refuse to restart when the rewrite fails — silently
+    // continuing as guest while the UI shows logged in is the bug this blocks.
+    let _ = rematerialize_cookies(state)?;
     state
         .downloads
-        .retry(&id)
+        .retry(id)
         .inspect_err(|e| warn_cmd(&format!("download: 重试失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn pause_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn pause_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 暂停 {id}");
     state
         .downloads
         .pause(&id)
+        .await
         .inspect_err(|e| warn_cmd(&format!("download: 暂停失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn resume_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub async fn resume_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+    resume_job_impl(&state, &id).await
+}
+
+/// [`resume_job`] body, split out so tests can drive the restart path without
+/// a Tauri `State`.
+async fn resume_job_impl(state: &AppState, id: &str) -> AppResult<DownloadJob> {
     tracing::info!(target: "core", "download: 继续 {id}");
+    // Same cookie remedy as enqueue: rewrite cookies.txt before the runner
+    // spawns yt-dlp, and refuse to restart when the rewrite fails — silently
+    // continuing as guest while the UI shows logged in is the bug this blocks.
+    let _ = rematerialize_cookies(state)?;
     state
         .downloads
-        .resume(&id)
+        .resume(id)
+        .await
         .inspect_err(|e| warn_cmd(&format!("download: 继续失败 {id}"), e))
 }
 
 #[tauri::command]
-pub fn pause_all_jobs(state: State<'_, AppState>) -> AppResult<PauseAllResult> {
+pub async fn pause_all_jobs(state: State<'_, AppState>) -> AppResult<PauseAllResult> {
     let result = state
         .downloads
         .pause_all()
+        .await
         .inspect_err(|e| warn_cmd("download: 暂停全部失败", e))?;
     tracing::info!(target: "core", "download: 暂停全部（{} 个）", result.paused);
     Ok(result)
 }
 
 #[tauri::command]
-pub fn resume_all_jobs(state: State<'_, AppState>) -> AppResult<ResumeAllResult> {
+pub async fn resume_all_jobs(state: State<'_, AppState>) -> AppResult<ResumeAllResult> {
+    resume_all_jobs_impl(&state).await
+}
+
+/// [`resume_all_jobs`] body, split out so tests can drive the restart path
+/// without a Tauri `State`.
+async fn resume_all_jobs_impl(state: &AppState) -> AppResult<ResumeAllResult> {
+    // Same cookie remedy as enqueue: rewrite cookies.txt before the runners
+    // spawn yt-dlp, and refuse to restart when the rewrite fails.
+    let _ = rematerialize_cookies(state)?;
     let result = state
         .downloads
         .resume_all()
+        .await
         .inspect_err(|e| warn_cmd("download: 继续全部失败", e))?;
     tracing::info!(target: "core", "download: 继续全部（{} 个）", result.resumed);
     Ok(result)
@@ -1098,11 +1144,12 @@ pub struct DeleteJobArgs {
 }
 
 #[tauri::command]
-pub fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
+pub async fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
     tracing::info!(target: "core", "download: 删除 {}（含文件={}）", args.id, args.delete_file);
     state
         .downloads
         .delete(&args.id, args.delete_file)
+        .await
         .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {}", args.id), e))
 }
 
@@ -1157,6 +1204,9 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
         .downloads
         .update_settings(settings)
         .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
+    // The save folder may have moved: drop the cached openable roots so the
+    // next open_path recomputes them from the new settings plus the history.
+    state.openable_roots_cache.invalidate();
     // A no-op save logs nothing: "nothing happened" fails the record criteria.
     if !changed.is_empty() {
         tracing::info!(target: "core", "settings: 保存 {}", changed.join("、"));
@@ -1457,6 +1507,44 @@ fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
     Ok(resolved)
 }
 
+/// Cached `openable_roots`. Computing the roots canonicalizes every history
+/// output's parent — O(history) disk probes — which is far too heavy to redo
+/// on every `open_path` (it froze the window on large histories). Recomputed
+/// on first use and invalidated on settings save: the save folder is the root
+/// that moves, and a save-folder change re-reads the whole history anyway.
+#[derive(Default)]
+pub struct OpenableRootsCache {
+    roots: std::sync::Mutex<Option<Vec<PathBuf>>>,
+}
+
+impl OpenableRootsCache {
+    /// Cached roots, or run `compute` once and remember the result.
+    pub fn get_or_compute(&self, compute: impl FnOnce() -> Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut slot = match self.roots.lock() {
+            Ok(guard) => guard,
+            // Poisoned by a panic mid-update: the value is a pure cache, so
+            // recompute instead of failing the open.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(roots) = slot.as_ref() {
+            return roots.clone();
+        }
+        let roots = compute();
+        *slot = Some(roots.clone());
+        roots
+    }
+
+    /// Drop the cache so the next open recomputes (a settings save may have
+    /// moved the save folder out of the old root set).
+    pub fn invalidate(&self) {
+        let mut slot = match self.roots.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = None;
+    }
+}
+
 /// The directories the app writes into: the log folder, the current save
 /// folder, and wherever earlier downloads landed — the save folder can have
 /// been changed since those rows were written.
@@ -1511,13 +1599,18 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
     roots
 }
 
+/// Async like the other heavy commands; the roots themselves come from the
+/// cache, so the per-call cost is one `canonicalize` of the target path.
 #[tauri::command]
-pub fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
+pub async fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
     // Validated as resolved, opened as given. `canonicalize` is what makes the
     // root check sound, but on Windows it also returns a `\\?\`-prefixed path,
     // and the opener hands that to ShellExecuteW, which does not understand the
     // form — it would fail to open, and report success while doing it.
-    ensure_openable(&path, &openable_roots(&state))?;
+    let roots = state
+        .openable_roots_cache
+        .get_or_compute(|| openable_roots(&state));
+    ensure_openable(&path, &roots)?;
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|e| AppError::Message(format!("无法打开路径: {e}")))?;
     Ok(())
@@ -1708,7 +1801,12 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     // Open the DB only after the subscriber exists so migration records land.
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
-    let _ = auth.materialize_cookies_file();
+    // A locked/ACL'd cookies.txt must not block launch, but the failure is not
+    // swallowed either: it is logged here, and every resume/retry re-materializes
+    // the file and refuses to restart when the rewrite still fails.
+    if let Err(e) = auth.materialize_cookies_file() {
+        tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
+    }
 
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
@@ -1766,6 +1864,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         active_resolve_id: AtomicU64::new(0),
         activity_log,
         window_theme: std::sync::Mutex::new(WindowTheme::System),
+        openable_roots_cache: OpenableRootsCache::default(),
     })
 }
 
@@ -1982,6 +2081,62 @@ mod tests {
 
         assert!(ensure_openable(bundle.to_str().unwrap(), &roots).is_err());
         assert!(ensure_openable(script.to_str().unwrap(), &roots).is_err());
+    }
+
+    /// A9: `openable_roots` canonicalizes every history output's parent — O(history)
+    /// disk probes per call, which froze the window on every `open_path` in large
+    /// histories. The cache must compute once and recompute only when the settings
+    /// change (the save folder is the root that moves).
+    #[test]
+    fn openable_roots_cache_computes_once_until_invalidated() {
+        let cache = OpenableRootsCache::default();
+        let computes = std::cell::Cell::new(0usize);
+        // Copy-able closure (captures only a Cell borrow) so the cache can take
+        // it by value per call.
+        let compute = || {
+            computes.set(computes.get() + 1);
+            vec![PathBuf::from("/save")]
+        };
+        assert_eq!(cache.get_or_compute(compute), vec![PathBuf::from("/save")]);
+        assert_eq!(cache.get_or_compute(compute), vec![PathBuf::from("/save")]);
+        assert_eq!(computes.get(), 1, "the second read must reuse the cache");
+        cache.invalidate();
+        assert_eq!(cache.get_or_compute(compute), vec![PathBuf::from("/save")]);
+        assert_eq!(
+            computes.get(),
+            2,
+            "a settings change must force a recompute"
+        );
+    }
+
+    /// A9: the heavy commands must be `async fn` — Tauri runs sync commands on
+    /// the main thread, where a cancel-all of 20 jobs (serial taskkill + multi-GB
+    /// wipes) or a multi-P enqueue freezes the window. The `AsyncFn` bound fails
+    /// to build if a command reverts to a blocking `fn` returning `AppResult`.
+    /// `space_enqueue_batch` is the already-async canary: if the bound itself
+    /// were wrong, that line would fail too.
+    #[test]
+    fn heavy_commands_are_async() {
+        fn assert_async1<A, T, F>(_f: F)
+        where
+            F: AsyncFn(A) -> T,
+        {
+        }
+        fn assert_async2<A, B, T, F>(_f: F)
+        where
+            F: AsyncFn(A, B) -> T,
+        {
+        }
+        assert_async2(space_enqueue_batch);
+        assert_async2(enqueue_download);
+        assert_async2(cancel_job);
+        assert_async1(cancel_all_jobs);
+        assert_async2(pause_job);
+        assert_async2(resume_job);
+        assert_async1(pause_all_jobs);
+        assert_async1(resume_all_jobs);
+        assert_async2(delete_job);
+        assert_async2(open_path);
     }
 
     #[test]
@@ -2262,5 +2417,346 @@ mod save_dir_tests {
         } else {
             assert_eq!(plan.effective, app_dir.join("downloads"));
         }
+    }
+}
+
+/// Restart entry points (resume/retry) must rematerialize `cookies.txt` before
+/// a runner spawns yt-dlp: a session whose startup materialization failed (AV
+/// lock / ACL) would otherwise run the whole download logged-out while the UI
+/// still shows logged in.
+#[cfg(test)]
+mod restart_cookie_tests {
+    use super::*;
+    use crate::download::{ChannelProgressEmitter, Downloader};
+    use crate::ytdlp::ProgressUpdate;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+    use tokio::time::sleep;
+
+    /// Records whether `cookies.txt` existed at each `run()` start (in run
+    /// order) and optionally parks or fails runs so tests can shape the job
+    /// lifecycle around the restart entry points.
+    struct CookieProbeDownloader {
+        cookies_file: PathBuf,
+        seen: Arc<Mutex<Vec<bool>>>,
+        /// Number of initial runs that park forever (dropped when aborted).
+        park_budget: Arc<Mutex<usize>>,
+        fail: bool,
+        scratch: tempfile::TempDir,
+    }
+
+    #[async_trait]
+    impl Downloader for CookieProbeDownloader {
+        async fn run(
+            &self,
+            job: &DownloadJob,
+            _token: u64,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            self.seen.lock().unwrap().push(self.cookies_file.exists());
+            let park = {
+                let mut budget = self.park_budget.lock().unwrap();
+                let park = *budget > 0;
+                if park {
+                    *budget -= 1;
+                }
+                park
+            };
+            if park {
+                std::future::pending::<()>().await;
+            }
+            if self.fail {
+                return Err("mock failure".into());
+            }
+            let path = self.scratch.path().join(format!("{}.mp4", job.id));
+            std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
+            Ok(path)
+        }
+    }
+
+    struct TestApp {
+        state: AppState,
+        seen: Arc<Mutex<Vec<bool>>>,
+        cookies_file: PathBuf,
+        _root: tempfile::TempDir,
+    }
+
+    fn test_app(park_budget: usize, fail: bool) -> TestApp {
+        let root = tempfile::tempdir().unwrap();
+        let cache_dir = root.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let save_dir = root.path().join("save");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let cookies_file = cache_dir.join("cookies.txt");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let downloader = Arc::new(CookieProbeDownloader {
+            cookies_file: cookies_file.clone(),
+            seen: Arc::clone(&seen),
+            park_budget: Arc::new(Mutex::new(park_budget)),
+            fail,
+            scratch: tempfile::tempdir().unwrap(),
+        });
+        let db = crate::db::Db::open(&root.path().join("jobs.db")).unwrap();
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let settings = AppSettings {
+            save_dir: save_dir.to_string_lossy().into(),
+            concurrency: 1,
+            skip_existing: false,
+            ..AppSettings::default()
+        };
+        let downloads = DownloadManager::new(
+            db,
+            settings.clone(),
+            downloader,
+            Arc::new(emitter),
+            Arc::new(Mutex::new(HashMap::new())),
+            root.path().join("work"),
+        )
+        .unwrap();
+        let state = AppState {
+            openable_roots_cache: Default::default(),
+            save_dir_notice: None,
+            app_dir: root.path().to_path_buf(),
+            auth: AuthManager::new(cache_dir),
+            downloads,
+            settings: Mutex::new(settings),
+            ytdlp: YtDlpConfig {
+                yt_dlp_path: root.path().join("yt-dlp"),
+                ffmpeg_path: None,
+            },
+            wbi_keys: wbi::WbiKeyCache::new(),
+            http_client: reqwest::Client::new(),
+            space_info_cache: Mutex::new(HashMap::new()),
+            active_resolve_id: AtomicU64::new(0),
+            activity_log: crate::activity_log::ActivityLog::disabled(root.path().join("logs")),
+            window_theme: Mutex::new(WindowTheme::System),
+        };
+        TestApp {
+            state,
+            seen,
+            cookies_file,
+            _root: root,
+        }
+    }
+
+    /// Store a logged-in SESSDATA without writing `cookies.txt`: exactly the
+    /// state a launch leaves behind when startup materialization fails.
+    fn login_without_cookies_file(state: &AppState) {
+        state
+            .auth
+            .save_cookies_from_webview(vec![Cookie {
+                domain: ".bilibili.com".into(),
+                include_subdomains: true,
+                path: "/".into(),
+                secure: true,
+                expiration: 0,
+                name: "SESSDATA".into(),
+                value: "abc123".into(),
+            }])
+            .unwrap();
+    }
+
+    fn probe_job(id: &str, video_id: &str) -> DownloadJob {
+        DownloadJob {
+            id: id.into(),
+            url: format!("https://www.bilibili.com/video/{video_id}"),
+            video_id: video_id.into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: JobStatus::Pending,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        }
+    }
+
+    async fn wait_for_status(state: &AppState, id: &str, status: JobStatus) {
+        for _ in 0..200 {
+            if let Ok(jobs) = state.downloads.list()
+                && let Some(job) = jobs.iter().find(|j| j.id == id)
+                && job.status == status
+            {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("job {id} never reached the expected status");
+    }
+
+    async fn wait_for_runs(seen: &Arc<Mutex<Vec<bool>>>, count: usize) {
+        for _ in 0..200 {
+            if seen.lock().unwrap().len() >= count {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("downloader never reached {count} runs");
+    }
+
+    fn job_status(state: &AppState, id: &str) -> JobStatus {
+        state
+            .downloads
+            .list()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .unwrap()
+            .status
+            .clone()
+    }
+
+    /// Enqueue one job, let its first run park as Running, then pause it: the
+    /// Paused row a crash-and-restart leaves behind.
+    async fn paused_job(app: &TestApp, id: &str, video_id: &str) {
+        app.state
+            .downloads
+            .enqueue(probe_job(id, video_id), false)
+            .unwrap();
+        wait_for_status(&app.state, id, JobStatus::Running).await;
+        app.state.downloads.pause(id).await.unwrap();
+        assert_eq!(job_status(&app.state, id), JobStatus::Paused);
+    }
+
+    /// Enqueue one job that fails on its own: the Failed row retry picks up.
+    async fn failed_job(app: &TestApp, id: &str, video_id: &str) {
+        app.state
+            .downloads
+            .enqueue(probe_job(id, video_id), false)
+            .unwrap();
+        wait_for_status(&app.state, id, JobStatus::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn resume_job_rematerializes_cookies_before_spawning_ytdlp() {
+        let app = test_app(1, false);
+        login_without_cookies_file(&app.state);
+        paused_job(&app, "job-r1", "BV1r1").await;
+        assert!(
+            !app.cookies_file.exists(),
+            "precondition: startup materialization left no cookies.txt"
+        );
+
+        let resumed = resume_job_impl(&app.state, "job-r1").await.unwrap();
+        assert_eq!(resumed.status, JobStatus::Pending);
+        assert!(
+            app.cookies_file.exists(),
+            "resume must rematerialize cookies.txt before spawning yt-dlp"
+        );
+
+        wait_for_runs(&app.seen, 2).await;
+        let seen = app.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert!(!seen[0], "setup run must record the missing cookies file");
+        assert!(
+            seen[1],
+            "the resumed run must observe the rematerialized cookies file"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_job_surfaces_cookie_materialize_failure_instead_of_running_guest() {
+        let app = test_app(1, false);
+        login_without_cookies_file(&app.state);
+        paused_job(&app, "job-r2", "BV1r2").await;
+        // Stand-in for an AV lock / ACL: the cookies path cannot be written.
+        std::fs::create_dir(&app.cookies_file).unwrap();
+
+        let err = resume_job_impl(&app.state, "job-r2").await.unwrap_err();
+        assert!(
+            err.to_string().contains("Cookie 文件准备失败"),
+            "expected an explicit cookie error, got: {err}"
+        );
+        // The job must not have restarted: no guest run, row untouched.
+        assert_eq!(job_status(&app.state, "job-r2"), JobStatus::Paused);
+        assert_eq!(app.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_job_rematerializes_cookies_before_spawning_ytdlp() {
+        let app = test_app(0, true);
+        login_without_cookies_file(&app.state);
+        failed_job(&app, "job-t1", "BV1t1").await;
+        assert!(!app.cookies_file.exists());
+
+        let retried = retry_job_impl(&app.state, "job-t1").unwrap();
+        assert_eq!(retried.status, JobStatus::Pending);
+        assert!(
+            app.cookies_file.exists(),
+            "retry must rematerialize cookies.txt before spawning yt-dlp"
+        );
+
+        wait_for_runs(&app.seen, 2).await;
+        let seen = app.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert!(!seen[0], "setup run must record the missing cookies file");
+        assert!(
+            seen[1],
+            "the retried run must observe the rematerialized cookies file"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_job_surfaces_cookie_materialize_failure_instead_of_running_guest() {
+        let app = test_app(0, true);
+        login_without_cookies_file(&app.state);
+        failed_job(&app, "job-t2", "BV1t2").await;
+        std::fs::create_dir(&app.cookies_file).unwrap();
+
+        let err = retry_job_impl(&app.state, "job-t2").unwrap_err();
+        assert!(
+            err.to_string().contains("Cookie 文件准备失败"),
+            "expected an explicit cookie error, got: {err}"
+        );
+        assert_eq!(job_status(&app.state, "job-t2"), JobStatus::Failed);
+        assert_eq!(app.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_all_jobs_rematerializes_cookies_before_spawning_ytdlp() {
+        let app = test_app(2, false);
+        login_without_cookies_file(&app.state);
+        paused_job(&app, "job-a1", "BV1a1").await;
+        paused_job(&app, "job-a2", "BV1a2").await;
+        assert!(!app.cookies_file.exists());
+
+        let result = resume_all_jobs_impl(&app.state).await.unwrap();
+        assert_eq!(result.resumed, 2);
+        assert!(
+            app.cookies_file.exists(),
+            "resume-all must rematerialize cookies.txt before spawning yt-dlp"
+        );
+
+        wait_for_runs(&app.seen, 4).await;
+        let seen = app.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 4);
+        assert!(
+            seen[2..].iter().all(|&s| s),
+            "every resumed run must observe the rematerialized cookies file: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_all_jobs_surfaces_cookie_materialize_failure_instead_of_running_guest() {
+        let app = test_app(2, false);
+        login_without_cookies_file(&app.state);
+        paused_job(&app, "job-a3", "BV1a3").await;
+        paused_job(&app, "job-a4", "BV1a4").await;
+        std::fs::create_dir(&app.cookies_file).unwrap();
+
+        let err = resume_all_jobs_impl(&app.state).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Cookie 文件准备失败"),
+            "expected an explicit cookie error, got: {err}"
+        );
+        assert_eq!(job_status(&app.state, "job-a3"), JobStatus::Paused);
+        assert_eq!(job_status(&app.state, "job-a4"), JobStatus::Paused);
+        assert_eq!(app.seen.lock().unwrap().len(), 2);
     }
 }

@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -133,6 +132,21 @@ fn notable_stderr_lines(tail: &str, limit: usize) -> Vec<String> {
         notable.drain(..notable.len() - limit);
     }
     notable
+}
+
+/// Cap the stderr tail to its last `keep` bytes, cutting only at a UTF-8
+/// character boundary. `String::split_off` panics on a non-boundary index, and
+/// yt-dlp's WARNING/ERROR lines carry multi-byte titles: a raw byte cut of a
+/// tail past the cap can land mid-character and kill the runner task.
+fn trim_stderr_tail(tail: &mut String, keep: usize) {
+    if tail.len() <= keep * 2 {
+        return;
+    }
+    let mut split = tail.len() - keep;
+    while split < tail.len() && !tail.is_char_boundary(split) {
+        split += 1;
+    }
+    tail.drain(..split);
 }
 
 pub fn video_meta_from_yt_dlp_json(v: &serde_json::Value) -> AppResult<VideoMeta> {
@@ -934,6 +948,11 @@ async fn fetch_formats_for_url(
 pub struct DownloadRequest<'a> {
     pub cfg: &'a YtDlpConfig,
     pub job_id: &'a str,
+    /// The run's registration token (the manager's runner token): the only
+    /// identity under which this run may take or kill its child, and the
+    /// handle a panic cleanup outside this function uses to kill the same
+    /// registration. Minted once per run, so it never names two children.
+    pub token: u64,
     pub url: &'a str,
     pub format_id: &'a str,
     pub audio_format: Option<&'a str>,
@@ -993,6 +1012,7 @@ pub async fn download(
     let DownloadRequest {
         cfg,
         job_id,
+        token,
         url,
         format_id,
         audio_format,
@@ -1101,11 +1121,11 @@ pub async fn download(
         .take()
         .ok_or_else(|| AppError::Message("yt-dlp stderr unavailable".into()))?;
 
-    let token = register_child(children, job_id, child)?;
+    register_child(children, job_id, token, child)?;
 
     // A stop may have raced before the child was registered; honor it now.
     if let Some(kind) = stop_kind_of(stop_flags, job_id) {
-        kill_registered_child(children, job_id, token);
+        kill_registered_child(children, job_id, token).await;
         return Err(stop_err(kind));
     }
 
@@ -1123,7 +1143,7 @@ pub async fn download(
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                 if let Some(kind) = stop_kind_of(stop_flags, job_id) {
-                    kill_registered_child(children, job_id, token);
+                    kill_registered_child(children, job_id, token).await;
                     return Err(stop_err(kind));
                 }
             }
@@ -1145,7 +1165,7 @@ pub async fn download(
                         // An output-read error still has to stop the whole
                         // tree: dropping just the direct child would leave the
                         // PyInstaller second stage running.
-                        kill_registered_child(children, job_id, token);
+                        kill_registered_child(children, job_id, token).await;
                         return Err(AppError::Message(format!("读取 yt-dlp 输出失败: {e}")));
                     }
                 }
@@ -1160,16 +1180,13 @@ pub async fn download(
                                 ..Default::default()
                             });
                         }
-                        if stderr_tail.len() > 8192 {
-                            let split = stderr_tail.len().saturating_sub(4096);
-                            stderr_tail = stderr_tail.split_off(split);
-                        }
+                        trim_stderr_tail(&mut stderr_tail, 4096);
                         stderr_tail.push_str(&line);
                         stderr_tail.push('\n');
                     }
                     Ok(None) => stderr_done = true,
                     Err(e) => {
-                        kill_registered_child(children, job_id, token);
+                        kill_registered_child(children, job_id, token).await;
                         return Err(AppError::Message(format!("读取 yt-dlp 进度失败: {e}")));
                     }
                 }
@@ -1237,6 +1254,8 @@ pub async fn download(
 /// predecessor left behind; only the token tells whose process is whose, and a
 /// superseded run that wakes up in a synchronous stretch (where `abort()` cannot
 /// reach it) must not adopt — and then kill on drop — its successor's child.
+/// The token is the run's runner token, so a cleanup that runs outside this
+/// module (the manager's panic path) can kill the same registration by it.
 pub struct RegisteredChild {
     pub(crate) token: u64,
     pub(crate) child: tokio::process::Child,
@@ -1244,35 +1263,42 @@ pub struct RegisteredChild {
 
 pub type DownloadChildren = Arc<Mutex<HashMap<String, RegisteredChild>>>;
 
-/// Registration tokens only have to be unique within the process.
-static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(0);
-
-/// Register the child this run just spawned under a token only this run knows.
-fn register_child(
+/// Register the child this run just spawned under the run's own token. The
+/// caller supplies the token (its runner token) so a cleanup that runs where
+/// this future cannot — the manager's panic path — can kill exactly this
+/// registration and nothing a successor registered under the same job id.
+pub(crate) fn register_child(
     children: &DownloadChildren,
     job_id: &str,
+    token: u64,
     child: tokio::process::Child,
-) -> AppResult<u64> {
-    let token = NEXT_REGISTRATION.fetch_add(1, Ordering::SeqCst) + 1;
+) -> AppResult<()> {
     children
         .lock()
         .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?
         .insert(job_id.to_string(), RegisteredChild { token, child });
-    Ok(token)
+    Ok(())
 }
 
 /// Kill and unregister the child this run registered — same ownership rule as
 /// `take_child`, so a run that reacts to a stop cannot kill a process its
 /// successor registered meanwhile.
-fn kill_registered_child(children: &DownloadChildren, job_id: &str, token: u64) -> bool {
-    let Ok(mut guard) = children.lock() else {
-        return false;
+pub(crate) async fn kill_registered_child(
+    children: &DownloadChildren,
+    job_id: &str,
+    token: u64,
+) -> bool {
+    let entry = {
+        let Ok(mut guard) = children.lock() else {
+            return false;
+        };
+        if guard.get(job_id).map(|entry| entry.token) != Some(token) {
+            return false;
+        }
+        guard.remove(job_id)
     };
-    if guard.get(job_id).map(|entry| entry.token) != Some(token) {
-        return false;
-    }
-    if let Some(mut entry) = guard.remove(job_id) {
-        kill_child_process_tree(&mut entry.child);
+    if let Some(entry) = entry {
+        kill_entry_async(entry).await;
         return true;
     }
     false
@@ -1298,15 +1324,56 @@ fn take_child(
     }
 }
 
-pub fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
-    let Ok(mut guard) = children.lock() else {
-        return false;
+/// Kill and unregister whatever child is registered for this job. Async so the
+/// Windows `taskkill` spawn-wait never parks the caller's thread (an async
+/// command's worker during cancel/pause, or a runner's task). The registry lock
+/// is released before the kill: a std mutex guard must not live across the await,
+/// and per-job outcomes do not change — the entry is already taken.
+pub async fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
+    let entry = {
+        let Ok(mut guard) = children.lock() else {
+            return false;
+        };
+        guard.remove(job_id)
     };
-    if let Some(mut entry) = guard.remove(job_id) {
+    if let Some(entry) = entry {
+        kill_entry_async(entry).await;
+        return true;
+    }
+    false
+}
+
+/// Blocking variant of `kill_download` for the exit teardown: it runs on the
+/// main thread with no async runtime to await on, and must not leave the
+/// process tree behind.
+pub fn kill_download_blocking(children: &DownloadChildren, job_id: &str) -> bool {
+    let entry = {
+        let Ok(mut guard) = children.lock() else {
+            return false;
+        };
+        guard.remove(job_id)
+    };
+    if let Some(mut entry) = entry {
         kill_child_process_tree(&mut entry.child);
         return true;
     }
     false
+}
+
+/// Kill one registered child's whole process tree off the registry lock. On
+/// Windows the kill blocks on `taskkill`, so it runs on the blocking pool; the
+/// Unix group SIGKILL is fire-and-forget and runs inline.
+async fn kill_entry_async(entry: RegisteredChild) {
+    let mut entry = entry;
+    #[cfg(windows)]
+    {
+        let _ =
+            tokio::task::spawn_blocking(move || kill_child_process_tree(&mut entry.child)).await;
+    }
+    #[cfg(unix)]
+    {
+        kill_child_process_tree(&mut entry.child);
+    }
 }
 
 /// Terminate yt-dlp and any children (e.g. ffmpeg). On Windows, `Child::start_kill`
@@ -1914,6 +1981,35 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(notable_stderr_lines("[download] 42% of 1MiB\n", 5).is_empty());
     }
 
+    /// The tail cap must never cut mid multi-byte character: `String::split_off`
+    /// panics on a non-boundary index, and a stderr full of Chinese titles hits
+    /// exactly that. The cap keeps byte counts (threshold `2 * keep`), so the
+    /// contract to pin is: the result stays a suffix-shaped buffer of at most
+    /// `keep` bytes made of whole characters, even when the raw cut index is
+    /// adversarial.
+    #[test]
+    fn stderr_tail_trim_only_cuts_at_character_boundaries() {
+        // 2732 × 3-byte chars = 8196 bytes > 2 × 4096; the raw cut index
+        // 8196 - 4096 = 4100 is not a char boundary (4100 % 3 == 2).
+        let mut tail = "测".repeat(2732);
+        assert_eq!(tail.len(), 8196);
+        assert!(!tail.is_char_boundary(4100), "the cut must be adversarial");
+        trim_stderr_tail(&mut tail, 4096);
+        assert!(tail.len() <= 4096, "over keep: {}", tail.len());
+        assert!(tail.len() >= 4096 - 3, "cut too far back: {}", tail.len());
+        assert!(tail.chars().all(|c| c == '测'), "cut split a character");
+
+        // A tail within the cap is left alone.
+        let mut small = "测".repeat(2000);
+        trim_stderr_tail(&mut small, 4096);
+        assert_eq!(small, "测".repeat(2000));
+
+        // ASCII-only tails cut straight to `keep` bytes.
+        let mut ascii = "a".repeat(9000);
+        trim_stderr_tail(&mut ascii, 4096);
+        assert_eq!(ascii, "a".repeat(4096));
+    }
+
     /// The PyInstaller yt-dlp is two processes (bootloader + python) with
     /// ffmpeg as a grandchild, so a pause must terminate the whole process
     /// group — killing only the direct child leaves the real downloader
@@ -1990,7 +2086,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             let downloader = Arc::clone(&downloader);
             async move {
                 use crate::download::Downloader as _;
-                downloader.run(&job, Box::new(|_| {})).await
+                downloader.run(&job, 1, Box::new(|_| {})).await
             }
         });
 
@@ -2058,6 +2154,10 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     async fn a_run_only_touches_the_child_it_registered() {
         let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
         const JOB_ID: &str = "job-registry";
+        // Two run tokens, one identity per run — the shape `mint_runner_token`
+        // produces for real runners (a process-wide sequence, never reused).
+        const STALE: u64 = 1;
+        const OWNER: u64 = 2;
         let spawn = || {
             let mut cmd = tokio::process::Command::new("sleep");
             cmd.arg("30");
@@ -2066,16 +2166,15 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             cmd.spawn().unwrap()
         };
 
-        let stale = register_child(&children, JOB_ID, spawn()).unwrap();
-        let owner = register_child(&children, JOB_ID, spawn()).unwrap();
-        assert_ne!(stale, owner, "every registration gets its own token");
+        register_child(&children, JOB_ID, STALE, spawn()).unwrap();
+        register_child(&children, JOB_ID, OWNER, spawn()).unwrap();
 
-        let err = take_child(&children, JOB_ID, stale)
+        let err = take_child(&children, JOB_ID, STALE)
             .unwrap_err()
             .to_string();
         assert!(err.contains("yt-dlp 进程已结束"), "unexpected: {err}");
         assert!(
-            !kill_registered_child(&children, JOB_ID, stale),
+            !kill_registered_child(&children, JOB_ID, STALE).await,
             "a superseded run must not kill the registered child"
         );
         assert!(
@@ -2083,8 +2182,110 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             "the successor's entry must survive both attempts"
         );
 
-        let mut mine = take_child(&children, JOB_ID, owner).unwrap();
+        let mut mine = take_child(&children, JOB_ID, OWNER).unwrap();
         let _ = mine.kill().await;
         assert!(children.lock().unwrap().is_empty());
+    }
+
+    /// The stderr tail is capped with a raw byte index (`split_off(len -
+    /// 4096)`), and `String::split_off` panics when that index lands mid
+    /// multi-byte character. yt-dlp WARNING/ERROR lines carry Chinese titles,
+    /// so a tail over 8KB whose cut misses a char boundary kills the runner
+    /// task: the job silently freezes at "downloading" with no auto-recovery.
+    /// Every line here is `ERROR: ` + 100 × `测` (308 bytes with the newline),
+    /// so 27 accumulated lines are 8316 bytes and the next trim cuts at byte
+    /// 4220 — offset 216 inside a line, the middle of a `测` — which panics
+    /// unless the cut is walked to a character boundary.
+    ///
+    /// Value: protects=the boundary-safe stderr tail cap; fails_when=the cap
+    /// cuts at a raw byte index again (the download panics and the caller
+    /// joins a panicked task instead of getting an error); why_new=no test
+    /// drove ytdlp::download with stderr large enough to trigger the tail
+    /// trim; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_huge_multibyte_stderr_tail_fails_instead_of_panicking() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let payload_path = dir.path().join("stderr.txt");
+        let mut payload = String::new();
+        for _ in 0..40 {
+            payload.push_str("ERROR: ");
+            payload.push_str(&"测".repeat(100));
+            payload.push('\n');
+        }
+        std::fs::write(&payload_path, &payload).unwrap();
+
+        let script = dir.path().join("fake-yt-dlp");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             cat \"$(dirname \"$0\")/stderr.txt\" >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let work_root = dir.path().join("work");
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
+
+        const JOB_ID: &str = "job-stderr-tail";
+        let job = crate::models::DownloadJob {
+            id: JOB_ID.into(),
+            url: "https://www.bilibili.com/video/BV1xx".into(),
+            video_id: "BV1xx".into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: crate::models::JobStatus::Running,
+            progress: 0.0,
+            error: None,
+            output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        };
+        let downloader = crate::download::YtDlpDownloader::new(
+            YtDlpConfig {
+                yt_dlp_path: script,
+                ffmpeg_path: None,
+            },
+            work_root,
+            None,
+            children,
+            stop_flags,
+        );
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            use crate::download::Downloader as _;
+            downloader.run(&job, 1, Box::new(|_| {})).await
+        })
+        .await
+        .expect("the download must not hang on a panicking tail trim")
+        .expect_err("a failing yt-dlp run returns its stderr tail as the error");
+        assert!(err.contains("yt-dlp 下载失败"), "unexpected error: {err}");
+        // The tail keeps the newest lines: the final ERROR line (written by
+        // the fake yt-dlp at the very end of a 12KB stream) must survive.
+        assert!(
+            err.contains("ERROR: 测测测"),
+            "the trimmed tail lost the newest stderr lines: {err}"
+        );
+    }
+
+    /// A9: the kill path must be awaitable — the Windows `taskkill` spawn waits
+    /// for the tool to finish, and a sync kill parks the caller's thread (a
+    /// command's async worker during cancel/pause, the main thread before they
+    /// were async). Compile-time pin: these `.await`s fail to build if the kill
+    /// helpers revert to blocking `fn`s.
+    #[tokio::test]
+    async fn kill_helpers_are_async() {
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        assert!(!kill_download(&children, "ghost").await);
+        assert!(!kill_registered_child(&children, "ghost", 1).await);
     }
 }
