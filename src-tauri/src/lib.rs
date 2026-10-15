@@ -53,10 +53,12 @@ pub mod testing {
 // app and were deliberately removed — do not add them back (a startup timing
 // line crept back in via PR #133 and was dropped again in #138). The only
 // allowed tracing sites on this path are the 启动失败 error line in setup
-// below, plus the two anomaly-gated maintenance lines in build_app_state
-// (orphans / interrupted rows left by a previous session, both `> 0`
-// guarded). `startup_silence_guard` fails if the call sites change without a
-// deliberate decision.
+// below, the four anomaly-gated lines in build_app_state (orphans /
+// interrupted rows left by a previous session, both `> 0` guarded, plus the
+// cookie / save_dir fallback warns), and the three degradation warns in the
+// sidecar resolution walk. `startup_silence_guard` fails if the call sites
+// change without a deliberate decision — including bare `info!`-style macros
+// that skip the `tracing::` prefix.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -152,13 +154,17 @@ pub fn run() {
         });
 }
 
-/// Tripwire for the log-shape invariant on `run` / `build_app_state`: a
+/// Tripwire for the log-shape invariant on the healthy-startup path: a
 /// healthy startup produces ZERO log lines (product decision 2026-09-15,
 /// re-broken once by PR #133's startup timing line). A capture-based test
 /// cannot pin this: `build_app_state` takes the Wry `AppHandle` that only the
-/// real app constructs, so this asserts the tracing call sites in the two
-/// function bodies instead. New routine lifecycle logging fails here
-/// deliberately — extend the allow-list only for anomaly/error paths.
+/// real app constructs, so this asserts the tracing call sites in the guarded
+/// function bodies instead. Sites are counted fully-qualified (`tracing::`)
+/// and bare (level macros like `info!(`, which an import of the tracing
+/// macros would enable — that import is banned in the guarded files so a
+/// rename cannot smuggle an unqualified macro in either). New routine
+/// lifecycle logging fails here deliberately — extend the allow-list only
+/// for anomaly/error paths.
 #[cfg(test)]
 mod startup_silence_guard {
     /// Brace-counted body of the function declared at `signature` (a string
@@ -187,6 +193,40 @@ mod startup_silence_guard {
         panic!("unbalanced braces after: {signature}");
     }
 
+    /// Logging call sites in a guarded body: every `tracing::` use (macros
+    /// and anything else on that path) plus bare level macros. The bare
+    /// matcher skips a name preceded by `::` or an identifier character, so
+    /// `tracing::info!` counts once (via `tracing::`) and `my_info!` is not
+    /// a site at all.
+    fn log_sites(body: &str) -> usize {
+        let mut bare = 0usize;
+        for name in ["info!", "warn!", "error!", "debug!", "trace!"] {
+            for (idx, _) in body.match_indices(name) {
+                let prev = body[..idx].chars().next_back();
+                if !matches!(prev, Some(c) if c.is_alphanumeric() || c == '_' || c == ':') {
+                    bare += 1;
+                }
+            }
+        }
+        body.matches("tracing::").count() + bare
+    }
+
+    /// Unqualified log macros can only appear in these files if the tracing
+    /// macros were imported; ban that import so the bare-name counter cannot
+    /// be sidestepped by a rename (import `tracing::info` as `xlog`, then
+    /// call `xlog!(...)`). The needle is assembled from two literals so this
+    /// source does not match itself.
+    fn assert_no_tracing_imports(file: &str, source: &str) {
+        let needle = concat!("use ", "tracing");
+        assert!(
+            !source.contains(needle),
+            "{file} must call tracing fully qualified (product decision 2026-09-15): \
+             an import of the tracing macros would let unqualified log calls reach the \
+             startup path without a `tracing::` prefix. Extend this test deliberately \
+             if such an import ever becomes necessary."
+        );
+    }
+
     #[test]
     fn healthy_startup_call_sites_stay_anomaly_only() {
         let lib = include_str!("lib.rs");
@@ -195,14 +235,15 @@ mod startup_silence_guard {
         let state_body = fn_body(commands, "\npub fn build_app_state");
 
         // run(): only the startup-failure error path may log.
-        let run_sites = run_body.matches("tracing::").count();
+        let run_sites = log_sites(run_body);
         assert_eq!(
             run_sites, 1,
             "healthy startup must produce zero log lines (product decision 2026-09-15; \
              a startup timing line already re-broke this via PR #133): `run` has \
-             {run_sites} tracing call sites, only the 启动失败 error path is allowed. \
-             Keep routine lifecycle logging (start/exit, engine versions, timing) out; \
-             extend this test deliberately for new anomaly/error paths."
+             {run_sites} log call sites (fully-qualified or bare), only the 启动失败 \
+             error path is allowed. Keep routine lifecycle logging (start/exit, engine \
+             versions, timing) out; extend this test deliberately for new anomaly/error \
+             paths."
         );
         assert!(run_body.contains("tracing::error!"));
         assert!(run_body.contains("app: 启动失败"));
@@ -210,14 +251,15 @@ mod startup_silence_guard {
         // build_app_state(): exactly the two anomaly-gated maintenance lines
         // plus two anomaly-gated warns landed later (cookie materialization
         // failure on launch, and the session-only save_dir fallback).
-        let state_sites = state_body.matches("tracing::").count();
+        let state_sites = log_sites(state_body);
         assert_eq!(
             state_sites, 4,
             "healthy startup must produce zero log lines (product decision 2026-09-15): \
-             `build_app_state` has {state_sites} tracing call sites, only the two \
-             anomaly-gated maintenance lines (orphans / interrupted rows) and the two \
-             anomaly-gated warns (cookie materialization failure / save_dir fallback) \
-             are allowed. Extend this test deliberately for new anomaly/error paths."
+             `build_app_state` has {state_sites} log call sites (fully-qualified or \
+             bare), only the two anomaly-gated maintenance lines (orphans / interrupted \
+             rows) and the two anomaly-gated warns (cookie materialization failure / \
+             save_dir fallback) are allowed. Extend this test deliberately for new \
+             anomaly/error paths."
         );
         assert!(state_body.contains("tracing::info!"));
         assert!(state_body.contains("tracing::warn!"));
@@ -244,5 +286,83 @@ mod startup_silence_guard {
             state_body.contains("if save_dir_plan.effective != Path::new(&settings.save_dir)"),
             "the save_dir warning must stay anomaly-gated (fallback active)"
         );
+        // Last: no import may enable unqualified log macros in either file.
+        assert_no_tracing_imports("lib.rs", lib);
+        assert_no_tracing_imports("commands.rs", commands);
+    }
+
+    /// The sidecar resolution walk is the other code on the healthy-startup
+    /// path: `build_app_state` calls `resolve_ytdlp_config` on every launch,
+    /// which resolves both engine binaries through the candidates below (PR
+    /// #133 reworked this walk and its probe). These are the exact functions
+    /// reachable from `resolve_ytdlp_config` — do not blanket-add the rest of
+    /// sidecar.rs if it grows non-startup helpers. A healthy startup finds
+    /// its binaries without degrading and logs nothing here; `resolve_with`'s
+    /// three allowed sites are the degradation paths only.
+    #[test]
+    fn sidecar_resolution_call_sites_stay_anomaly_only() {
+        let sidecar = include_str!("sidecar.rs");
+
+        // The resolution chain `resolve_ytdlp_config` drives, minus
+        // `resolve_with` (asserted below with its own allow-list). A new
+        // function joining this chain must be added here deliberately.
+        let quiet_fns = [
+            "\nfn sidecar_filename",
+            "\npub(crate) fn sidecar_in_dir",
+            "\nfn sidecar_next_to_current_exe",
+            "\nfn bundled_sidecar_path",
+            "\nfn dev_sidecar_path",
+            "\nfn resolve_bundled",
+            "\nfn path_from_env",
+            "\nfn env_override",
+            "\nfn path_from_which",
+            "\nfn system_candidate",
+            "\nfn probe(path:",
+            "\nfn probe_command",
+            "\nfn resolve_candidates",
+            "\npub fn resolve_yt_dlp_path",
+            "\npub fn resolve_ffmpeg_path",
+            "\npub fn resolve_ytdlp_config",
+        ];
+        for signature in quiet_fns {
+            let body = fn_body(sidecar, signature);
+            assert_eq!(
+                log_sites(body),
+                0,
+                "healthy startup must produce zero log lines (product decision 2026-09-15): \
+                 sidecar `{}` has log call sites (fully-qualified or bare) on the startup \
+                 path. Keep routine logging out; extend this test deliberately for new \
+                 anomaly/error paths.",
+                signature.trim_start()
+            );
+        }
+
+        // resolve_with(): exactly the three degradation warns, nothing else.
+        let walk = fn_body(sidecar, "\nfn resolve_with");
+        let walk_sites = log_sites(walk);
+        assert_eq!(
+            walk_sites, 3,
+            "healthy startup must produce zero log lines (product decision 2026-09-15): \
+             `resolve_with` has {walk_sites} log call sites (fully-qualified or bare), \
+             only the three degradation warns (fallback origin / skipped candidate / no \
+             usable binary) are allowed. Extend this test deliberately for new \
+             anomaly/error paths."
+        );
+        assert_eq!(
+            walk.matches("tracing::warn!").count(),
+            3,
+            "the three allowed `resolve_with` sites must stay fully-qualified warns"
+        );
+        assert!(walk.contains("改用{origin}的二进制"));
+        assert!(walk.contains("无法运行（{origin}），跳过"));
+        assert!(walk.contains("无可用二进制"));
+        // The fallback warn must stay gated on losing the bundled binary:
+        // a dev run without bundled sidecars has no degradation to report.
+        assert!(
+            walk.contains("if bundled_present && origin != ORIGIN_BUNDLED"),
+            "the fallback warn must stay anomaly-gated (bundled binary lost)"
+        );
+        // Last: no import may enable unqualified log macros in this file.
+        assert_no_tracing_imports("sidecar.rs", sidecar);
     }
 }
