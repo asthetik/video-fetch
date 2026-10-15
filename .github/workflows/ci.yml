@@ -178,8 +178,8 @@ jobs:
       - name: Zero-test guard
         shell: bash
         run: |
-          # Expected listing: 3 support self-checks + 7 regression tests = 10;
-          # >= 6 is a floor against a silent zero after a rename.
+          # Expected listing: 0 support self-checks + 12 regression tests = 12
+          # (measured 2026-10-15); >= 6 is a floor against a silent zero after a rename.
           n=$(cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --list | grep -c ': test$')
           echo "regression tests listed: $n"
           [ "$n" -ge 6 ]
