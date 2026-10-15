@@ -1125,7 +1125,7 @@ pub async fn download(
 
     // A stop may have raced before the child was registered; honor it now.
     if let Some(kind) = stop_kind_of(stop_flags, job_id) {
-        kill_registered_child(children, job_id, token);
+        kill_registered_child(children, job_id, token).await;
         return Err(stop_err(kind));
     }
 
@@ -1143,7 +1143,7 @@ pub async fn download(
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                 if let Some(kind) = stop_kind_of(stop_flags, job_id) {
-                    kill_registered_child(children, job_id, token);
+                    kill_registered_child(children, job_id, token).await;
                     return Err(stop_err(kind));
                 }
             }
@@ -1165,7 +1165,7 @@ pub async fn download(
                         // An output-read error still has to stop the whole
                         // tree: dropping just the direct child would leave the
                         // PyInstaller second stage running.
-                        kill_registered_child(children, job_id, token);
+                        kill_registered_child(children, job_id, token).await;
                         return Err(AppError::Message(format!("读取 yt-dlp 输出失败: {e}")));
                     }
                 }
@@ -1186,7 +1186,7 @@ pub async fn download(
                     }
                     Ok(None) => stderr_done = true,
                     Err(e) => {
-                        kill_registered_child(children, job_id, token);
+                        kill_registered_child(children, job_id, token).await;
                         return Err(AppError::Message(format!("读取 yt-dlp 进度失败: {e}")));
                     }
                 }
@@ -1283,15 +1283,22 @@ pub(crate) fn register_child(
 /// Kill and unregister the child this run registered — same ownership rule as
 /// `take_child`, so a run that reacts to a stop cannot kill a process its
 /// successor registered meanwhile.
-pub(crate) fn kill_registered_child(children: &DownloadChildren, job_id: &str, token: u64) -> bool {
-    let Ok(mut guard) = children.lock() else {
-        return false;
+pub(crate) async fn kill_registered_child(
+    children: &DownloadChildren,
+    job_id: &str,
+    token: u64,
+) -> bool {
+    let entry = {
+        let Ok(mut guard) = children.lock() else {
+            return false;
+        };
+        if guard.get(job_id).map(|entry| entry.token) != Some(token) {
+            return false;
+        }
+        guard.remove(job_id)
     };
-    if guard.get(job_id).map(|entry| entry.token) != Some(token) {
-        return false;
-    }
-    if let Some(mut entry) = guard.remove(job_id) {
-        kill_child_process_tree(&mut entry.child);
+    if let Some(entry) = entry {
+        kill_entry_async(entry).await;
         return true;
     }
     false
@@ -1317,15 +1324,56 @@ fn take_child(
     }
 }
 
-pub fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
-    let Ok(mut guard) = children.lock() else {
-        return false;
+/// Kill and unregister whatever child is registered for this job. Async so the
+/// Windows `taskkill` spawn-wait never parks the caller's thread (an async
+/// command's worker during cancel/pause, or a runner's task). The registry lock
+/// is released before the kill: a std mutex guard must not live across the await,
+/// and per-job outcomes do not change — the entry is already taken.
+pub async fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
+    let entry = {
+        let Ok(mut guard) = children.lock() else {
+            return false;
+        };
+        guard.remove(job_id)
     };
-    if let Some(mut entry) = guard.remove(job_id) {
+    if let Some(entry) = entry {
+        kill_entry_async(entry).await;
+        return true;
+    }
+    false
+}
+
+/// Blocking variant of `kill_download` for the exit teardown: it runs on the
+/// main thread with no async runtime to await on, and must not leave the
+/// process tree behind.
+pub fn kill_download_blocking(children: &DownloadChildren, job_id: &str) -> bool {
+    let entry = {
+        let Ok(mut guard) = children.lock() else {
+            return false;
+        };
+        guard.remove(job_id)
+    };
+    if let Some(mut entry) = entry {
         kill_child_process_tree(&mut entry.child);
         return true;
     }
     false
+}
+
+/// Kill one registered child's whole process tree off the registry lock. On
+/// Windows the kill blocks on `taskkill`, so it runs on the blocking pool; the
+/// Unix group SIGKILL is fire-and-forget and runs inline.
+async fn kill_entry_async(entry: RegisteredChild) {
+    let mut entry = entry;
+    #[cfg(windows)]
+    {
+        let _ =
+            tokio::task::spawn_blocking(move || kill_child_process_tree(&mut entry.child)).await;
+    }
+    #[cfg(unix)]
+    {
+        kill_child_process_tree(&mut entry.child);
+    }
 }
 
 /// Terminate yt-dlp and any children (e.g. ffmpeg). On Windows, `Child::start_kill`
@@ -2126,7 +2174,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             .to_string();
         assert!(err.contains("yt-dlp 进程已结束"), "unexpected: {err}");
         assert!(
-            !kill_registered_child(&children, JOB_ID, STALE),
+            !kill_registered_child(&children, JOB_ID, STALE).await,
             "a superseded run must not kill the registered child"
         );
         assert!(
@@ -2227,5 +2275,17 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             err.contains("ERROR: 测测测"),
             "the trimmed tail lost the newest stderr lines: {err}"
         );
+    }
+
+    /// A9: the kill path must be awaitable — the Windows `taskkill` spawn waits
+    /// for the tool to finish, and a sync kill parks the caller's thread (a
+    /// command's async worker during cancel/pause, the main thread before they
+    /// were async). Compile-time pin: these `.await`s fail to build if the kill
+    /// helpers revert to blocking `fn`s.
+    #[tokio::test]
+    async fn kill_helpers_are_async() {
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        assert!(!kill_download(&children, "ghost").await);
+        assert!(!kill_registered_child(&children, "ghost", 1).await);
     }
 }
