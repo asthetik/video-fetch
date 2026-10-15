@@ -8,6 +8,7 @@ import {
   withToast,
   type LoadState,
 } from "../lib/asyncAction";
+import { saveDirPlaceholder } from "../lib/saveDirDisplay";
 import { saveDirRowHint } from "../lib/saveDirNotice";
 import { AuthStatus } from "../components/AuthStatus";
 import { NamingPreview } from "../components/NamingPreview";
@@ -242,6 +243,10 @@ export function SettingsPage() {
               type="text"
               className="settings-input"
               value={settings.save_dir}
+              // A mounted settings page always runs under a backend session
+              // that has an effective save dir; an empty setting means that
+              // dir cannot cross IPC as a String, not "not configured".
+              placeholder={saveDirPlaceholder(settings.save_dir, true)}
               readOnly
             />
             <button type="button" className="btn" onClick={() => void handlePickDir()}>
