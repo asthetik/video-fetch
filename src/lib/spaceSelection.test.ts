@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { selectionAfterFilterChange } from "./spaceSelection.ts";
+import { selectionAfterFilterChange, uploaderAfterMidChange } from "./spaceSelection.ts";
 
 test("keyword/order change clears residual selection", () => {
   // 10 rows checked under "最新发布", then a keyword narrows the list to 2:
@@ -35,4 +35,21 @@ test("selectionAfterFilterChange returns a fresh empty map", () => {
   const next = selectionAfterFilterChange(prev);
   assert.notEqual(next, prev);
   assert.equal(next.size, 0);
+});
+
+test("mid change clears the previous space's uploader name", () => {
+  // The old name lingers in state until the new spaceInfo resolves. A batch
+  // submitted in that window must not predict skip-existing with the previous
+  // space's name, so the mid-change reset clears it immediately.
+  assert.equal(uploaderAfterMidChange("Stale Uploader"), "");
+});
+
+test("mid change clears the uploader name even when it is already empty", () => {
+  assert.equal(uploaderAfterMidChange(""), "");
+});
+
+test("uploaderAfterMidChange does not depend on the previous name", () => {
+  // The reset is unconditional: whatever the previous space's name was, the
+  // result is the same absent-uploader fallback the backend already accepts.
+  assert.equal(uploaderAfterMidChange("A"), uploaderAfterMidChange("B"));
 });

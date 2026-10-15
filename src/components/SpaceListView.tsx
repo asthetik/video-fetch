@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { formatDate, formatDuration, formatPlayCount } from "../lib/spaceFormat";
-import { selectionAfterFilterChange } from "../lib/spaceSelection";
+import { selectionAfterFilterChange, uploaderAfterMidChange } from "../lib/spaceSelection";
 import { api } from "../lib/tauri";
 import type { SpacePage, SpaceVideoItem } from "../types";
 import { BatchFormatDialog } from "./BatchFormatDialog";
@@ -30,6 +30,9 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
   const [failedItems, setFailedItems] = useState<{ bvid: string; error: string }[]>([]);
   const requestIdRef = useRef(0);
   const pageRef = useRef(1);
+  // Last mid the reset effect ran for, so a mid change can be told apart
+  // from a keyword/order change of the same space.
+  const lastMidRef = useRef(mid);
   // The exact request that failed, so retry re-issues it: retrying a failed
   // load-more must re-append, not replace the accumulated pages with one.
   const failedReqRef = useRef<{ pn: number; append: boolean }>({ pn: 1, append: false });
@@ -77,6 +80,16 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     // A keyword/order change replaces the visible rows; drop the selection so
     // the batch bar never acts on rows the user can no longer see.
     setSelected((prev) => selectionAfterFilterChange(prev));
+    // A mid change additionally makes the space owner's name stale: the old
+    // name lingers until the new spaceInfo resolves, and batch enqueue would
+    // predict skip-existing with it. Clear it with the rest of the reset;
+    // keyword/order changes keep the name (same space). A batch submitted
+    // before spaceInfo resolves sends an empty uploader — the backend's
+    // documented fallback for callers that omit the name.
+    if (lastMidRef.current !== mid) {
+      lastMidRef.current = mid;
+      setUploader((prev) => uploaderAfterMidChange(prev));
+    }
     void loadPage(1, false, keyword, order);
     void api
       .spaceInfo(mid)
