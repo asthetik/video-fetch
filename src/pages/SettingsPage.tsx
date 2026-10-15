@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, FileCode2, FolderOpen, Palette, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "../lib/tauri";
+import {
+  toErrorMessage,
+  toLoadState,
+  withToast,
+  type LoadState,
+} from "../lib/asyncAction";
 import { AuthStatus } from "../components/AuthStatus";
 import { NamingPreview } from "../components/NamingPreview";
 import { Segmented } from "../components/Segmented";
@@ -27,7 +33,10 @@ const CONCURRENCY_MAX = 16;
 const AUTOSAVE_DEBOUNCE_MS = 400;
 
 export function SettingsPage() {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsState, setSettingsState] = useState<LoadState<AppSettings>>({
+    status: "loading",
+  });
+  const settings = settingsState.status === "ready" ? settingsState.data : null;
   const [importing, setImporting] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const { mode, setMode } = useTheme();
@@ -39,14 +48,18 @@ export function SettingsPage() {
     try {
       await api.saveSettings(next);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      toast.error(`无法保存设置：${detail}`);
+      toast.error(`无法保存设置：${toErrorMessage(err)}`);
     }
   }, []);
 
-  useEffect(() => {
-    void api.getSettings().then(setSettings);
+  const loadSettings = useCallback(async () => {
+    setSettingsState({ status: "loading" });
+    setSettingsState(await toLoadState(() => api.getSettings()));
   }, []);
+
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
 
   useEffect(() => {
     return () => {
@@ -65,11 +78,11 @@ export function SettingsPage() {
   }, []);
 
   function patch(partial: Partial<AppSettings>, options?: { debounce?: boolean }) {
-    setSettings((prev) => {
-      if (!prev) {
+    setSettingsState((prev) => {
+      if (prev.status !== "ready") {
         return prev;
       }
-      const next = { ...prev, ...partial };
+      const next = { ...prev.data, ...partial };
       pendingSettingsRef.current = next;
       if (options?.debounce) {
         if (debounceTimerRef.current !== null) {
@@ -91,7 +104,7 @@ export function SettingsPage() {
         pendingSettingsRef.current = null;
         void persist(next);
       }
-      return next;
+      return { status: "ready", data: next };
     });
   }
 
@@ -105,14 +118,14 @@ export function SettingsPage() {
   }
 
   async function handleOpenSaveDir() {
-    if (!settings) {
+    const dir = settings?.save_dir;
+    if (!dir) {
       return;
     }
-    try {
-      await api.openPath(settings.save_dir);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
+    await withToast(
+      () => api.openPath(dir),
+      (message) => toast.error(message),
+    );
   }
 
   async function handleImportCookies() {
@@ -122,13 +135,31 @@ export function SettingsPage() {
       await api.importCookiesPath(path);
       toast.success("Cookies 已导入");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = toErrorMessage(err);
       if (!msg.includes("取消")) {
         toast.error(msg);
       }
     } finally {
       setImporting(false);
     }
+  }
+
+  if (settingsState.status === "error") {
+    return (
+      <div className="settings-page">
+        <h2 className="page-title">设置</h2>
+        <p className="url-hint error">设置加载失败：{settingsState.message}</p>
+        <div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void loadSettings()}
+          >
+            重试
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (!settings) {

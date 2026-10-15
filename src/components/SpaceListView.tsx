@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { formatDate, formatDuration, formatPlayCount } from "../lib/spaceFormat";
+import { selectionAfterFilterChange } from "../lib/spaceSelection";
 import { api } from "../lib/tauri";
 import type { SpacePage, SpaceVideoItem } from "../types";
 import { BatchFormatDialog } from "./BatchFormatDialog";
@@ -73,6 +74,9 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
     setItems([]);
     setSummary(null);
     setFailedItems([]);
+    // A keyword/order change replaces the visible rows; drop the selection so
+    // the batch bar never acts on rows the user can no longer see.
+    setSelected((prev) => selectionAfterFilterChange(prev));
     void loadPage(1, false, keyword, order);
     void api
       .spaceInfo(mid)
@@ -140,6 +144,9 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
         })),
         format_id: formatId,
         audio_format: audioFormat,
+        // Space owner name; the backend expands %(uploader)s in the
+        // skip-existing prediction with it, matching the single-video path.
+        uploader,
       });
       const failedNote =
         result.failed.length > 0 ? `，失败 ${result.failed.length} 个` : "";

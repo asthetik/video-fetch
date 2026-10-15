@@ -103,6 +103,10 @@
   color: var(--muted);
 }
 
+.auth-label.error {
+  color: var(--danger-ink);
+}
+
 .btn {
   padding: 0.45rem 0.85rem;
   border: 1px solid var(--hairline);
