@@ -2865,6 +2865,70 @@ mod tests {
         assert_eq!(kind, EnqueueKind::AlreadyExists);
     }
 
+    /// Regression: the batch path must feed the skip-existing dedup the same
+    /// uploader the single-video path uses. It used to hardcode an empty
+    /// uploader, so with a `%(uploader)s` template the batch prediction never
+    /// matched the real uploader-named file — archiving a whole space
+    /// re-downloaded every existing video in full, and relocation then
+    /// collided with the real file ("搬迁到保存目录失败: destination exists").
+    #[tokio::test]
+    async fn batch_enqueue_dedups_on_the_uploader_path_the_pre_check_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = "%(uploader)s/%(title)s [%(id)s].%(ext)s";
+        // The file a previous run left at the real uploader-named path.
+        std::fs::create_dir_all(dir.path().join("up")).unwrap();
+        std::fs::write(dir.path().join("up/demo [BV1xx].mp4"), b"x").unwrap();
+
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::success(100.0)),
+        );
+
+        // The single-video pre-check predicts with the real uploader and sees
+        // the existing product …
+        let conflict = manager
+            .check_conflict("BV1xx", &[1], "80", None, "demo", "up", template)
+            .unwrap();
+        assert!(
+            conflict.file_exists,
+            "single-video pre-check must see the uploader-named file"
+        );
+
+        // … while the batch path, given the same uploader input, must skip
+        // instead of enqueueing a full re-download. Built through the batch
+        // path's own job construction.
+        let args: crate::commands::SpaceBatchArgs = serde_json::from_value(serde_json::json!({
+            "items": [{ "bvid": "BV1xx", "title": "demo" }],
+            "format_id": "80",
+            "uploader": "up",
+        }))
+        .unwrap();
+        let mut job = crate::commands::batch_item_to_job(&args, &args.items[0], &None, template);
+        let kind = manager.enqueue_classified(&mut job, false).unwrap();
+        assert_eq!(
+            kind,
+            EnqueueKind::AlreadyExists,
+            "batch enqueue must skip the existing file at the uploader-named path"
+        );
+
+        // Both paths must also predict the identical output path for the same
+        // uploader input, so the dedup and the pre-check can never disagree.
+        let single_predicted = naming::preview_filename(template, "demo", "BV1xx", "up", "mp4", 1);
+        let batch_predicted = naming::preview_filename(
+            &job.output_template,
+            &job.title,
+            &job.video_id,
+            &job.uploader,
+            "mp4",
+            job.page_index,
+        );
+        assert_eq!(
+            batch_predicted, single_predicted,
+            "batch and single-video paths must predict the identical output path for the same uploader"
+        );
+    }
+
     /// Regression: when the enqueue dedup and the pre-check disagree on the
     /// predicted path, yt-dlp writes the real uploader name while the dedup
     /// predicted the empty one — skip-existing waves the download through and

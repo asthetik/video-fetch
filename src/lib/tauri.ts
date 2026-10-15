@@ -121,5 +121,7 @@ export const api = {
     items: BatchEnqueueItem[];
     format_id: string;
     audio_format?: string | null;
+    /** Space owner name from `spaceInfo`; feeds the skip-existing prediction. */
+    uploader?: string;
   }) => invoke<BatchEnqueueResult>("space_enqueue_batch", { args }),
 };
