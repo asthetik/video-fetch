@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
@@ -243,6 +243,74 @@ impl Downloader for YtDlpDownloader {
     }
 }
 
+/// Concurrency accounting for the download runners. The desired limit and the
+/// number of runners holding a permit are the single source of truth: the
+/// semaphore's real capacity is reconciled to `max(desired, active)` at every
+/// limit change and every permit return, so the configured limit and the
+/// semaphore can never drift apart. A lower limit under load cannot be applied
+/// up front — every permit is held — so the surplus is absorbed as the runners
+/// return instead of being handed back to the queue.
+#[derive(Clone, Copy)]
+struct ConcurrencyState {
+    /// Configured max concurrent downloads (always >= 1).
+    desired: usize,
+    /// Runners currently holding a permit.
+    active: usize,
+    /// Permits currently inside the semaphore: added minus forgotten.
+    capacity: usize,
+}
+
+/// The state holds plain counters, so a poisoned lock still has sound data:
+/// recovering beats swallowing the accounting (a return that silently did
+/// nothing would strand a permit) and beats wedging the limit.
+fn lock_concurrency(
+    state: &Mutex<ConcurrencyState>,
+) -> std::sync::MutexGuard<'_, ConcurrencyState> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A runner's hold on one concurrency slot. Releasing it is a reconciliation
+/// point for the capacity accounting: while the active count is still at or
+/// above the desired limit — a downgraded limit draining — the permit is
+/// forgotten instead of returned, so it cannot wake a queued runner past the
+/// limit. It re-enters the pool only when a slot is free under the desired
+/// limit.
+struct RunnerPermit<'a> {
+    permit: Option<SemaphorePermit<'a>>,
+    state: &'a Mutex<ConcurrencyState>,
+}
+
+impl<'a> RunnerPermit<'a> {
+    /// Take the slot the acquired permit represents. This and `Drop` are the
+    /// only places `active` changes, so the count tracks held permits exactly.
+    fn new(permit: SemaphorePermit<'a>, state: &'a Mutex<ConcurrencyState>) -> Self {
+        lock_concurrency(state).active += 1;
+        Self {
+            permit: Some(permit),
+            state,
+        }
+    }
+}
+
+impl Drop for RunnerPermit<'_> {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let mut state = lock_concurrency(self.state);
+        state.active = state.active.saturating_sub(1);
+        if state.active >= state.desired {
+            // Still at or over the limit: absorb this permit so the queue
+            // cannot run more than `desired` downloads. Capacity must follow.
+            state.capacity = state.capacity.saturating_sub(1);
+            drop(state);
+            permit.forget();
+        }
+        // Otherwise the permit returns to the pool: active + idle adds up to
+        // the desired limit again.
+    }
+}
+
 #[derive(Clone)]
 pub struct DownloadManager {
     db: Arc<Mutex<Db>>,
@@ -252,8 +320,9 @@ pub struct DownloadManager {
     children: DownloadChildren,
     work_root: PathBuf,
     semaphore: Arc<Semaphore>,
-    /// Configured max concurrent downloads (matches semaphore capacity accounting).
-    concurrency_limit: Arc<AtomicUsize>,
+    /// Desired limit + active runner count: the source of truth the
+    /// semaphore's capacity is reconciled against (see `ConcurrencyState`).
+    concurrency: Arc<Mutex<ConcurrencyState>>,
     running_tasks: RunningTasks,
     stop_flags: StopFlags,
     runner_tokens: RunnerTokens,
@@ -310,7 +379,11 @@ impl DownloadManager {
             children,
             work_root,
             semaphore: Arc::new(Semaphore::new(concurrency)),
-            concurrency_limit: Arc::new(AtomicUsize::new(concurrency)),
+            concurrency: Arc::new(Mutex::new(ConcurrencyState {
+                desired: concurrency,
+                active: 0,
+                capacity: concurrency,
+            })),
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             stop_flags,
             runner_tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -878,25 +951,36 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// Grow/shrink the download semaphore to match the configured concurrency.
+    /// Reconcile the download semaphore with the configured concurrency.
+    ///
+    /// `desired` and the active runner count are the source of truth; the
+    /// semaphore's real capacity must be `max(desired, active)` — a permit a
+    /// runner is holding cannot be reclaimed here and is instead absorbed when
+    /// that runner returns it. Idle permits beyond the target are withdrawn,
+    /// and a raise tops the pool up to the target rather than adding
+    /// `new - old` on top of a capacity a downgrade may never have shrunk.
     fn resize_concurrency(&self, new_limit: usize) {
-        let old = self.concurrency_limit.swap(new_limit, Ordering::SeqCst);
-        if new_limit > old {
-            self.semaphore.add_permits(new_limit - old);
-        } else if new_limit < old {
-            // Permanently remove idle permits. If permits are currently held by
-            // running jobs, try_acquire fails and we leave the extra capacity
-            // until the next settings change (or process restart).
-            let mut to_remove = old - new_limit;
-            while to_remove > 0 {
+        let mut state = lock_concurrency(&self.concurrency);
+        state.desired = new_limit;
+        let target = new_limit.max(state.active);
+        if state.capacity < target {
+            self.semaphore.add_permits(target - state.capacity);
+            state.capacity = target;
+        } else if state.capacity > target {
+            let mut surplus = state.capacity - target;
+            while surplus > 0 {
                 match self.semaphore.try_acquire() {
                     Ok(permit) => {
                         permit.forget();
-                        to_remove -= 1;
+                        surplus -= 1;
                     }
+                    // The idle permits ran out (a queued runner raced us for
+                    // the last one); the rest are held and will be absorbed
+                    // as the runners return them.
                     Err(_) => break,
                 }
             }
+            state.capacity = target + surplus;
         }
     }
 
@@ -982,7 +1066,7 @@ impl DownloadManager {
 
     async fn run_job(&self, job_id: String, token: u64) {
         let _permit = match self.semaphore.acquire().await {
-            Ok(permit) => permit,
+            Ok(permit) => RunnerPermit::new(permit, &self.concurrency),
             Err(_) => return,
         };
 
@@ -1536,7 +1620,7 @@ pub fn cleanup_orphan_work_dirs(work_root: &Path, keep_job_ids: &[String]) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::time::{Duration, sleep};
 
     struct MockDownloader {
@@ -2750,6 +2834,306 @@ mod tests {
             sleep(Duration::from_millis(20)).await;
         }
         panic!("expected both jobs running after concurrency increase");
+    }
+
+    /// Holds each run until the test releases that job id, and records every id
+    /// currently inside `run` so a test can see how many downloads really
+    /// overlap. Releasing one id must not release the rest: the concurrency
+    /// tests need to observe exactly which queued runner a freed permit woke.
+    struct LatchedDownloader {
+        released: Arc<Mutex<HashSet<String>>>,
+        wake: Arc<tokio::sync::Notify>,
+        running: Arc<Mutex<HashSet<String>>>,
+        peak: Arc<AtomicUsize>,
+        scratch: tempfile::TempDir,
+    }
+
+    impl LatchedDownloader {
+        fn new() -> Self {
+            Self {
+                released: Arc::new(Mutex::new(HashSet::new())),
+                wake: Arc::new(tokio::sync::Notify::new()),
+                running: Arc::new(Mutex::new(HashSet::new())),
+                peak: Arc::new(AtomicUsize::new(0)),
+                scratch: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn release(&self, id: &str) {
+            if let Ok(mut released) = self.released.lock() {
+                released.insert(id.to_string());
+            }
+            self.wake.notify_waiters();
+        }
+
+        fn running_ids(&self) -> Vec<String> {
+            let mut ids: Vec<String> = match self.running.lock() {
+                Ok(running) => running.iter().cloned().collect(),
+                Err(_) => return Vec::new(),
+            };
+            ids.sort();
+            ids
+        }
+    }
+
+    #[async_trait]
+    impl Downloader for LatchedDownloader {
+        async fn run(
+            &self,
+            job: &DownloadJob,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            {
+                let mut running = match self.running.lock() {
+                    Ok(running) => running,
+                    Err(_) => return Err("running lock poisoned".into()),
+                };
+                running.insert(job.id.clone());
+                self.peak.fetch_max(running.len(), Ordering::SeqCst);
+            }
+            loop {
+                let released = match self.released.lock() {
+                    Ok(released) => released.contains(&job.id),
+                    Err(_) => true,
+                };
+                if released {
+                    break;
+                }
+                self.wake.notified().await;
+            }
+            if let Ok(mut running) = self.running.lock() {
+                running.remove(&job.id);
+            }
+            let path = self.scratch.path().join(format!("{}.mp4", job.id));
+            std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
+            Ok(path)
+        }
+    }
+
+    /// Enqueue `count` distinct jobs and return their ids in enqueue order.
+    fn enqueue_distinct_jobs(manager: &DownloadManager, prefix: &str, count: usize) -> Vec<String> {
+        let mut ids = Vec::new();
+        for i in 1..=count {
+            let id = format!("{prefix}-{i}");
+            let mut job = sample_job(&id);
+            job.video_id = format!("BV{prefix}{i}");
+            manager.enqueue(job, false).unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    /// The reported semaphore drift. A limit round-trip (3 → 1 → 3) while all
+    /// slots are busy must leave the semaphore at the stated limit of 3: the
+    /// downgrade reclaims zero permits while every one of them is held, and the
+    /// upgrade must not hand out `new - old` on top of a capacity the
+    /// downgrade never shrank. Before the fix the two paths compose to
+    /// effective concurrency 5 — and repeated toggles grow monotonically — so
+    /// a user lowering the limit to dodge Bilibili risk controls gets the
+    /// opposite.
+    ///
+    /// Value: protects=concurrency resize accounting (desired limit + active
+    /// runner count as the source of truth, reconciled at permit returns);
+    /// fails_when=the upgrade adds permits against the previously stated limit
+    /// while the downgrade gave up on the first held permit; why_new=no test
+    /// changed the limit while slots were saturated
+    #[tokio::test]
+    async fn concurrency_toggle_under_load_does_not_inflate_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader.clone());
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 3;
+        manager.update_settings(settings).unwrap();
+        enqueue_distinct_jobs(&manager, "job-toggle", 5);
+
+        // Saturate: three permits held by runs that never finish on their own,
+        // two runners parked on the semaphore.
+        for _ in 0..200 {
+            if downloader.running_ids().len() == 3 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            downloader.running_ids().len(),
+            3,
+            "expected three downloads running under concurrency 3"
+        );
+        assert_eq!(manager.semaphore.available_permits(), 0);
+
+        // The round-trip under load: nothing is reclaimable on the way down,
+        // and the way up must reconcile against the true capacity rather than
+        // the previously stated limit.
+        let mut lowered = test_settings(dir.path());
+        lowered.concurrency = 1;
+        manager.update_settings(lowered).unwrap();
+        let mut restored = test_settings(dir.path());
+        restored.concurrency = 3;
+        manager.update_settings(restored).unwrap();
+
+        // The two parked runners must stay parked: the toggle may not raise
+        // effective concurrency past the stated limit of 3.
+        let mut inflated: Option<Vec<String>> = None;
+        for _ in 0..100 {
+            let running = downloader.running_ids();
+            if running.len() > 3 {
+                inflated = Some(running);
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            inflated, None,
+            "effective concurrency exceeded the stated limit of 3: {inflated:?}"
+        );
+        assert_eq!(
+            downloader.peak.load(Ordering::SeqCst),
+            3,
+            "peak concurrent downloads must never exceed the stated limit"
+        );
+
+        for id in &[
+            "job-toggle-1",
+            "job-toggle-2",
+            "job-toggle-3",
+            "job-toggle-4",
+            "job-toggle-5",
+        ] {
+            downloader.release(id);
+            wait_for_status(&manager, id, JobStatus::Done).await;
+        }
+
+        // The drained semaphore must be back at exactly the stated limit, not
+        // the inflated leftover of the toggle.
+        assert_eq!(
+            manager.semaphore.available_permits(),
+            3,
+            "the semaphore must drain back to the stated limit of 3"
+        );
+    }
+
+    /// A downgrade must take effect even while every slot is busy: the surplus
+    /// permits cannot be reclaimed up front (every one of them is held), so
+    /// they must be absorbed as the running jobs return them. Only one queued
+    /// runner may start per free slot — a return that re-enters the pool while
+    /// the active count is still at the new limit wakes the whole queue past
+    /// it.
+    ///
+    /// Value: protects=RunnerPermit's absorb-on-return accounting and the
+    /// capacity reconciliation behind it; fails_when=returns always re-enter
+    /// the pool, letting the freed permits start more downloads than the new
+    /// limit allows; why_new=the existing tests never lowered the limit under
+    /// load, where try_acquire reclaims nothing
+    #[tokio::test]
+    async fn downgrade_takes_effect_while_saturated() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader.clone());
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 3;
+        manager.update_settings(settings).unwrap();
+        let ids = enqueue_distinct_jobs(&manager, "job-down", 5);
+
+        for _ in 0..200 {
+            if downloader.running_ids().len() == 3 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        let held = downloader.running_ids();
+        assert_eq!(held.len(), 3, "expected three downloads running: {held:?}");
+        assert_eq!(manager.semaphore.available_permits(), 0);
+
+        // Lower to 1 while all three slots are busy.
+        let mut lowered = test_settings(dir.path());
+        lowered.concurrency = 1;
+        manager.update_settings(lowered).unwrap();
+
+        // Let the saturated batch finish. Exactly one queued runner may start;
+        // the surplus returns must be absorbed, not handed to the queue.
+        for id in &held {
+            downloader.release(id);
+        }
+        let mut fresh_running = String::new();
+        for _ in 0..100 {
+            let running = downloader.running_ids();
+            let fresh: Vec<String> = running
+                .iter()
+                .filter(|id| !held.contains(id))
+                .cloned()
+                .collect();
+            if fresh.len() > 1 {
+                panic!("downgrade let {fresh:?} run together under concurrency 1");
+            }
+            if let Some(id) = fresh.first() {
+                fresh_running = id.clone();
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !fresh_running.is_empty(),
+            "no queued runner started after the batch finished"
+        );
+
+        // Hold the window open: the fifth runner must still be parked behind
+        // the one free slot the new limit allows.
+        let parked: Vec<String> = ids
+            .iter()
+            .filter(|id| !held.contains(id) && **id != fresh_running)
+            .cloned()
+            .collect();
+        assert_eq!(parked.len(), 1);
+        for _ in 0..50 {
+            assert_eq!(
+                downloader.running_ids(),
+                vec![fresh_running.clone()],
+                "a second download started under concurrency 1: {:?}",
+                downloader.running_ids()
+            );
+            let jobs = manager.list().unwrap();
+            let parked_job = jobs.iter().find(|j| j.id == parked[0]).unwrap();
+            assert_eq!(
+                parked_job.status,
+                JobStatus::Pending,
+                "the parked job must stay Pending until its slot frees"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        // Drain the rest: one at a time, then the capacity bookkeeping must
+        // survive the absorbed returns — the pool ends at the stated limit,
+        // and a later raise grows from there, not from a stale leftover.
+        downloader.release(&fresh_running);
+        wait_for_status(&manager, &fresh_running, JobStatus::Done).await;
+        downloader.release(&parked[0]);
+        wait_for_status(&manager, &parked[0], JobStatus::Done).await;
+        for id in &held {
+            wait_for_status(&manager, id, JobStatus::Done).await;
+        }
+
+        assert_eq!(
+            manager.semaphore.available_permits(),
+            1,
+            "after draining under concurrency 1 the pool must hold exactly one permit"
+        );
+        let mut raised = test_settings(dir.path());
+        raised.concurrency = 3;
+        manager.update_settings(raised).unwrap();
+        assert_eq!(
+            manager.semaphore.available_permits(),
+            3,
+            "a raise must add permits relative to the true capacity, not a stale leftover"
+        );
+        let mut idle_lower = test_settings(dir.path());
+        idle_lower.concurrency = 2;
+        manager.update_settings(idle_lower).unwrap();
+        assert_eq!(
+            manager.semaphore.available_permits(),
+            2,
+            "a lower limit must withdraw idle permits"
+        );
     }
 
     #[test]
