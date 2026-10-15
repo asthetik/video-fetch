@@ -1791,6 +1791,17 @@ fn apply_window_theme(window: &tauri::WebviewWindow, theme: WindowTheme) -> Resu
     window.set_theme(theme).map_err(|e| e.to_string())
 }
 
+/// Convert a user-picked directory into the String settings.json stores.
+/// The config holds a String, so a non-UTF-8 pick cannot round-trip: melting it
+/// with `to_string` would persist a U+FFFD path the real directory can never
+/// match (the same class `apply_save_dir` guards for the default dir). Reject
+/// instead so the user picks another folder.
+fn picked_dir_to_string(dir: PathBuf) -> Result<String, AppError> {
+    dir.into_os_string()
+        .into_string()
+        .map_err(|_| AppError::Message("该路径包含无法保存的字符，请另选目录".into()))
+}
+
 #[tauri::command]
 pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
     let folder =
@@ -1799,7 +1810,12 @@ pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
             .map_err(|e| AppError::Message(format!("对话框任务失败: {e}")))?;
 
     match folder {
-        Some(path) => Ok(path.to_string()),
+        Some(path) => {
+            let dir = path
+                .into_path()
+                .map_err(|e| AppError::Message(format!("对话框路径无效: {e}")))?;
+            picked_dir_to_string(dir)
+        }
         None => Err(AppError::Message("已取消选择目录".into())),
     }
 }
@@ -2535,6 +2551,31 @@ mod save_dir_tests {
         } else {
             assert_eq!(plan.effective, app_dir.join("downloads"));
         }
+    }
+
+    /// A UTF-8 pick must survive the conversion unchanged: this exact string
+    /// is what the frontend persists as `save_dir`.
+    #[test]
+    fn picked_dir_to_string_keeps_utf8_path() {
+        let dir = PathBuf::from("/tmp/下载目录");
+        assert_eq!(
+            picked_dir_to_string(dir).expect("utf-8 path must convert"),
+            "/tmp/下载目录"
+        );
+    }
+
+    /// Melting a non-UTF-8 pick with `to_string` would hand the frontend a
+    /// U+FFFD path to persist as `save_dir`; the picker must reject instead so
+    /// the user chooses another folder.
+    #[test]
+    fn picked_dir_to_string_rejects_non_utf8_path_without_melting() {
+        let raw = PathBuf::from(non_utf8_name());
+        let err = picked_dir_to_string(raw)
+            .expect_err("non-UTF-8 pick must not be converted via lossy melt");
+        let msg = err.to_string();
+        assert_eq!(msg, "该路径包含无法保存的字符，请另选目录");
+        // The error text must not carry a melted path either.
+        assert!(!msg.contains('\u{FFFD}'));
     }
 }
 
