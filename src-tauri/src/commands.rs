@@ -833,6 +833,13 @@ pub struct SpaceBatchArgs {
     pub format_id: String,
     #[serde(default)]
     pub audio_format: Option<String>,
+    /// Space owner name, filled by the frontend from `space_info`. Batch
+    /// enqueue has no per-video resolve, but every video in a space shares
+    /// this uploader, and the skip-existing prediction needs it to expand
+    /// `%(uploader)s` the same way the single-video path does. Empty (older
+    /// callers / serde default) falls back to the empty-string expansion.
+    #[serde(default)]
+    pub uploader: String,
 }
 
 fn record_batch_outcome(
@@ -878,6 +885,44 @@ fn validate_space_batch_args(
     Ok(())
 }
 
+/// Build the DownloadJob for one batch item from the shared batch args. Pure
+/// so tests can pin the exact skip-existing prediction inputs — the uploader
+/// included — that the batch path feeds `enqueue_classified`.
+pub(crate) fn batch_item_to_job(
+    args: &SpaceBatchArgs,
+    item: &models::BatchEnqueueItem,
+    audio_format: &Option<String>,
+    output_template: &str,
+) -> DownloadJob {
+    let title = if item.title.is_empty() {
+        item.bvid.clone()
+    } else {
+        item.title.clone()
+    };
+    DownloadJob {
+        id: String::new(),
+        url: format!("https://www.bilibili.com/video/{}", item.bvid),
+        video_id: item.bvid.clone(),
+        page_index: 1,
+        format_id: args.format_id.clone(),
+        audio_format: audio_format.clone(),
+        title,
+        // The space owner's name from the batch args — the same prediction
+        // input the single-video path records, so a `%(uploader)s` template
+        // expands identically for the dedup and the conflict pre-check.
+        uploader: args.uploader.clone(),
+        output_template: output_template.to_string(),
+        status: JobStatus::Pending,
+        progress: 0.0,
+        error: None,
+        output_path: None,
+        thumbnail_url: item.cover.clone(),
+        duration_secs: item.duration_secs,
+        file_size: None,
+        created_at: None,
+    }
+}
+
 /// Batch enqueue: no per-video resolve; the unified tier goes straight to yt-dlp (spec §4.4).
 /// Async so the per-item DB/disk loop never blocks the main thread on large batches.
 #[tauri::command]
@@ -901,44 +946,19 @@ pub async fn space_enqueue_batch(
         skipped_active: 0,
         failed: Vec::new(),
     };
-    for item in args.items {
+    for item in &args.items {
         if !crate::space::is_valid_bvid(&item.bvid) {
             result.failed.push(models::BatchEnqueueFailed {
-                bvid: item.bvid,
+                bvid: item.bvid.clone(),
                 error: "无效的视频 ID".into(),
             });
             continue;
         }
-        let title = if item.title.is_empty() {
-            item.bvid.clone()
-        } else {
-            item.title.clone()
-        };
-        let mut job = DownloadJob {
-            id: String::new(),
-            url: format!("https://www.bilibili.com/video/{}", item.bvid),
-            video_id: item.bvid.clone(),
-            page_index: 1,
-            format_id: args.format_id.clone(),
-            audio_format: audio_format.clone(),
-            title,
-            // Batch enqueue has no per-video resolve, so no uploader name is at
-            // hand; leave it empty and predict the path the same way below.
-            uploader: String::new(),
-            output_template: settings.filename_template.clone(),
-            status: JobStatus::Pending,
-            progress: 0.0,
-            error: None,
-            output_path: None,
-            thumbnail_url: item.cover.clone(),
-            duration_secs: item.duration_secs,
-            file_size: None,
-            created_at: None,
-        };
+        let mut job = batch_item_to_job(&args, item, &audio_format, &settings.filename_template);
         match state.downloads.enqueue_classified(&mut job, false) {
             Ok(kind) => record_batch_outcome(&mut result, kind),
             Err(e) => result.failed.push(models::BatchEnqueueFailed {
-                bvid: item.bvid,
+                bvid: item.bvid.clone(),
                 error: e.to_string(),
             }),
         }
@@ -2057,6 +2077,40 @@ mod space_batch_tests {
     fn batch_rejects_bad_audio_format_values() {
         assert!(normalize_audio_format(Some("flac".into())).is_ok());
         assert!(normalize_audio_format(Some("ogg".into())).is_err());
+    }
+
+    /// Older callers omit `uploader`; serde must default it to the empty
+    /// string and the batch job must fall back to that empty expansion
+    /// instead of failing to deserialize.
+    #[test]
+    fn batch_item_uploader_defaults_to_empty_when_absent() {
+        let args: SpaceBatchArgs = serde_json::from_value(serde_json::json!({
+            "items": [{ "bvid": "BV1xx", "title": "demo" }],
+            "format_id": "80",
+        }))
+        .unwrap();
+        assert_eq!(args.uploader, "");
+        let job = batch_item_to_job(&args, &args.items[0], &None, "%(title)s [%(id)s].%(ext)s");
+        assert_eq!(job.uploader, "");
+    }
+
+    /// The supplied uploader must reach the job so the skip-existing
+    /// prediction expands `%(uploader)s` like the single-video path.
+    #[test]
+    fn batch_item_job_carries_the_supplied_uploader() {
+        let args: SpaceBatchArgs = serde_json::from_value(serde_json::json!({
+            "items": [{ "bvid": "BV1xx", "title": "demo" }],
+            "format_id": "80",
+            "uploader": "up",
+        }))
+        .unwrap();
+        let job = batch_item_to_job(
+            &args,
+            &args.items[0],
+            &None,
+            "%(uploader)s/%(title)s [%(id)s].%(ext)s",
+        );
+        assert_eq!(job.uploader, "up");
     }
 }
 
