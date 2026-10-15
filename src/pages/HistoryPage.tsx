@@ -20,6 +20,7 @@ import { IconButton } from "../components/IconButton";
 import { Segmented } from "../components/Segmented";
 import { ThumbTile } from "../components/ThumbTile";
 import { withToast } from "../lib/asyncAction";
+import { cancelConfirmFor } from "../lib/cancelConfirm";
 import {
   type DownloadProgressPayload,
   mergeJob,
@@ -66,6 +67,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
+  const [pendingCancel, setPendingCancel] = useState<DownloadJob | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
@@ -134,6 +136,9 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   );
   const groups = useMemo(() => groupHistoryByDate(finished), [finished]);
   const showActive = activeJobs.length > 0 && statusFilter === "all";
+  const cancelCopy = pendingCancel
+    ? cancelConfirmFor(pendingCancel.status)
+    : null;
 
   async function handleOpenFile(job: DownloadJob) {
     const path = job.output_path;
@@ -253,7 +258,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
               icon={X}
               label="取消"
               action="cancel-job"
-              onClick={() => void handleCancel(job.id)}
+              onClick={() => setPendingCancel(job)}
             />
           )}
           {job.status === "failed" && (
@@ -371,6 +376,23 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
           if (!bulkBusy) setConfirmClear(false);
         }}
         onConfirm={() => void handleClearFinished()}
+      />
+
+      <ConfirmDialog
+        open={pendingCancel !== null && cancelCopy !== null}
+        title={cancelCopy?.title ?? ""}
+        message={cancelCopy?.message ?? ""}
+        confirmLabel={cancelCopy?.confirmLabel ?? "取消任务"}
+        cancelLabel="关闭"
+        danger
+        onCancel={() => setPendingCancel(null)}
+        onConfirm={() => {
+          const job = pendingCancel;
+          setPendingCancel(null);
+          if (job) {
+            void handleCancel(job.id);
+          }
+        }}
       />
 
       <DeleteConfirmDialog
