@@ -24,6 +24,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A handful of API calls and page fetches; finite so a stalled upstream
+    # cannot hold the runner for the platform default of 360 minutes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 

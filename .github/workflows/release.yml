@@ -5,11 +5,20 @@ on:
     tags:
       - "v*.*.*"
 
+# Stated once rather than per job, for the reason ci.yml spells out: the
+# build matrix runs `npm ci` on the lockfile, which executes whatever
+# postinstall scripts it names, so those jobs must not hold write access.
+# `contents: write` is granted on the release job alone — the one that
+# creates the release and uploads its assets.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    # Full release builds with bundling; generous against the cold-cache
+    # case, but finite: a hung step must not sit on the runner for the
+    # platform default of 360 minutes.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -189,6 +198,10 @@ jobs:
     # Publish whatever succeeded when at least one matrix cell uploaded artifacts.
     if: ${{ always() && !cancelled() && contains(fromJSON('["success", "failure"]'), needs.build.result) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job that writes: it creates the release and uploads assets.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -201,6 +214,17 @@ jobs:
           set -euo pipefail
           ls -la artifacts
           test -n "$(find artifacts -type f | head -1)"
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd artifacts
+          # Word expansion runs before the redirect creates SHA256SUMS,
+          # so the list hashes every installer and never itself. It ships
+          # as a release asset so users can verify what they download
+          # before lifting the unsigned-app blocks the README describes.
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3

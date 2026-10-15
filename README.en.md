@@ -66,6 +66,26 @@ A `.AppImage` usually runs as-is; if it complains about missing execute permissi
 chmod +x Video-Fetch-*-Linux-*.AppImage
 ```
 
+### Verify the installer (optional)
+
+Every release ships a `SHA256SUMS` file listing the SHA-256 digest of every installer. You can check what you downloaded before installing (swap in the file name you actually downloaded):
+
+```bash
+# macOS
+shasum -a 256 Video-Fetch-v0.4.3-macOS.dmg
+
+# Linux
+sha256sum Video-Fetch-v0.4.3-Linux-x86_64.AppImage
+```
+
+Windows (PowerShell):
+
+```powershell
+Get-FileHash .\Video-Fetch-v0.4.3-Windows-x64.msi -Algorithm SHA256
+```
+
+Compare the printed SHA-256 against the line for the same file name in `SHA256SUMS`; a match means the download is intact. One caveat: `SHA256SUMS` comes from the same release as the installers — it proves the file was not altered in transit, not that the publisher is trustworthy. Whether to run the macOS `xattr -cr` (which lifts the system's block on unsigned apps) is still your call. If the digest does not match, do not install: download again, or report it in [Issues](https://github.com/asthetik/video-fetch/issues).
+
 ## Usage
 
 1. Paste a video link and wait for it to resolve; pasting a creator’s page link lists all of their uploads
