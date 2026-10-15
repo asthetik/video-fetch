@@ -1,10 +1,11 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { House, History, Settings2, FileText, Info } from "lucide-react";
 import { motion, MotionConfig } from "motion/react";
-import { Toaster } from "sonner";
+import { toast, Toaster } from "sonner";
 import { AuthChip } from "./components/AuthChip";
 import { PageTransition, type AppPage } from "./components/PageTransition";
 import { useTheme } from "./hooks/useTheme";
+import { api } from "./lib/tauri";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HomePage } from "./pages/HomePage";
 import { AboutPage } from "./pages/AboutPage";
@@ -36,6 +37,29 @@ function App() {
   const [queueRefresh, setQueueRefresh] = useState(0);
   const bumpQueueRefresh = useCallback(() => {
     setQueueRefresh((n) => n + 1);
+  }, []);
+
+  // Startup-only notice: when the configured save directory is unavailable
+  // the backend redirects this session's downloads to the app-data fallback
+  // without touching the setting — say so once instead of letting files
+  // quietly land elsewhere.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getSaveDirNotice()
+      .then((notice) => {
+        if (!cancelled && notice) {
+          toast.warning(notice, {
+            description: "本次下载暂存至应用数据目录，设置中的保存路径未更改",
+          });
+        }
+      })
+      .catch(() => {
+        // A notice failure must never block startup; downloads still run.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (

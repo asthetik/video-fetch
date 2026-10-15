@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   duration_secs INTEGER,
   file_size INTEGER,
   title TEXT NOT NULL,
+  uploader TEXT,
   output_template TEXT NOT NULL,
   status TEXT NOT NULL,
   progress REAL NOT NULL DEFAULT 0,
@@ -72,6 +73,7 @@ impl Db {
             ("thumbnail_url", "TEXT"),
             ("duration_secs", "INTEGER"),
             ("file_size", "INTEGER"),
+            ("uploader", "TEXT"),
         ] {
             if !column_exists(&conn, "jobs", col)? {
                 conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {kind}"), [])?;
@@ -110,11 +112,12 @@ impl Db {
     pub fn insert_job(&self, job: &DownloadJob) -> AppResult<()> {
         self.conn.execute(
             "INSERT INTO jobs (
-                id, url, video_id, page_index, format_id, audio_format, title, output_template,
+                id, url, video_id, page_index, format_id, audio_format, title, uploader,
+                output_template,
                 status, progress, error, output_path, thumbnail_url, duration_secs, file_size,
                 created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                 datetime('now'), datetime('now')
             )",
             params![
@@ -125,6 +128,7 @@ impl Db {
                 job.format_id,
                 job.audio_format,
                 job.title,
+                job.uploader,
                 job.output_template,
                 status_to_str(&job.status),
                 job.progress,
@@ -146,15 +150,16 @@ impl Db {
                 page_index = ?4,
                 format_id = ?5,
                 title = ?6,
-                output_template = ?7,
-                status = ?8,
-                progress = ?9,
-                error = ?10,
-                output_path = ?11,
-                audio_format = ?12,
-                thumbnail_url = ?13,
-                duration_secs = ?14,
-                file_size = ?15,
+                uploader = ?7,
+                output_template = ?8,
+                status = ?9,
+                progress = ?10,
+                error = ?11,
+                output_path = ?12,
+                audio_format = ?13,
+                thumbnail_url = ?14,
+                duration_secs = ?15,
+                file_size = ?16,
                 updated_at = datetime('now')
             WHERE id = ?1",
             params![
@@ -164,6 +169,7 @@ impl Db {
                 job.page_index,
                 job.format_id,
                 job.title,
+                job.uploader,
                 job.output_template,
                 status_to_str(&job.status),
                 job.progress,
@@ -186,7 +192,7 @@ impl Db {
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
                 status, progress, error, output_path, audio_format,
-                thumbnail_url, duration_secs, file_size, created_at
+                thumbnail_url, duration_secs, file_size, created_at, uploader
             FROM jobs
             ORDER BY created_at DESC",
         )?;
@@ -209,6 +215,7 @@ impl Db {
                 duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
                 file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
                 created_at: row.get(15)?,
+                uploader: row.get::<_, Option<String>>(16)?.unwrap_or_default(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -226,7 +233,7 @@ impl Db {
             "SELECT
                 id, url, video_id, page_index, format_id, title, output_template,
                 status, progress, error, output_path, audio_format,
-                thumbnail_url, duration_secs, file_size, created_at
+                thumbnail_url, duration_secs, file_size, created_at, uploader
             FROM jobs
             WHERE id = ?1",
         )?;
@@ -250,6 +257,7 @@ impl Db {
                     duration_secs: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
                     file_size: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
                     created_at: row.get(15)?,
+                    uploader: row.get::<_, Option<String>>(16)?.unwrap_or_default(),
                 })
             })
             .optional()?;
@@ -607,6 +615,7 @@ mod tests {
             format_id: format_id.into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: String::new(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Done,
             progress: 1.0,
@@ -628,6 +637,7 @@ mod tests {
             format_id: "80".into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: String::new(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
             progress: 0.0,
@@ -874,6 +884,7 @@ mod tests {
             ("thumbnail_url", "TEXT"),
             ("duration_secs", "INTEGER"),
             ("file_size", "INTEGER"),
+            ("uploader", "TEXT"),
         ] {
             assert_eq!(
                 column_decl_type(&db.conn, col).as_deref(),
@@ -881,5 +892,21 @@ mod tests {
                 "migrated column {col} must declare {kind}"
             );
         }
+    }
+
+    #[test]
+    fn job_roundtrips_uploader_through_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut job = sample_job_for_db("up-1");
+        job.uploader = "某UP主".into();
+        db.insert_job(&job).unwrap();
+        assert_eq!(db.find_job("up-1").unwrap().unwrap().uploader, "某UP主");
+        assert_eq!(db.list_jobs().unwrap()[0].uploader, "某UP主");
+        // Updates must not wipe the stored uploader.
+        let mut loaded = db.get_job("up-1").unwrap();
+        loaded.progress = 0.5;
+        db.update_job(&loaded).unwrap();
+        assert_eq!(db.get_job("up-1").unwrap().uploader, "某UP主");
     }
 }
