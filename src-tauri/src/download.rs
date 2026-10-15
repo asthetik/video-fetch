@@ -1080,9 +1080,7 @@ impl DownloadManager {
                 // a superseding command's marker wins over the Failed write
                 // (fail_job re-checks under the db lock).
                 match this.stop_disposition_for(&job_id, token) {
-                    Some(disposition) => {
-                        this.apply_stop_disposition(&job_id, disposition).await
-                    }
+                    Some(disposition) => this.apply_stop_disposition(&job_id, disposition).await,
                     None => {
                         tracing::error!(target: "core", "download: runner 崩溃，标记失败 {job_id}");
                         this.try_fail_job(&job_id, token, "下载任务异常中止（内部错误），请重试");
