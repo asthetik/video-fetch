@@ -18,6 +18,7 @@ import {
   type DeleteChoice,
 } from "./DeleteConfirmDialog";
 import { IconButton } from "./IconButton";
+import { cancelConfirmFor } from "../lib/cancelConfirm";
 import { api } from "../lib/tauri";
 import { formatBytes } from "../lib/format";
 import {
@@ -77,7 +78,7 @@ export function DownloadQueue({
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingDelete, setPendingDelete] = useState<DownloadJob | null>(null);
-  const [pendingPauseCancel, setPendingPauseCancel] = useState<DownloadJob | null>(null);
+  const [pendingCancel, setPendingCancel] = useState<DownloadJob | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
@@ -235,6 +236,9 @@ export function DownloadQueue({
     (j) => j.status === "pending" || j.status === "running",
   ).length;
   const resumableCount = jobs.filter((j) => j.status === "paused").length;
+  const cancelCopy = pendingCancel
+    ? cancelConfirmFor(pendingCancel.status)
+    : null;
 
   function renderJobItem(job: DownloadJob) {
     const speed = job.status === "running" ? formatSpeed(job.speed) : null;
@@ -293,7 +297,7 @@ export function DownloadQueue({
                   icon={X}
                   label="取消"
                   action="cancel-job"
-                  onClick={() => void handleCancel(job.id)}
+                  onClick={() => setPendingCancel(job)}
                 />
               </>
             )}
@@ -309,7 +313,7 @@ export function DownloadQueue({
                   icon={X}
                   label="取消"
                   action="cancel-job"
-                  onClick={() => setPendingPauseCancel(job)}
+                  onClick={() => setPendingCancel(job)}
                 />
               </>
             )}
@@ -454,16 +458,16 @@ export function DownloadQueue({
       />
 
       <ConfirmDialog
-        open={pendingPauseCancel !== null}
-        title="取消暂停的任务"
-        message="将取消该暂停任务，已下载的部分会被删除。"
-        confirmLabel="取消任务"
+        open={pendingCancel !== null && cancelCopy !== null}
+        title={cancelCopy?.title ?? ""}
+        message={cancelCopy?.message ?? ""}
+        confirmLabel={cancelCopy?.confirmLabel ?? "取消任务"}
         cancelLabel="关闭"
         danger
-        onCancel={() => setPendingPauseCancel(null)}
+        onCancel={() => setPendingCancel(null)}
         onConfirm={() => {
-          const job = pendingPauseCancel;
-          setPendingPauseCancel(null);
+          const job = pendingCancel;
+          setPendingCancel(null);
           if (job) {
             void handleCancel(job.id);
           }
