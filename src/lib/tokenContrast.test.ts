@@ -193,8 +193,10 @@ test("every ink token is defined for both themes", () => {
 // and the suite fails loudly.
 const PAGES_CSS = join(import.meta.dirname, "..", "styles", "pages.css");
 const COMPONENTS_CSS = join(import.meta.dirname, "..", "styles", "components.css");
+const SHELL_CSS = join(import.meta.dirname, "..", "styles", "shell.css");
 const pagesCss = readFileSync(PAGES_CSS, "utf8");
 const componentsCss = readFileSync(COMPONENTS_CSS, "utf8");
+const shellCss = readFileSync(SHELL_CSS, "utf8");
 
 /** [file css, selector, required declaration snippets]. */
 const CONSUMER_RULES: Array<[string, string, string[]]> = [
@@ -214,6 +216,9 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   [componentsCss, ".auth-hint", ["color: var(--danger-ink)"]],
   [componentsCss, ".auth-label.ok", ["color: var(--success-ink)"]],
   [componentsCss, ".auth-label.warn", ["color: var(--warn-ink)"]],
+  [componentsCss, ".auth-label.error", ["color: var(--danger-ink)"]],
+  [shellCss, ".auth-chip.error", ["color: var(--danger-ink)"]],
+  [shellCss, ".auth-chip.error .auth-chip-dot", ["background: var(--danger-ink)"]],
   [pagesCss, ".history-row-err", ["color: var(--danger-ink)"]],
   [pagesCss, ".about-card-hint", ["color: var(--muted-ink)"]],
   [pagesCss, ".about-card-label", ["color: var(--muted-ink)"]],

@@ -2,6 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { api } from "../lib/tauri";
+import {
+  toErrorMessage,
+  toLoadState,
+  type LoadState,
+} from "../lib/asyncAction";
 import type { AuthStatus as AuthStatusType } from "../types";
 
 const LOGIN_HINT =
@@ -11,12 +16,15 @@ const LOGIN_HINT =
  * Shared auth state + actions for auth controls: initial fetch,
  * auth://status event stream, busy flags, logout confirmation, and a transient
  * hint for failures. Consumers without room for a hint line surface it as a
- * toast instead.
+ * toast instead. authState is a LoadState so a failed status read is its own
+ * error state with retry — never a silent stand-in for logged_out.
  */
 export function useAuthActions(
   onStatusChange?: (status: AuthStatusType) => void,
 ) {
-  const [status, setStatus] = useState<AuthStatusType>("logged_out");
+  const [authState, setAuthState] = useState<LoadState<AuthStatusType>>({
+    status: "loading",
+  });
   const [loggingIn, setLoggingIn] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [confirmLogout, setConfirmLogout] = useState(false);
@@ -24,11 +32,16 @@ export function useAuthActions(
 
   const applyStatus = useCallback(
     (next: AuthStatusType) => {
-      setStatus(next);
+      setAuthState({ status: "ready", data: next });
       onStatusChange?.(next);
     },
     [onStatusChange],
   );
+
+  const retryStatus = useCallback(async () => {
+    setAuthState({ status: "loading" });
+    setAuthState(await toLoadState(() => api.getAuthStatus()));
+  }, []);
 
   const dismissHint = useCallback(() => setHint(null), []);
   const requestLogout = useCallback(() => setConfirmLogout(true), []);
@@ -37,8 +50,8 @@ export function useAuthActions(
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let active = true;
-    void api.getAuthStatus().then((next) => {
-      if (active) applyStatus(next);
+    void toLoadState(() => api.getAuthStatus()).then((next) => {
+      if (active) setAuthState(next);
     });
     void listen<AuthStatusType>("auth://status", (event) => {
       applyStatus(event.payload);
@@ -65,7 +78,7 @@ export function useAuthActions(
         setHint(LOGIN_HINT);
       }
     } catch (err) {
-      setHint(err instanceof Error ? err.message : String(err));
+      setHint(toErrorMessage(err));
     } finally {
       setLoggingIn(false);
     }
@@ -80,14 +93,14 @@ export function useAuthActions(
       applyStatus(await api.getAuthStatus());
       toast.success("已退出登录");
     } catch (err) {
-      setHint(err instanceof Error ? err.message : String(err));
+      setHint(toErrorMessage(err));
     } finally {
       setLoggingOut(false);
     }
   }, [applyStatus]);
 
   return {
-    status,
+    authState,
     loggingIn,
     loggingOut,
     confirmLogout,
@@ -95,6 +108,7 @@ export function useAuthActions(
     dismissHint,
     login,
     logout,
+    retryStatus,
     requestLogout,
     cancelLogout,
   };

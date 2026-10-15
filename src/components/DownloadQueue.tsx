@@ -18,6 +18,7 @@ import {
   type DeleteChoice,
 } from "./DeleteConfirmDialog";
 import { IconButton } from "./IconButton";
+import { withToast } from "../lib/asyncAction";
 import { cancelConfirmFor } from "../lib/cancelConfirm";
 import { api } from "../lib/tauri";
 import { formatBytes } from "../lib/format";
@@ -215,10 +216,14 @@ export function DownloadQueue({
   }
 
   async function handleOpenFolder(job: DownloadJob) {
-    if (!job.output_path) {
+    const path = job.output_path;
+    if (!path) {
       return;
     }
-    await api.openPath(parentDir(job.output_path));
+    await withToast(
+      () => api.openPath(parentDir(path)),
+      (message) => toast.error(message),
+    );
   }
 
   async function handleCancelAll() {
