@@ -9,6 +9,7 @@ import {
 import {
   initialResolveStatus,
   reduceResolveStatus,
+  shouldDispatchComplete,
   type ResolveStatus,
 } from "../lib/resolveStatus";
 import { DownloadQueue } from "../components/DownloadQueue";
@@ -93,10 +94,12 @@ export function HomePage({
           return false;
         }
         setMeta(result);
-        if (result.formats.length > 0) {
+        if (shouldDispatchComplete(result)) {
           setResolveStatus((s) => reduceResolveStatus(s, { type: "complete" }));
         }
-        // Empty formats: leave formatsLoading/formatsError to complete / formats_failed events.
+        // Only a meta with no formats of either kind is left to the
+        // complete / formats_failed events; anything carrying video or audio
+        // formats is complete as returned (cache hits emit no events at all).
         return true;
       } catch (err) {
         if (requestIdRef.current !== requestId) {

@@ -1,3 +1,5 @@
+import type { VideoMeta } from "../types.ts";
+
 /**
  * Loading/error state for the resolve flow: the in-card formats row (spinner +
  * error with retry) plus the page-level error shown by the URL bar when no
@@ -72,4 +74,18 @@ export function reduceResolveStatus(
         formatsError: event.message,
       };
   }
+}
+
+/**
+ * Whether a resolve command result already carries formats and should
+ * dispatch `complete` itself. Any meta with video or audio formats counts:
+ * the cache-hit path returns Ok(meta) with no events at all, so without this
+ * dispatch an audio-only result would leave the formats spinner stuck.
+ * A result with neither format kind is left to the `complete` /
+ * `formats_failed` events (degenerate meta; they are the only terminal).
+ */
+export function shouldDispatchComplete(
+  result: Pick<VideoMeta, "formats" | "audio_formats">,
+): boolean {
+  return result.formats.length > 0 || result.audio_formats.length > 0;
 }

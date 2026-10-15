@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   initialResolveStatus,
   reduceResolveStatus,
+  shouldDispatchComplete,
   type ResolveStatus,
 } from "./resolveStatus.ts";
 
@@ -119,5 +120,37 @@ describe("reduceResolveStatus", () => {
     assert.equal(pageError.formatsLoading, false);
     assert.equal(pageError.formatsError, null);
     assert.equal(pageError.error, "无效的空间链接");
+  });
+});
+
+describe("shouldDispatchComplete", () => {
+  it("video formats non-empty → true", () => {
+    assert.equal(
+      shouldDispatchComplete({
+        formats: [{ format_id: "1", label: "1080p" }],
+        audio_formats: [],
+      }),
+      true,
+    );
+  });
+
+  it("video empty + audio non-empty → true (audio-only content must not leave the spinner stuck)", () => {
+    // Cache hits return Ok(meta) with NO events. A resolve that yielded only
+    // audio formats must still dispatch complete here, or the formats spinner
+    // never ends and the download button stays disabled.
+    assert.equal(
+      shouldDispatchComplete({
+        formats: [],
+        audio_formats: [{ format_id: "a1", label: "FLAC" }],
+      }),
+      true,
+    );
+  });
+
+  it("both empty → false (degenerate meta is left to complete / formats_failed events)", () => {
+    assert.equal(
+      shouldDispatchComplete({ formats: [], audio_formats: [] }),
+      false,
+    );
   });
 });
