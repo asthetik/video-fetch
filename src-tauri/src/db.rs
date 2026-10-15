@@ -909,4 +909,55 @@ mod tests {
         db.update_job(&loaded).unwrap();
         assert_eq!(db.get_job("up-1").unwrap().uploader, "某UP主");
     }
+
+    #[test]
+    fn legacy_null_uploader_reads_back_as_empty_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        // Legacy rows predate the uploader column, so the migration leaves the
+        // cell NULL. Insert via raw SQL (bypassing insert_job) to reproduce
+        // that state.
+        db.conn
+            .execute(
+                "INSERT INTO jobs (
+                    id, url, video_id, page_index, format_id, title, uploader,
+                    output_template, status, progress,
+                    created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, NULL,
+                    ?7, ?8, ?9,
+                    datetime('now'), datetime('now')
+                )",
+                params![
+                    "legacy-null-up",
+                    "https://www.bilibili.com/video/BV1xx",
+                    "BV1xx",
+                    1_i64,
+                    "80",
+                    "demo",
+                    "%(title)s [%(id)s].%(ext)s",
+                    "pending",
+                    0.0_f64,
+                ],
+            )
+            .unwrap();
+
+        // Public read paths must surface the NULL uploader as "" and leave
+        // every other column intact.
+        let found = db.find_job("legacy-null-up").unwrap().unwrap();
+        assert_eq!(found.uploader, "");
+        assert_eq!(found.url, "https://www.bilibili.com/video/BV1xx");
+        assert_eq!(found.video_id, "BV1xx");
+        assert_eq!(found.page_index, 1);
+        assert_eq!(found.format_id, "80");
+        assert_eq!(found.title, "demo");
+        assert_eq!(found.output_template, "%(title)s [%(id)s].%(ext)s");
+        assert_eq!(found.status, JobStatus::Pending);
+        assert!((found.progress - 0.0).abs() < f64::EPSILON);
+
+        let listed = db.list_jobs().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "legacy-null-up");
+        assert_eq!(listed[0].uploader, "");
+    }
 }
