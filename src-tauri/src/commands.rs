@@ -83,7 +83,8 @@ pub struct AppState {
     /// later (the Bilibili login window) read it at creation so they do not
     /// lag one switch behind.
     pub window_theme: std::sync::Mutex<WindowTheme>,
-    /// Cached openable roots for `open_path`; invalidated on settings save.
+    /// Cached openable roots for `open_path`; invalidated on settings save
+    /// and history deletes.
     pub openable_roots_cache: OpenableRootsCache,
 }
 
@@ -1098,10 +1099,20 @@ pub async fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllR
 
 #[tauri::command]
 pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishedResult> {
+    clear_finished_jobs_impl(&state)
+}
+
+/// [`clear_finished_jobs`] body, split out so tests can drive the clear path
+/// without a Tauri `State`.
+fn clear_finished_jobs_impl(state: &AppState) -> AppResult<ClearFinishedResult> {
     let result = state
         .downloads
         .clear_finished()
         .inspect_err(|e| warn_cmd("history: 清空失败", e))?;
+    // The rows are gone: their output directories must stop being openable
+    // roots. Drop the cache so the next `open_path` recomputes from the
+    // surviving history (same invalidate-on-write as `save_settings`).
+    state.openable_roots_cache.invalidate();
     tracing::info!(target: "core", "history: 清空已完成（{} 条）", result.cleared);
     Ok(result)
 }
@@ -1197,12 +1208,23 @@ pub struct DeleteJobArgs {
 
 #[tauri::command]
 pub async fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
-    tracing::info!(target: "core", "download: 删除 {}（含文件={}）", args.id, args.delete_file);
+    delete_job_impl(&state, &args.id, args.delete_file).await
+}
+
+/// [`delete_job`] body, split out so tests can drive the delete path without
+/// a Tauri `State`.
+async fn delete_job_impl(state: &AppState, id: &str, delete_file: bool) -> AppResult<()> {
+    tracing::info!(target: "core", "download: 删除 {}（含文件={}）", id, delete_file);
     state
         .downloads
-        .delete(&args.id, args.delete_file)
+        .delete(id, delete_file)
         .await
-        .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {}", args.id), e))
+        .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {id}"), e))?;
+    // The row is gone: its output directory must stop being an openable root.
+    // Drop the cache so the next `open_path` recomputes from the surviving
+    // history (same invalidate-on-write as `save_settings`).
+    state.openable_roots_cache.invalidate();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1562,8 +1584,10 @@ fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
 /// Cached `openable_roots`. Computing the roots canonicalizes every history
 /// output's parent — O(history) disk probes — which is far too heavy to redo
 /// on every `open_path` (it froze the window on large histories). Recomputed
-/// on first use and invalidated on settings save: the save folder is the root
-/// that moves, and a save-folder change re-reads the whole history anyway.
+/// on first use and invalidated on writes that move the roots: a settings
+/// save (the save folder is the root that moves, and a save-folder change
+/// re-reads the whole history anyway) and a history delete (the deleted row's
+/// output directory must drop out of the openable set).
 #[derive(Default)]
 pub struct OpenableRootsCache {
     roots: std::sync::Mutex<Option<Vec<PathBuf>>>,
@@ -1587,7 +1611,8 @@ impl OpenableRootsCache {
     }
 
     /// Drop the cache so the next open recomputes (a settings save may have
-    /// moved the save folder out of the old root set).
+    /// moved the save folder out of the old root set, or a history delete may
+    /// have removed the row that made a directory openable).
     pub fn invalidate(&self) {
         let mut slot = match self.roots.lock() {
             Ok(guard) => guard,
@@ -2142,8 +2167,9 @@ mod tests {
 
     /// A9: `openable_roots` canonicalizes every history output's parent — O(history)
     /// disk probes per call, which froze the window on every `open_path` in large
-    /// histories. The cache must compute once and recompute only when the settings
-    /// change (the save folder is the root that moves).
+    /// histories. The cache must compute once and recompute only when invalidated
+    /// (a settings save — the save folder is the root that moves — or a history
+    /// delete; the delete paths are pinned in `openable_roots_delete_tests`).
     #[test]
     fn openable_roots_cache_computes_once_until_invalidated() {
         let cache = OpenableRootsCache::default();
@@ -2284,6 +2310,174 @@ mod tests {
         );
         let already = "%(title)s [P%(playlist_index)s].%(ext)s";
         assert_eq!(ensure_playlist_index_template(already, true), already);
+    }
+}
+
+/// A9 follow-up: history deletes are writes that shrink the openable set. A
+/// deleted job's output directory is a root only because its row named it, so
+/// once the row is gone the cached roots must drop it — the same
+/// invalidate-on-write `save_settings` does, pinned here for both delete
+/// command paths.
+#[cfg(test)]
+mod openable_roots_delete_tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::download::{ChannelProgressEmitter, Downloader};
+    use crate::ytdlp::ProgressUpdate;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// Never invoked: these tests insert terminal rows and delete them, so no
+    /// runner ever starts.
+    struct UnusedDownloader;
+
+    #[async_trait]
+    impl Downloader for UnusedDownloader {
+        async fn run(
+            &self,
+            _job: &DownloadJob,
+            _token: u64,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            panic!("no download may start in these tests");
+        }
+    }
+
+    /// A finished history row: the kind whose output directory enters the
+    /// openable roots through the history scan.
+    fn finished_job(id: &str, output_path: &Path) -> DownloadJob {
+        DownloadJob {
+            uploader: String::new(),
+            id: id.into(),
+            url: format!("https://www.bilibili.com/video/{id}"),
+            video_id: id.into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: JobStatus::Done,
+            progress: 1.0,
+            error: None,
+            output_path: Some(output_path.to_string_lossy().into()),
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        }
+    }
+
+    /// App state whose history holds the rows `make_jobs` builds from the
+    /// temp root. The rows land in the DB before any runner could see them.
+    fn state_with_history(
+        make_jobs: impl FnOnce(&Path) -> Vec<DownloadJob>,
+    ) -> (tempfile::TempDir, AppState) {
+        let root = tempfile::tempdir().unwrap();
+        let db = Db::open(&root.path().join("jobs.db")).unwrap();
+        for job in make_jobs(root.path()) {
+            db.insert_job(&job).unwrap();
+        }
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let settings = AppSettings {
+            save_dir: root.path().join("save").to_string_lossy().into(),
+            ..AppSettings::default()
+        };
+        let downloads = DownloadManager::new(
+            db,
+            settings.clone(),
+            Arc::new(UnusedDownloader),
+            Arc::new(emitter),
+            Arc::new(Mutex::new(HashMap::new())),
+            root.path().join("work"),
+        )
+        .unwrap();
+        let state = AppState {
+            app_dir: root.path().to_path_buf(),
+            auth: AuthManager::new(root.path().join("cache")),
+            downloads,
+            settings: Mutex::new(settings),
+            save_dir_notice: None,
+            ytdlp: YtDlpConfig {
+                yt_dlp_path: root.path().join("yt-dlp"),
+                ffmpeg_path: None,
+            },
+            wbi_keys: wbi::WbiKeyCache::new(),
+            http_client: reqwest::Client::new(),
+            space_info_cache: Mutex::new(HashMap::new()),
+            active_resolve_id: AtomicU64::new(0),
+            activity_log: crate::activity_log::ActivityLog::disabled(root.path().join("logs")),
+            window_theme: Mutex::new(WindowTheme::System),
+            openable_roots_cache: OpenableRootsCache::default(),
+        };
+        (root, state)
+    }
+
+    /// One job whose output lands outside every other root: `elsewhere` is
+    /// openable only while its history row exists.
+    fn stray_output_job() -> (tempfile::TempDir, AppState) {
+        state_with_history(|root| {
+            let stray = root.join("elsewhere");
+            std::fs::create_dir_all(&stray).unwrap();
+            vec![finished_job("job-1", &stray.join("clip.mp4"))]
+        })
+    }
+
+    #[tokio::test]
+    async fn delete_job_invalidates_openable_roots_cache() {
+        let (_root, state) = stray_output_job();
+        let computes = std::cell::Cell::new(0usize);
+        let compute = || {
+            computes.set(computes.get() + 1);
+            openable_roots(&state)
+        };
+        let before = state.openable_roots_cache.get_or_compute(compute);
+        assert!(
+            before.iter().any(|r| r.ends_with("elsewhere")),
+            "precondition: the history row's directory is an openable root"
+        );
+        assert_eq!(computes.get(), 1);
+
+        delete_job_impl(&state, "job-1", false).await.unwrap();
+
+        let after = state.openable_roots_cache.get_or_compute(compute);
+        assert_eq!(
+            computes.get(),
+            2,
+            "delete_job must drop the cached roots so they recompute"
+        );
+        assert!(
+            !after.iter().any(|r| r.ends_with("elsewhere")),
+            "the deleted job's directory must leave the openable set"
+        );
+    }
+
+    #[test]
+    fn clear_finished_jobs_invalidates_openable_roots_cache() {
+        let (_root, state) = stray_output_job();
+        let computes = std::cell::Cell::new(0usize);
+        let compute = || {
+            computes.set(computes.get() + 1);
+            openable_roots(&state)
+        };
+        let before = state.openable_roots_cache.get_or_compute(compute);
+        assert!(
+            before.iter().any(|r| r.ends_with("elsewhere")),
+            "precondition: the history row's directory is an openable root"
+        );
+        assert_eq!(computes.get(), 1);
+
+        clear_finished_jobs_impl(&state).unwrap();
+
+        let after = state.openable_roots_cache.get_or_compute(compute);
+        assert_eq!(
+            computes.get(),
+            2,
+            "clear_finished_jobs must drop the cached roots so they recompute"
+        );
+        assert!(
+            !after.iter().any(|r| r.ends_with("elsewhere")),
+            "the cleared job's directory must leave the openable set"
+        );
     }
 }
 
