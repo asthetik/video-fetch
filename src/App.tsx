@@ -62,6 +62,28 @@ function App() {
     };
   }, []);
 
+  // Startup-only notice: when cookie materialization failed at launch the
+  // login chip keeps reading "logged in" but downloads cannot carry the
+  // session — say so once instead of letting the first download fail cold.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getCookieNotice()
+      .then((notice) => {
+        if (!cancelled && notice) {
+          toast.warning(notice, {
+            description: "继续、重试会直接报错，不会静默以未登录状态下载",
+          });
+        }
+      })
+      .catch(() => {
+        // A notice failure must never block startup; downloads still run.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="app">
