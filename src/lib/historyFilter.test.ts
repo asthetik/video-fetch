@@ -11,6 +11,7 @@ function job(partial: Partial<DownloadJob>): DownloadJob {
     page_index: 1,
     format_id: "f",
     title: "晴天 MV",
+    uploader: "",
     output_template: "t",
     status: "done",
     progress: 1,

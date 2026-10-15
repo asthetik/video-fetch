@@ -13,6 +13,7 @@ function baseJob(overrides: Partial<DownloadJob> = {}): DownloadJob {
     format_id: "80",
     audio_format: null,
     title: "sample",
+    uploader: "",
     output_template: "%(title)s.%(ext)s",
     status: "running",
     progress: 0.4,
