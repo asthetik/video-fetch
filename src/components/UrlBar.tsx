@@ -1,34 +1,51 @@
 import { Link2, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
+import {
+  EMPTY_RESOLVE_GATE,
+  gateInputChange,
+  gateResolveOutcome,
+  type ResolveGate,
+} from "../lib/resolveGate";
 
 interface UrlBarProps {
   url: string;
   loading: boolean;
   error: string | null;
   onUrlChange: (url: string) => void;
-  onResolve: (url: string) => void;
+  /** Resolves the URL; resolves to whether the resolve succeeded. */
+  onResolve: (url: string) => Promise<boolean> | boolean;
 }
 
 export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarProps) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Avoid re-resolving the same URL (e.g. focus leaving the input for the quality select).
-  const lastResolvedRef = useRef<string>("");
+  // Dedup gate: remembers only URLs whose resolve succeeded, so re-pasting a
+  // link after a failure schedules a fresh attempt instead of dead-ending.
+  const gateRef = useRef<ResolveGate>(EMPTY_RESOLVE_GATE);
+
+  const runResolve = useCallback(
+    (trimmed: string) => {
+      void Promise.resolve(onResolve(trimmed)).then((succeeded) => {
+        gateRef.current = gateResolveOutcome(gateRef.current, trimmed, succeeded);
+      });
+    },
+    [onResolve],
+  );
 
   const scheduleResolve = useCallback(
     (nextUrl: string) => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
-      const trimmed = nextUrl.trim();
-      if (!trimmed || trimmed === lastResolvedRef.current) {
+      const { schedule, gate } = gateInputChange(gateRef.current, nextUrl);
+      gateRef.current = gate;
+      if (!schedule) {
         return;
       }
       debounceRef.current = setTimeout(() => {
-        lastResolvedRef.current = trimmed;
-        onResolve(trimmed);
+        runResolve(nextUrl.trim());
       }, 300);
     },
-    [onResolve],
+    [runResolve],
   );
 
   useEffect(() => {
@@ -42,6 +59,18 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
   function handleChange(value: string) {
     onUrlChange(value);
     scheduleResolve(value);
+  }
+
+  function handleRetry() {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    // Retry bypasses the dedup gate: an error state must always re-run.
+    runResolve(trimmed);
   }
 
   return (
@@ -74,7 +103,19 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
           }}
         />
       </div>
-      {error && !loading && <p className="url-hint error">{error}</p>}
+      {error && !loading && (
+        <p className="url-hint error">
+          {error}
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ marginLeft: "0.5rem" }}
+            onClick={handleRetry}
+          >
+            重试
+          </button>
+        </p>
+      )}
       {!loading && !error && url.trim() && (
         <p className="url-hint">粘贴或修改链接后自动解析</p>
       )}
