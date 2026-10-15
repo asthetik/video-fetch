@@ -116,6 +116,10 @@ pub struct DownloadJob {
     #[serde(default)]
     pub audio_format: Option<String>,
     pub title: String,
+    /// Uploader name captured at enqueue time; the filename prediction for
+    /// `%(uploader)s` templates must use the same value as the conflict check.
+    #[serde(default)]
+    pub uploader: String,
     pub output_template: String,
     pub status: JobStatus,
     pub progress: f64,
