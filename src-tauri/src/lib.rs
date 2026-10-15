@@ -23,10 +23,10 @@ mod ytdlp;
 use commands::{
     build_app_state, cancel_all_jobs, cancel_job, check_download_conflict, clear_auth,
     clear_finished_jobs, clear_logs, delete_job, detect_url, enqueue_download, get_auth_status,
-    get_engine_versions, get_settings, import_cookies_path, list_jobs, list_log_files,
-    log_ui_events, open_path, pause_all_jobs, pause_job, pick_cookies_file, pick_save_dir,
-    preview_name, read_log_tail, resolve_url, resume_all_jobs, resume_job, retry_job,
-    save_settings, set_window_theme, space_enqueue_batch, space_info, space_list_videos,
+    get_engine_versions, get_save_dir_notice, get_settings, import_cookies_path, list_jobs,
+    list_log_files, log_ui_events, open_path, pause_all_jobs, pause_job, pick_cookies_file,
+    pick_save_dir, preview_name, read_log_tail, resolve_url, resume_all_jobs, resume_job,
+    retry_job, save_settings, set_window_theme, space_enqueue_batch, space_info, space_list_videos,
     start_bilibili_login,
 };
 use tauri::Manager;
@@ -122,6 +122,7 @@ pub fn run() {
             read_log_tail,
             log_ui_events,
             get_settings,
+            get_save_dir_notice,
             get_engine_versions,
             save_settings,
             get_auth_status,
@@ -206,18 +207,24 @@ mod startup_silence_guard {
         assert!(run_body.contains("tracing::error!"));
         assert!(run_body.contains("app: 启动失败"));
 
-        // build_app_state(): exactly the two anomaly-gated maintenance lines.
+        // build_app_state(): exactly the two anomaly-gated maintenance lines
+        // plus two anomaly-gated warns landed later (cookie materialization
+        // failure on launch, and the session-only save_dir fallback).
         let state_sites = state_body.matches("tracing::").count();
         assert_eq!(
-            state_sites, 2,
+            state_sites, 4,
             "healthy startup must produce zero log lines (product decision 2026-09-15): \
              `build_app_state` has {state_sites} tracing call sites, only the two \
-             anomaly-gated maintenance lines (orphans / interrupted rows) are allowed. \
-             Extend this test deliberately for new anomaly/error paths."
+             anomaly-gated maintenance lines (orphans / interrupted rows) and the two \
+             anomaly-gated warns (cookie materialization failure / save_dir fallback) \
+             are allowed. Extend this test deliberately for new anomaly/error paths."
         );
         assert!(state_body.contains("tracing::info!"));
+        assert!(state_body.contains("tracing::warn!"));
         assert!(state_body.contains("app: 清理孤儿工作目录"));
         assert!(state_body.contains("app: 中断的下载已转为暂停"));
+        assert!(state_body.contains("app: Cookie 文件准备失败"));
+        assert!(state_body.contains("app: 保存目录不可用"));
         // Both sites must stay gated on a non-empty recovery batch: on a
         // healthy startup both counters are 0 and neither line may fire.
         assert!(
@@ -227,6 +234,15 @@ mod startup_silence_guard {
         assert!(
             state_body.contains("if reconciled > 0"),
             "the interrupted-runs line must stay anomaly-gated (> 0)"
+        );
+        // The two warns must stay behind their failure conditions.
+        assert!(
+            state_body.contains("if let Err(e) = auth.materialize_cookies_file()"),
+            "the cookie warning must stay anomaly-gated (materialize failure)"
+        );
+        assert!(
+            state_body.contains("if save_dir_plan.effective != Path::new(&settings.save_dir)"),
+            "the save_dir warning must stay anomaly-gated (fallback active)"
         );
     }
 }
