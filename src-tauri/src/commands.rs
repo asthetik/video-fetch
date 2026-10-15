@@ -1341,7 +1341,13 @@ fn try_persist_webview_cookies(app: &AppHandle, win: &tauri::WebviewWindow) -> O
     let state = app.try_state::<AppState>()?;
     match state.auth.save_cookies_from_webview(converted) {
         Ok(status) => {
-            let _ = state.auth.materialize_cookies_file();
+            // Best-effort here (unlike resume/retry, which raise): the login is
+            // already stored, so a cookies.txt write failure must not flip the
+            // result — but it is logged, not swallowed (same message family as
+            // the startup path in build_app_state).
+            if let Err(e) = state.auth.materialize_cookies_file() {
+                tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
+            }
             Some(status)
         }
         Err(_) => None,
@@ -2877,5 +2883,81 @@ mod restart_cookie_tests {
         assert_eq!(job_status(&app.state, "job-a3"), JobStatus::Paused);
         assert_eq!(job_status(&app.state, "job-a4"), JobStatus::Paused);
         assert_eq!(app.seen.lock().unwrap().len(), 2);
+    }
+}
+
+/// Tripwire for the cookie-materialize handling in `try_persist_webview_cookies`.
+/// The login-window persist path is best-effort (unlike resume/retry, which
+/// raise explicit errors): a cookies.txt write failure must not flip a login
+/// that already succeeded, but it must not be swallowed silently either — the
+/// startup path logs the same "app: Cookie 文件准备失败" family, and this
+/// path has to match. A capture-based test cannot pin this (the function needs
+/// a real Wry `AppHandle`/`WebviewWindow`), so this asserts the call sites in
+/// the function body, same style as `startup_silence_guard` in lib.rs.
+#[cfg(test)]
+mod webview_cookie_persist_guard {
+    /// Brace-counted body of the function declared at `signature` (a string
+    /// that must appear exactly at a line start, leading `\n` included).
+    /// Same helper as `startup_silence_guard` in lib.rs.
+    fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("signature not found: {signature}"));
+        let open = source[start..]
+            .find('{')
+            .map(|i| start + i)
+            .unwrap_or_else(|| panic!("no body after: {signature}"));
+        let mut depth = 0usize;
+        for (i, c) in source[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..open + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after: {signature}");
+    }
+
+    #[test]
+    fn materialize_failure_is_logged_not_swallowed() {
+        let commands = include_str!("commands.rs");
+        let body = fn_body(commands, "\nfn try_persist_webview_cookies");
+
+        assert!(
+            !body.contains("let _ = state.auth.materialize_cookies_file()"),
+            "a materialize_cookies_file failure must not be swallowed with `let _ =` \
+             (external review #162 Minor 3): log it like the startup path does."
+        );
+        assert!(
+            body.contains("if let Err(e) = state.auth.materialize_cookies_file()"),
+            "materialize_cookies_file failure must be handled on its Err arm \
+             (external review #162 Minor 3)."
+        );
+        assert!(
+            body.contains("tracing::warn!") && body.contains("app: Cookie 文件准备失败"),
+            "the failure must log a tracing::warn! in the same message family as the \
+             startup path (\"app: Cookie 文件准备失败\"); keep it consistent with the \
+             startup warn in build_app_state and the explicit errors in resume/retry."
+        );
+        // Control flow stays best-effort: the Ok arm still reports login success
+        // even when the cookies file cannot be written after the store save.
+        // Whitespace-collapsed so rustfmt line breaks do not matter: the gated
+        // warn must sit in front of an unconditional `Some(status)` tail.
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(
+                "if let Err(e) = state.auth.materialize_cookies_file() { \
+                 tracing::warn!(target: \"core\", \"app: Cookie 文件准备失败: {e}\"); \
+                 } Some(status)"
+            ),
+            "materialize stays best-effort here: the saved login must still be \
+             reported via Some(status) when the file write fails, with the warn \
+             gated on the Err arm in between."
+        );
     }
 }
