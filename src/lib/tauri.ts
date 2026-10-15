@@ -85,6 +85,8 @@ export const api = {
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),
   getSettings: () => invoke<AppSettings>("get_settings"),
+  /** Startup notice: set when the save dir was unusable and this session's downloads were redirected. */
+  getSaveDirNotice: () => invoke<string | null>("get_save_dir_notice"),
   getEngineVersions: () => invoke<EngineVersions>("get_engine_versions"),
   saveSettings: (settings: AppSettings) => invoke<void>("save_settings", { settings }),
   getAuthStatus: () => invoke<AuthStatus>("get_auth_status"),
