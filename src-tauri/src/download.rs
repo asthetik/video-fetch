@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -240,6 +243,27 @@ impl Downloader for YtDlpDownloader {
         )
         .await
         .map_err(|e| e.to_string())
+    }
+}
+
+/// Polls an inner future under `catch_unwind`, turning a panic inside it into
+/// a value the caller can react to. Tokio catches a spawned task's panic into
+/// its JoinHandle — which the runner never joins — so without this wrapper a
+/// panic silently kills the task and freezes the job row at Running. The
+/// future is boxed so the wrapper stays `Unpin` and can be polled through a
+/// plain `Pin<&mut Self>`.
+struct CatchUnwind<F: Future>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = &mut self.get_mut().0;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.as_mut().poll(cx))) {
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
     }
 }
 
@@ -1044,7 +1068,28 @@ impl DownloadManager {
         let task_id = job_id.clone();
         // Use Tauri's runtime so sync commands can spawn without a current Tokio handle.
         let handle = async_runtime::spawn(async move {
-            this.run_job(job_id, token).await;
+            // A panic must not silently kill the runner and freeze the row at
+            // Running; poll the job under catch_unwind and treat the unwind
+            // like a downloader error — minus the fragment cleanup, since the
+            // panic says nothing about whether the partial files are usable.
+            let panicked = CatchUnwind(Box::pin(this.run_job(job_id.clone(), token)))
+                .await
+                .is_err();
+            if panicked {
+                // Same stop dispatch as a downloader error: a pause/cancel or
+                // a superseding command's marker wins over the Failed write
+                // (fail_job re-checks under the db lock).
+                match this.stop_disposition_for(&job_id, token) {
+                    Some(disposition) => {
+                        this.apply_stop_disposition(&job_id, disposition).await
+                    }
+                    None => {
+                        tracing::error!(target: "core", "download: runner 崩溃，标记失败 {job_id}");
+                        this.try_fail_job(&job_id, token, "下载任务异常中止（内部错误），请重试");
+                    }
+                }
+                this.unregister_task(&job_id, token);
+            }
         });
 
         if let Ok(mut tasks) = self.running_tasks.lock() {
@@ -2037,6 +2082,54 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("mock download failed")
+        );
+    }
+
+    /// A panic inside the runner task must land the job in Failed instead of
+    /// silently killing the task and freezing the row at Running — nothing
+    /// joins the task, so without a catch at the poll boundary the row stays
+    /// "downloading" until the next startup's reconcile (or a manual
+    /// pause/cancel) unsticks it. The runner future is polled under
+    /// catch_unwind so any panic (the stderr tail trim's char-boundary cut,
+    /// for one) writes a Failed row like any downloader error.
+    ///
+    /// Value: protects=the catch_unwind wrapper around the runner future;
+    /// fails_when=the wrapper or the panic-path Failed write is removed (the
+    /// row stays Running and the test times out); why_new=a panicking runner
+    /// task vanished without a trace; seam=none
+    #[tokio::test]
+    async fn a_runner_panic_marks_the_job_failed() {
+        struct PanicDownloader;
+
+        #[async_trait]
+        impl Downloader for PanicDownloader {
+            async fn run(
+                &self,
+                _job: &DownloadJob,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                panic!("simulated runner panic");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(PanicDownloader) as Arc<dyn Downloader>,
+        );
+        let job = manager.enqueue(sample_job("job-panic"), false).unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Failed).await;
+
+        let failed = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == job.id)
+            .unwrap();
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("下载任务异常中止（内部错误），请重试")
         );
     }
 
