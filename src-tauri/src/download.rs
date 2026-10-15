@@ -354,18 +354,11 @@ impl DownloadManager {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
         let save_dir = PathBuf::from(&settings.save_dir);
 
-        // Never allow a second active job for the same video page (not bypassed by save_as_copy).
-        {
-            let active = self.db.lock().map_err(lock_err)?.has_active_job(
-                &job.video_id,
-                job.page_index,
-                job.audio_format.as_deref(),
-            )?;
-            if active {
-                return Ok(EnqueueKind::DuplicateActive);
-            }
-        }
-
+        // Skip-existing lookup is read-only and runs outside the enqueue critical
+        // section below; only the decision moves inside it. Returning
+        // AlreadyExists never inserts a row, so the lookup itself cannot race a
+        // concurrent insert.
+        let mut existing_output = false;
         if !save_as_copy && settings.skip_existing {
             let recorded = self
                 .db
@@ -373,7 +366,7 @@ impl DownloadManager {
                 .map_err(lock_err)?
                 .find_done_output_paths(&job.video_id, job.page_index)?;
             let audio_format = job.audio_format.as_deref();
-            if recorded_output_exists(&recorded, audio_format)
+            existing_output = recorded_output_exists(&recorded, audio_format)
                 || local_output_exists(
                     &save_dir,
                     &job.output_template,
@@ -382,22 +375,40 @@ impl DownloadManager {
                     "",
                     job.page_index,
                     naming::conflict_exts(audio_format),
-                )
-            {
+                );
+        }
+
+        // Never allow a second active job for the same video page (not bypassed
+        // by save_as_copy). The active-check and the insert share one db critical
+        // section so two concurrent enqueues cannot both pass the check in
+        // separate sections and both insert: that would start two runners writing
+        // the same output file. DuplicateActive keeps precedence over
+        // AlreadyExists, matching the original check order.
+        let prepared;
+        {
+            let db = self.db.lock().map_err(lock_err)?;
+            let active =
+                db.has_active_job(&job.video_id, job.page_index, job.audio_format.as_deref())?;
+            if active {
+                return Ok(EnqueueKind::DuplicateActive);
+            }
+            if existing_output {
                 return Ok(EnqueueKind::AlreadyExists);
             }
-        }
 
-        if job.id.is_empty() {
-            job.id = new_job_id();
-        }
-        job.status = JobStatus::Pending;
-        job.progress = 0.0;
-        job.error = None;
-        job.output_path = None;
+            if job.id.is_empty() {
+                job.id = new_job_id();
+            }
+            job.status = JobStatus::Pending;
+            job.progress = 0.0;
+            job.error = None;
+            job.output_path = None;
 
-        let prepared = job.clone();
-        self.db.lock().map_err(lock_err)?.insert_job(job)?;
+            prepared = job.clone();
+            #[cfg(test)]
+            enqueue_race_hook::before_insert(&job.video_id);
+            db.insert_job(job)?;
+        }
         self.emit(&prepared);
         self.spawn_runner(prepared.id.clone());
         Ok(EnqueueKind::Enqueued)
@@ -1392,6 +1403,73 @@ fn new_job_id() -> String {
 
 fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
     AppError::Message("lock poisoned".into())
+}
+
+/// Test-only rendezvous for the enqueue check/insert race regression test.
+/// When armed for a marker (a video id), the first enqueue to reach the gap
+/// between the active check and the insert waits briefly for a second one, so
+/// both are guaranteed to have passed the check before either inserts. That
+/// makes the double-insert interleaving deterministic instead of probabilistic.
+/// Unarmed — and in production builds — the hook is a no-op.
+#[cfg(test)]
+mod enqueue_race_hook {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    /// Upper bound on the first arriver's wait for its peer. Must be long
+    /// enough for a freshly spawned thread to reach the hook, and finite so
+    /// that code holding a lock the peer still needs cannot deadlock on a
+    /// rendezvous that can never complete.
+    const PEER_WAIT: Duration = Duration::from_secs(2);
+
+    static ARMED: Mutex<Option<String>> = Mutex::new(None);
+    static ARRIVED: AtomicUsize = AtomicUsize::new(0);
+    static SIGNAL: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+
+    /// Disarms the hook when dropped (also on test panic).
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            disarm();
+        }
+    }
+
+    /// Arm the hook for calls whose marker matches, resetting the rendezvous.
+    pub fn arm(marker: &str) -> Guard {
+        *ARMED.lock().unwrap() = Some(marker.to_owned());
+        ARRIVED.store(0, Ordering::SeqCst);
+        Guard
+    }
+
+    fn disarm() {
+        *ARMED.lock().unwrap() = None;
+    }
+
+    /// Called between the active check and the insert. See module docs.
+    pub fn before_insert(marker: &str) {
+        {
+            let armed = ARMED.lock().unwrap();
+            if armed.as_deref() != Some(marker) {
+                return;
+            }
+        }
+        let n = ARRIVED.fetch_add(1, Ordering::SeqCst) + 1;
+        let (lock, cv) = &SIGNAL;
+        let mut guard: MutexGuard<'_, ()> = lock.lock().unwrap();
+        if n >= 2 {
+            cv.notify_all();
+            return;
+        }
+        while ARRIVED.load(Ordering::SeqCst) < 2 {
+            let (g, timeout) = cv.wait_timeout(guard, PEER_WAIT).unwrap();
+            guard = g;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+    }
 }
 
 /// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
@@ -2736,6 +2814,74 @@ mod tests {
         let err = manager.enqueue(dup, false).unwrap_err().to_string();
         assert!(err.contains("已在下载队列中"), "unexpected: {err}");
         assert!(err.contains("BV1active"), "unexpected: {err}");
+    }
+
+    /// Park forever so the inserted row never leaves the active set between the
+    /// two enqueues' checks; the race assertions must not depend on runner
+    /// completion timing.
+    struct ParkForeverDownloader;
+
+    #[async_trait]
+    impl Downloader for ParkForeverDownloader {
+        async fn run(
+            &self,
+            _: &DownloadJob,
+            _: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            std::future::pending::<()>().await;
+            unreachable!("pending future never resolves")
+        }
+    }
+
+    /// Two concurrent enqueues for the same video page must not both pass the
+    /// active check and insert — two runners would write one output file. The
+    /// hook pins the interleaving (both checks before either insert) so the
+    /// regression reproduces deterministically instead of by luck.
+    #[test]
+    fn concurrent_enqueue_classified_admits_a_single_active_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let (manager, _rx) = test_manager(
+            &save_dir,
+            &dir.path().join("work"),
+            Arc::new(ParkForeverDownloader),
+        );
+
+        let _guard = enqueue_race_hook::arm("BV1race");
+        let spawn = |job_id: &str| {
+            let manager = manager.clone();
+            let mut job = sample_job(job_id);
+            job.video_id = "BV1race".into();
+            std::thread::spawn(move || manager.enqueue_classified(&mut job, false))
+        };
+        let first = spawn("job-race-a");
+        let second = spawn("job-race-b");
+        let results = [
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        ];
+
+        let enqueued = results
+            .iter()
+            .filter(|k| **k == EnqueueKind::Enqueued)
+            .count();
+        let duplicate = results
+            .iter()
+            .filter(|k| **k == EnqueueKind::DuplicateActive)
+            .count();
+        assert_eq!(
+            (enqueued, duplicate),
+            (1, 1),
+            "exactly one enqueue may win the active slot: {results:?}"
+        );
+        let rows = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|j| j.video_id == "BV1race")
+            .count();
+        assert_eq!(rows, 1, "check-then-insert must not insert two active rows");
     }
 
     // ---- pause / resume ----
