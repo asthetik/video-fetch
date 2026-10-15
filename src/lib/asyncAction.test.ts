@@ -94,6 +94,35 @@ test("every api.openPath call site routes through withToast", () => {
   }
 });
 
+test("initial-read and retry auth-status successes fire onStatusChange via applyStatus", () => {
+  // The hook's public onStatusChange callback must fire for the initial status
+  // read and for a successful retryStatus, not only for auth://status events
+  // and login/logout. applyStatus is the sole path that both settles ready
+  // state and notifies the consumer, so both getAuthStatus read paths must
+  // deliver ready data through it; loading/error results stay plain state and
+  // must never masquerade as a status.
+  const hook = readFileSync(
+    join(import.meta.dirname, "..", "hooks", "useAuthActions.ts"),
+    "utf8",
+  );
+  const readyRoutes = hook.match(/applyStatus\(next\.data\)/g)?.length ?? 0;
+  assert.equal(
+    readyRoutes,
+    2,
+    "initial read and retryStatus must each deliver ready data via applyStatus(next.data)",
+  );
+  assert.doesNotMatch(
+    hook,
+    /setAuthState\(await toLoadState/,
+    "retryStatus must not push a raw load state past applyStatus",
+  );
+  assert.doesNotMatch(
+    hook,
+    /if \(active\) setAuthState\(next\)/,
+    "the initial read must not push a raw load state past applyStatus",
+  );
+});
+
 test("settings page renders a retryable error state and auth UIs never masquerade as logged out", () => {
   // Render-level pins for the same finding: the settings page must not keep
   // "加载设置中…" as its only answer to a failed load, and a failed auth-status

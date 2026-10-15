@@ -40,8 +40,10 @@ export function useAuthActions(
 
   const retryStatus = useCallback(async () => {
     setAuthState({ status: "loading" });
-    setAuthState(await toLoadState(() => api.getAuthStatus()));
-  }, []);
+    const next = await toLoadState(() => api.getAuthStatus());
+    if (next.status === "ready") applyStatus(next.data);
+    else setAuthState(next);
+  }, [applyStatus]);
 
   const dismissHint = useCallback(() => setHint(null), []);
   const requestLogout = useCallback(() => setConfirmLogout(true), []);
@@ -51,7 +53,9 @@ export function useAuthActions(
     let unlisten: (() => void) | undefined;
     let active = true;
     void toLoadState(() => api.getAuthStatus()).then((next) => {
-      if (active) setAuthState(next);
+      if (!active) return;
+      if (next.status === "ready") applyStatus(next.data);
+      else setAuthState(next);
     });
     void listen<AuthStatusType>("auth://status", (event) => {
       applyStatus(event.payload);
