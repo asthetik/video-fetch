@@ -140,7 +140,7 @@ async fn pause_resume_finishes_without_redownloading() {
     h.server.arm_gate_on_next_fragment(1);
     assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
 
-    h.manager.pause(&job.id).unwrap();
+    h.manager.pause(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
@@ -149,7 +149,7 @@ async fn pause_resume_finishes_without_redownloading() {
     let wd = h.work_dir_of(&job.id);
     assert!(wd.is_dir(), "pause must keep the work dir");
 
-    h.manager.resume(&job.id).unwrap();
+    h.manager.resume(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 
@@ -185,12 +185,12 @@ async fn resume_does_not_refetch_completed_fragments() {
         "expected three completed fragments plus one held: {paused_at:?}"
     );
 
-    h.manager.pause(&job.id).unwrap();
+    h.manager.pause(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
 
-    h.manager.resume(&job.id).unwrap();
+    h.manager.resume(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 
@@ -221,7 +221,7 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
     let job = h.enqueue(1);
     h.server.arm_gate_on_next_fragment(1);
     assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
-    h.manager.pause(&job.id).unwrap();
+    h.manager.pause(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
@@ -241,7 +241,7 @@ async fn paused_job_survives_a_relaunch_and_resumes() {
         "orphan cleanup must keep a paused job's work dir"
     );
 
-    h.manager.resume(&job.id).unwrap();
+    h.manager.resume(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
         .await;
     support::oracles::assert_delivered_merged(&h.ffmpeg, &h.delivered_path(1));
@@ -327,7 +327,7 @@ async fn queued_jobs_survive_a_relaunch_as_paused_and_resume_all() {
         );
     }
 
-    h.manager.resume_all().unwrap();
+    h.manager.resume_all().await.unwrap();
     for id in [&q2.id, &q3.id] {
         h.wait_status(id, JobStatus::Done, Duration::from_secs(180))
             .await;
@@ -366,7 +366,7 @@ async fn cancel_stops_everything_and_drops_the_workdir() {
         support::oracles::debug_process_snapshot(&h.marker())
     );
 
-    h.manager.cancel(&job.id).unwrap();
+    h.manager.cancel(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(60))
         .await;
     assert!(
@@ -404,7 +404,7 @@ async fn a_paused_job_keeps_its_active_slot() {
     let job = h.enqueue(1);
     h.server.arm_gate_on_next_fragment(1);
     assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
-    h.manager.pause(&job.id).unwrap();
+    h.manager.pause(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
@@ -414,7 +414,7 @@ async fn a_paused_job_keeps_its_active_slot() {
     let err = h.manager.enqueue(h.job_for(1), false).unwrap_err();
     assert!(err.to_string().contains("已在下载队列中"), "got: {err}");
 
-    h.manager.cancel(&job.id).unwrap();
+    h.manager.cancel(&job.id).await.unwrap();
     h.wait_status(&job.id, JobStatus::Failed, Duration::from_secs(60))
         .await;
     h.manager
@@ -434,7 +434,7 @@ async fn pause_all_resume_all_round_trips_the_queue() {
     h.server.arm_gate_on_next_fragment(1);
     assert!(h.server.wait_gate_engaged(Duration::from_secs(60)).await);
 
-    h.manager.pause(&a.id).unwrap();
+    h.manager.pause(&a.id).await.unwrap();
     h.wait_status(&a.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
     h.server.release_gate();
@@ -442,12 +442,12 @@ async fn pause_all_resume_all_round_trips_the_queue() {
     h.wait_status(&b.id, JobStatus::Running, Duration::from_secs(60))
         .await;
 
-    let paused = h.manager.pause_all().unwrap();
+    let paused = h.manager.pause_all().await.unwrap();
     assert_eq!(paused.paused, 1, "only b was still active");
     h.wait_status(&b.id, JobStatus::Paused, Duration::from_secs(60))
         .await;
 
-    let resumed = h.manager.resume_all().unwrap();
+    let resumed = h.manager.resume_all().await.unwrap();
     assert_eq!(resumed.resumed, 2);
     h.wait_status(&a.id, JobStatus::Done, Duration::from_secs(120))
         .await;

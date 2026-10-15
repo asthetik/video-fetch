@@ -135,7 +135,7 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                 ledger.push((op, id.clone()));
                 let m = h.manager.clone();
                 tokio::spawn(async move {
-                    let _ = m.pause(&id);
+                    let _ = m.pause(&id).await;
                 });
             }
             Op::Resume => {
@@ -145,7 +145,7 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                 crash_era.remove(&id);
                 let m = h.manager.clone();
                 tokio::spawn(async move {
-                    let _ = m.resume(&id);
+                    let _ = m.resume(&id).await;
                 });
             }
             Op::Cancel => {
@@ -154,7 +154,7 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                 cancelled.insert(id.clone());
                 let m = h.manager.clone();
                 tokio::spawn(async move {
-                    let _ = m.cancel(&id);
+                    let _ = m.cancel(&id).await;
                 });
             }
             Op::Retry => {
@@ -180,14 +180,14 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                 ledger.push((op, id.clone()));
                 let m = h.manager.clone();
                 tokio::spawn(async move {
-                    let _ = m.delete(&id, true);
+                    let _ = m.delete(&id, true).await;
                 });
             }
             Op::PauseAll => {
                 ledger.push((op, String::new()));
                 let m = h.manager.clone();
                 tokio::spawn(async move {
-                    let _ = m.pause_all();
+                    let _ = m.pause_all().await;
                 });
             }
             Op::ResumeAll => {
@@ -199,7 +199,7 @@ async fn soak_churns_downloads_and_asserts_invariants() {
                 }
                 let m = h.manager.clone();
                 tokio::spawn(async move {
-                    let _ = m.resume_all();
+                    let _ = m.resume_all().await;
                 });
             }
             Op::CrashClean => {
@@ -242,7 +242,7 @@ async fn soak_churns_downloads_and_asserts_invariants() {
     {
         crash_era.remove(&j.id);
     }
-    let _ = h.manager.resume_all();
+    let _ = h.manager.resume_all().await;
     let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     // Log the busy set on every change: a drain that converges late (or a row
     // that flips back to Pending/Running) must be reconstructable from the log.

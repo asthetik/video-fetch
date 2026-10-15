@@ -18,7 +18,15 @@ use crate::models::{
     JobStatus, PauseAllResult, ResumeAllResult, VideoMeta,
 };
 use crate::naming;
-use crate::ytdlp::{self, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download};
+use crate::ytdlp::{
+    self, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download, kill_download_blocking,
+};
+
+/// Type-erased per-job bulk-op future: `run_bulk` awaits each op in turn
+/// (serial semantics preserved), so the caller may pass any async op
+/// (`cancel`/`pause`/`resume`) without naming the opaque async-fn type.
+type BulkOpFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<DownloadJob>> + Send + 'a>>;
 
 pub const PROGRESS_EVENT: &str = "download://progress";
 
@@ -419,18 +427,11 @@ impl DownloadManager {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
         let save_dir = PathBuf::from(&settings.save_dir);
 
-        // Never allow a second active job for the same video page (not bypassed by save_as_copy).
-        {
-            let active = self.db.lock().map_err(lock_err)?.has_active_job(
-                &job.video_id,
-                job.page_index,
-                job.audio_format.as_deref(),
-            )?;
-            if active {
-                return Ok(EnqueueKind::DuplicateActive);
-            }
-        }
-
+        // Skip-existing lookup is read-only and runs outside the enqueue critical
+        // section below; only the decision moves inside it. Returning
+        // AlreadyExists never inserts a row, so the lookup itself cannot race a
+        // concurrent insert.
+        let mut existing_output = false;
         if !save_as_copy && settings.skip_existing {
             let recorded = self
                 .db
@@ -438,7 +439,7 @@ impl DownloadManager {
                 .map_err(lock_err)?
                 .find_done_output_paths(&job.video_id, job.page_index)?;
             let audio_format = job.audio_format.as_deref();
-            if recorded_output_exists(&recorded, audio_format)
+            existing_output = recorded_output_exists(&recorded, audio_format)
                 || local_output_exists(
                     &save_dir,
                     &job.output_template,
@@ -447,22 +448,40 @@ impl DownloadManager {
                     "",
                     job.page_index,
                     naming::conflict_exts(audio_format),
-                )
-            {
+                );
+        }
+
+        // Never allow a second active job for the same video page (not bypassed
+        // by save_as_copy). The active-check and the insert share one db critical
+        // section so two concurrent enqueues cannot both pass the check in
+        // separate sections and both insert: that would start two runners writing
+        // the same output file. DuplicateActive keeps precedence over
+        // AlreadyExists, matching the original check order.
+        let prepared;
+        {
+            let db = self.db.lock().map_err(lock_err)?;
+            let active =
+                db.has_active_job(&job.video_id, job.page_index, job.audio_format.as_deref())?;
+            if active {
+                return Ok(EnqueueKind::DuplicateActive);
+            }
+            if existing_output {
                 return Ok(EnqueueKind::AlreadyExists);
             }
-        }
 
-        if job.id.is_empty() {
-            job.id = new_job_id();
-        }
-        job.status = JobStatus::Pending;
-        job.progress = 0.0;
-        job.error = None;
-        job.output_path = None;
+            if job.id.is_empty() {
+                job.id = new_job_id();
+            }
+            job.status = JobStatus::Pending;
+            job.progress = 0.0;
+            job.error = None;
+            job.output_path = None;
 
-        let prepared = job.clone();
-        self.db.lock().map_err(lock_err)?.insert_job(job)?;
+            prepared = job.clone();
+            #[cfg(test)]
+            enqueue_race_hook::before_insert(&job.video_id);
+            db.insert_job(job)?;
+        }
         self.emit(&prepared);
         self.spawn_runner(prepared.id.clone());
         Ok(EnqueueKind::Enqueued)
@@ -546,7 +565,9 @@ impl DownloadManager {
         })
     }
 
-    pub fn cancel(&self, id: &str) -> AppResult<DownloadJob> {
+    /// Async: the kill and the work-dir wipe must not run on Tauri's main
+    /// thread (a sync command would put them there and freeze the window).
+    pub async fn cancel(&self, id: &str) -> AppResult<DownloadJob> {
         {
             let mut flags = self.stop_flags.lock().map_err(lock_err)?;
             flags.insert(id.to_string(), StopKind::Cancel);
@@ -557,11 +578,12 @@ impl DownloadManager {
         // this point has to retract it — a leaked Cancel is a poison pill for
         // whatever runs next.
         self.cancel_marked(id)
+            .await
             .inspect_err(|_| self.retract_stop_marker(id, StopKind::Cancel))
     }
 
-    fn cancel_marked(&self, id: &str) -> AppResult<DownloadJob> {
-        kill_download(&self.children, id);
+    async fn cancel_marked(&self, id: &str) -> AppResult<DownloadJob> {
+        kill_download(&self.children, id).await;
 
         if let Ok(mut tasks) = self.running_tasks.lock()
             && let Some((_, handle)) = tasks.remove(id)
@@ -592,16 +614,15 @@ impl DownloadManager {
     /// One bulk skeleton: collect ids by predicate, run the per-id op, count
     /// only actual status changes, collect "id: error" strings. cancel_all /
     /// pause_all / resume_all build their result structs from this.
-    fn run_bulk<F, C>(
+    /// Async so each per-id kill/DB op runs on the async runtime instead of
+    /// the main thread; the loop itself stays serial, preserving the order
+    /// state transitions and kills had before.
+    async fn run_bulk(
         &self,
         predicate: impl Fn(&DownloadJob) -> bool,
-        op: F,
-        counted: C,
-    ) -> AppResult<(u32, Vec<String>)>
-    where
-        F: Fn(&Self, &str) -> AppResult<DownloadJob>,
-        C: Fn(&JobStatus) -> bool,
-    {
+        op: impl for<'a> Fn(&'a Self, &'a str) -> BulkOpFuture<'a>,
+        counted: impl Fn(&JobStatus) -> bool,
+    ) -> AppResult<(u32, Vec<String>)> {
         let ids: Vec<String> = self
             .list()?
             .into_iter()
@@ -612,7 +633,7 @@ impl DownloadManager {
         let mut count = 0u32;
         let mut errors = Vec::new();
         for id in ids {
-            match op(self, &id) {
+            match op(self, &id).await {
                 // Counted only when the op actually changed the status (a race
                 // to Done returns Ok without a transition).
                 Ok(job) => {
@@ -626,17 +647,19 @@ impl DownloadManager {
         Ok((count, errors))
     }
 
-    pub fn cancel_all(&self) -> AppResult<CancelAllResult> {
-        let (cancelled, errors) = self.run_bulk(
-            |j| {
-                matches!(
-                    j.status,
-                    JobStatus::Pending | JobStatus::Running | JobStatus::Paused
-                )
-            },
-            |m, id| m.cancel(id),
-            |s| *s == JobStatus::Failed,
-        )?;
+    pub async fn cancel_all(&self) -> AppResult<CancelAllResult> {
+        let (cancelled, errors) = self
+            .run_bulk(
+                |j| {
+                    matches!(
+                        j.status,
+                        JobStatus::Pending | JobStatus::Running | JobStatus::Paused
+                    )
+                },
+                |m, id| Box::pin(m.cancel(id)),
+                |s| *s == JobStatus::Failed,
+            )
+            .await?;
         Ok(CancelAllResult { cancelled, errors })
     }
 
@@ -680,7 +703,8 @@ impl DownloadManager {
 
     /// Pause a Pending or Running job: stop the whole transfer (process tree),
     /// keep the work dir so `resume` continues from the partial files.
-    pub fn pause(&self, id: &str) -> AppResult<DownloadJob> {
+    /// Async like `cancel`: the kill must not run on Tauri's main thread.
+    pub async fn pause(&self, id: &str) -> AppResult<DownloadJob> {
         // Preliminary guard for a friendly error; the locked re-read below is
         // the authority (races resolve there).
         {
@@ -716,11 +740,12 @@ impl DownloadManager {
         // has to retract it: a leaked Pause marker parks the live runner at its
         // next checkpoint while the row stays Running with nothing to resume.
         self.pause_marked(id)
+            .await
             .inspect_err(|_| self.retract_stop_marker(id, StopKind::Pause))
     }
 
-    fn pause_marked(&self, id: &str) -> AppResult<DownloadJob> {
-        kill_download(&self.children, id);
+    async fn pause_marked(&self, id: &str) -> AppResult<DownloadJob> {
+        kill_download(&self.children, id).await;
         if let Ok(mut tasks) = self.running_tasks.lock()
             && let Some((_, handle)) = tasks.remove(id)
         {
@@ -752,7 +777,8 @@ impl DownloadManager {
 
     /// Resume a paused job: keep progress and work dir; yt-dlp continues from
     /// the partial fragments (a local re-merge when they are already complete).
-    pub fn resume(&self, id: &str) -> AppResult<DownloadJob> {
+    /// Async so it runs on the async runtime like the rest of the stop surface.
+    pub async fn resume(&self, id: &str) -> AppResult<DownloadJob> {
         // Read-modify-write under one db lock (mirrors pause()): a concurrent
         // delete between read and write would otherwise surface update_job's
         // missing-row error instead of the friendly one below.
@@ -808,7 +834,7 @@ impl DownloadManager {
             Err(_) => return,
         };
         for id in ids {
-            kill_download(&self.children, &id);
+            kill_download_blocking(&self.children, &id);
         }
     }
 
@@ -850,22 +876,26 @@ impl DownloadManager {
 
     /// Pause every Pending/Running job. Counts only jobs whose status actually
     /// changed (same rule as cancel_all).
-    pub fn pause_all(&self) -> AppResult<PauseAllResult> {
-        let (paused, errors) = self.run_bulk(
-            |j| matches!(j.status, JobStatus::Pending | JobStatus::Running),
-            |m, id| m.pause(id),
-            |s| *s == JobStatus::Paused,
-        )?;
+    pub async fn pause_all(&self) -> AppResult<PauseAllResult> {
+        let (paused, errors) = self
+            .run_bulk(
+                |j| matches!(j.status, JobStatus::Pending | JobStatus::Running),
+                |m, id| Box::pin(m.pause(id)),
+                |s| *s == JobStatus::Paused,
+            )
+            .await?;
         Ok(PauseAllResult { paused, errors })
     }
 
     /// Resume every paused job.
-    pub fn resume_all(&self) -> AppResult<ResumeAllResult> {
-        let (resumed, errors) = self.run_bulk(
-            |j| j.status == JobStatus::Paused,
-            |m, id| m.resume(id),
-            |s| *s == JobStatus::Pending,
-        )?;
+    pub async fn resume_all(&self) -> AppResult<ResumeAllResult> {
+        let (resumed, errors) = self
+            .run_bulk(
+                |j| j.status == JobStatus::Paused,
+                |m, id| Box::pin(m.resume(id)),
+                |s| *s == JobStatus::Pending,
+            )
+            .await?;
         Ok(ResumeAllResult { resumed, errors })
     }
 
@@ -889,7 +919,7 @@ impl DownloadManager {
             .upsert_resolve_cache(key, meta, fetched_at)
     }
 
-    pub fn delete(&self, id: &str, delete_file: bool) -> AppResult<()> {
+    pub async fn delete(&self, id: &str, delete_file: bool) -> AppResult<()> {
         let job = self.db.lock().map_err(lock_err)?.get_job(id)?;
         if matches!(
             job.status,
@@ -898,7 +928,7 @@ impl DownloadManager {
             // try_cancel also removes the work dir; a deleted Paused row must
             // not leave its partial files behind (the startup cleanup keeps
             // paused ids, so nothing else would ever collect them).
-            self.try_cancel(id);
+            self.try_cancel(id).await;
         }
         if delete_file && let Some(path) = job.output_path.as_deref() {
             let p = PathBuf::from(path);
@@ -1041,7 +1071,7 @@ impl DownloadManager {
         };
 
         if let Some(d) = self.stop_disposition_for(&job_id, token) {
-            self.apply_stop_disposition(&job_id, d);
+            self.apply_stop_disposition(&job_id, d).await;
             return;
         }
 
@@ -1103,7 +1133,7 @@ impl DownloadManager {
         }
         let Some(running) = start else {
             if let Some(d) = self.stop_disposition_for(&job_id, token) {
-                self.apply_stop_disposition(&job_id, d);
+                self.apply_stop_disposition(&job_id, d).await;
             }
             return;
         };
@@ -1111,7 +1141,7 @@ impl DownloadManager {
         self.emit(&running);
 
         if let Some(d) = self.stop_disposition_for(&job_id, token) {
-            self.apply_stop_disposition(&job_id, d);
+            self.apply_stop_disposition(&job_id, d).await;
             return;
         }
 
@@ -1185,14 +1215,14 @@ impl DownloadManager {
         };
 
         if let Some(d) = self.stop_disposition_for(&job_id, token) {
-            self.apply_stop_disposition(&job_id, d);
+            self.apply_stop_disposition(&job_id, d).await;
             return;
         }
 
         let result = self.downloader.run(&running, on_progress).await;
 
         if let Some(d) = self.stop_disposition_for(&job_id, token) {
-            self.apply_stop_disposition(&job_id, d);
+            self.apply_stop_disposition(&job_id, d).await;
             return;
         }
 
@@ -1222,7 +1252,7 @@ impl DownloadManager {
             Err(err) => {
                 // Prefer the stop marker over a kill/pipe race error from yt-dlp.
                 match self.stop_disposition_for(&job_id, token) {
-                    Some(StopDisposition::MarkCancelled) => self.try_cancel(&job_id),
+                    Some(StopDisposition::MarkCancelled) => self.try_cancel(&job_id).await,
                     Some(StopDisposition::ReturnSilently) => {
                         tracing::debug!(target: "core", "download: 暂停期间忽略错误 {job_id}: {err}");
                     }
@@ -1263,8 +1293,8 @@ impl DownloadManager {
 
     /// Same contract as try_fail_job: cancel persists the Cancelled status, so
     /// a swallowed failure must still leave a debug trace.
-    fn try_cancel(&self, job_id: &str) {
-        if let Err(e) = self.cancel(job_id) {
+    async fn try_cancel(&self, job_id: &str) {
+        if let Err(e) = self.cancel(job_id).await {
             tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
@@ -1395,9 +1425,9 @@ impl DownloadManager {
     /// and calling cancel()/fail_job here would delete the `.part` files or
     /// paint a pause as a failure. A superseded runner stands down the same way,
     /// for the same reason: the newer command's runner owns both.
-    fn apply_stop_disposition(&self, job_id: &str, disposition: StopDisposition) {
+    async fn apply_stop_disposition(&self, job_id: &str, disposition: StopDisposition) {
         match disposition {
-            StopDisposition::MarkCancelled => self.try_cancel(job_id),
+            StopDisposition::MarkCancelled => self.try_cancel(job_id).await,
             StopDisposition::ReturnSilently => {
                 tracing::debug!(target: "core", "download: 已按暂停停止 {job_id}");
             }
@@ -1457,6 +1487,73 @@ fn new_job_id() -> String {
 
 fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
     AppError::Message("lock poisoned".into())
+}
+
+/// Test-only rendezvous for the enqueue check/insert race regression test.
+/// When armed for a marker (a video id), the first enqueue to reach the gap
+/// between the active check and the insert waits briefly for a second one, so
+/// both are guaranteed to have passed the check before either inserts. That
+/// makes the double-insert interleaving deterministic instead of probabilistic.
+/// Unarmed — and in production builds — the hook is a no-op.
+#[cfg(test)]
+mod enqueue_race_hook {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    /// Upper bound on the first arriver's wait for its peer. Must be long
+    /// enough for a freshly spawned thread to reach the hook, and finite so
+    /// that code holding a lock the peer still needs cannot deadlock on a
+    /// rendezvous that can never complete.
+    const PEER_WAIT: Duration = Duration::from_secs(2);
+
+    static ARMED: Mutex<Option<String>> = Mutex::new(None);
+    static ARRIVED: AtomicUsize = AtomicUsize::new(0);
+    static SIGNAL: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+
+    /// Disarms the hook when dropped (also on test panic).
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            disarm();
+        }
+    }
+
+    /// Arm the hook for calls whose marker matches, resetting the rendezvous.
+    pub fn arm(marker: &str) -> Guard {
+        *ARMED.lock().unwrap() = Some(marker.to_owned());
+        ARRIVED.store(0, Ordering::SeqCst);
+        Guard
+    }
+
+    fn disarm() {
+        *ARMED.lock().unwrap() = None;
+    }
+
+    /// Called between the active check and the insert. See module docs.
+    pub fn before_insert(marker: &str) {
+        {
+            let armed = ARMED.lock().unwrap();
+            if armed.as_deref() != Some(marker) {
+                return;
+            }
+        }
+        let n = ARRIVED.fetch_add(1, Ordering::SeqCst) + 1;
+        let (lock, cv) = &SIGNAL;
+        let mut guard: MutexGuard<'_, ()> = lock.lock().unwrap();
+        if n >= 2 {
+            cv.notify_all();
+            return;
+        }
+        while ARRIVED.load(Ordering::SeqCst) < 2 {
+            let (g, timeout) = cv.wait_timeout(guard, PEER_WAIT).unwrap();
+            guard = g;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+    }
 }
 
 /// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
@@ -1956,7 +2053,7 @@ mod tests {
 
         sleep(Duration::from_millis(50)).await;
         mock.mark_cancelled(&job.id);
-        let cancelled = manager.cancel(&job.id).unwrap();
+        let cancelled = manager.cancel(&job.id).await.unwrap();
         assert_eq!(cancelled.status, JobStatus::Failed);
         assert_eq!(cancelled.error.as_deref(), Some("用户取消下载"));
     }
@@ -1990,7 +2087,7 @@ mod tests {
         mock.mark_cancelled(&a.id);
         mock.mark_cancelled(&b.id);
 
-        let result = manager.cancel_all().unwrap();
+        let result = manager.cancel_all().await.unwrap();
         assert_eq!(result.cancelled, 2);
         assert!(result.errors.is_empty());
 
@@ -2018,9 +2115,31 @@ mod tests {
             &dir.path().join("work"),
             Arc::new(MockDownloader::slow_success(50)) as Arc<dyn Downloader>,
         );
-        let result = manager.cancel_all().unwrap();
+        let result = manager.cancel_all().await.unwrap();
         assert_eq!(result.cancelled, 0);
         assert!(result.errors.is_empty());
+    }
+
+    /// A9: the stop/delete surface must stay async end to end. Sync Tauri
+    /// commands run on the main thread, where per-job `taskkill` plus a
+    /// multi-GB work-dir wipe freezes the window; these are exactly the ops
+    /// cancel/pause/resume/delete dispatch. Compile-time pin: the `.await`s
+    /// below fail to build if any of them reverts to a blocking `fn`.
+    #[tokio::test]
+    async fn stop_and_delete_surface_stays_async() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::success(0.0)) as Arc<dyn Downloader>,
+        );
+        let _ = manager.cancel("ghost").await;
+        let _ = manager.pause("ghost").await;
+        let _ = manager.resume("ghost").await;
+        let _ = manager.delete("ghost", false).await;
+        let _ = manager.cancel_all().await;
+        let _ = manager.pause_all().await;
+        let _ = manager.resume_all().await;
     }
 
     /// run_bulk's accounting contract: an op error is collected as "id: error"
@@ -2032,8 +2151,8 @@ mod tests {
     /// never cancelled) or the counted gate is dropped (the Done row's no-op
     /// cancel inflates the count); why_new=bulk tests only cover happy paths;
     /// seam=none
-    #[test]
-    fn run_bulk_collects_op_errors_and_counts_only_transitions() {
+    #[tokio::test]
+    async fn run_bulk_collects_op_errors_and_counts_only_transitions() {
         let dir = tempfile::tempdir().unwrap();
         let (manager, _rx) = test_manager(
             dir.path(),
@@ -2055,13 +2174,16 @@ mod tests {
             .run_bulk(
                 |j| matches!(j.status, JobStatus::Pending | JobStatus::Done),
                 |m, id| {
-                    if id == "bad-1" {
-                        return Err(AppError::Message("boom".into()));
-                    }
-                    m.cancel(id)
+                    Box::pin(async move {
+                        if id == "bad-1" {
+                            return Err(AppError::Message("boom".into()));
+                        }
+                        m.cancel(id).await
+                    })
                 },
                 |s| *s == JobStatus::Failed,
             )
+            .await
             .unwrap();
 
         assert_eq!(errors, vec!["bad-1: boom".to_string()]);
@@ -2208,7 +2330,7 @@ mod tests {
             .unwrap();
 
         after_first.notified().await;
-        let cancelled = manager.cancel(&job.id).unwrap();
+        let cancelled = manager.cancel(&job.id).await.unwrap();
         assert_eq!(cancelled.status, JobStatus::Failed);
 
         let late = progress_sink
@@ -3078,6 +3200,74 @@ mod tests {
         assert!(err.contains("BV1active"), "unexpected: {err}");
     }
 
+    /// Park forever so the inserted row never leaves the active set between the
+    /// two enqueues' checks; the race assertions must not depend on runner
+    /// completion timing.
+    struct ParkForeverDownloader;
+
+    #[async_trait]
+    impl Downloader for ParkForeverDownloader {
+        async fn run(
+            &self,
+            _: &DownloadJob,
+            _: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            std::future::pending::<()>().await;
+            unreachable!("pending future never resolves")
+        }
+    }
+
+    /// Two concurrent enqueues for the same video page must not both pass the
+    /// active check and insert — two runners would write one output file. The
+    /// hook pins the interleaving (both checks before either insert) so the
+    /// regression reproduces deterministically instead of by luck.
+    #[test]
+    fn concurrent_enqueue_classified_admits_a_single_active_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let (manager, _rx) = test_manager(
+            &save_dir,
+            &dir.path().join("work"),
+            Arc::new(ParkForeverDownloader),
+        );
+
+        let _guard = enqueue_race_hook::arm("BV1race");
+        let spawn = |job_id: &str| {
+            let manager = manager.clone();
+            let mut job = sample_job(job_id);
+            job.video_id = "BV1race".into();
+            std::thread::spawn(move || manager.enqueue_classified(&mut job, false))
+        };
+        let first = spawn("job-race-a");
+        let second = spawn("job-race-b");
+        let results = [
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        ];
+
+        let enqueued = results
+            .iter()
+            .filter(|k| **k == EnqueueKind::Enqueued)
+            .count();
+        let duplicate = results
+            .iter()
+            .filter(|k| **k == EnqueueKind::DuplicateActive)
+            .count();
+        assert_eq!(
+            (enqueued, duplicate),
+            (1, 1),
+            "exactly one enqueue may win the active slot: {results:?}"
+        );
+        let rows = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|j| j.video_id == "BV1race")
+            .count();
+        assert_eq!(rows, 1, "check-then-insert must not insert two active rows");
+    }
+
     // ---- pause / resume ----
 
     fn manager_for(
@@ -3227,7 +3417,7 @@ mod tests {
         manager.enqueue(b, false).unwrap();
 
         sleep(Duration::from_millis(80)).await;
-        let paused = manager.pause("job-b").unwrap();
+        let paused = manager.pause("job-b").await.unwrap();
         assert_eq!(paused.status, JobStatus::Paused);
 
         wait_for_status(&manager, "job-a", JobStatus::Done).await;
@@ -3265,7 +3455,7 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(work.join("demo.f30064.mp4.part"), b"x").unwrap();
 
-        let paused = manager.pause("job-p").unwrap();
+        let paused = manager.pause("job-p").await.unwrap();
         assert_eq!(paused.status, JobStatus::Paused);
         assert_eq!(paused.progress, 0.42, "progress must survive a pause");
         assert!(paused.error.is_none(), "a pause is not a failure");
@@ -3349,9 +3539,9 @@ mod tests {
             j.progress = 0.37;
             db.update_job(&j).unwrap();
         }
-        manager.pause("job-r").unwrap();
+        manager.pause("job-r").await.unwrap();
 
-        let resumed = manager.resume("job-r").unwrap();
+        let resumed = manager.resume("job-r").await.unwrap();
         assert_eq!(resumed.status, JobStatus::Pending);
         assert_eq!(resumed.progress, 0.37, "resume must not reset progress");
         assert!(resumed.error.is_none());
@@ -3375,7 +3565,7 @@ mod tests {
         manager.db.lock().unwrap().insert_job(&done).unwrap();
         // A finished job is returned unchanged (silent no-op), not an error —
         // the UI renders the "job already ended" toast from the returned status.
-        let returned = manager.pause("job-done").unwrap();
+        let returned = manager.pause("job-done").await.unwrap();
         assert_eq!(returned.status, JobStatus::Done);
         let jobs = manager.list().unwrap();
         assert_eq!(
@@ -3388,7 +3578,7 @@ mod tests {
         failed.status = JobStatus::Failed;
         failed.error = Some("原始错误".into());
         manager.db.lock().unwrap().insert_job(&failed).unwrap();
-        let returned = manager.pause("job-f").unwrap();
+        let returned = manager.pause("job-f").await.unwrap();
         assert_eq!(returned.status, JobStatus::Failed);
         let jobs = manager.list().unwrap();
         let j = jobs.iter().find(|j| j.id == "job-f").unwrap();
@@ -3401,14 +3591,14 @@ mod tests {
         paused.video_id = "BV1p2".into();
         paused.status = JobStatus::Paused;
         manager.db.lock().unwrap().insert_job(&paused).unwrap();
-        let err = manager.pause("job-p2").unwrap_err().to_string();
+        let err = manager.pause("job-p2").await.unwrap_err().to_string();
         assert!(err.contains("只能暂停"), "unexpected: {err}");
 
-        let err = manager.resume("job-done").unwrap_err().to_string();
+        let err = manager.resume("job-done").await.unwrap_err().to_string();
         assert!(err.contains("只能继续"), "unexpected: {err}");
-        let err = manager.pause("ghost").unwrap_err().to_string();
+        let err = manager.pause("ghost").await.unwrap_err().to_string();
         assert!(err.contains("该任务已不存在"), "unexpected: {err}");
-        let err = manager.resume("ghost").unwrap_err().to_string();
+        let err = manager.resume("ghost").await.unwrap_err().to_string();
         assert!(err.contains("该任务已不存在"), "unexpected: {err}");
     }
 
@@ -3433,7 +3623,7 @@ mod tests {
             .unwrap()
             .insert("job-del".into(), StopKind::Pause);
 
-        manager.delete("job-del", false).unwrap();
+        manager.delete("job-del", false).await.unwrap();
         assert!(
             manager
                 .db
@@ -3470,7 +3660,7 @@ mod tests {
             manager.db.lock().unwrap().insert_job(&job).unwrap();
         }
 
-        let result = manager.cancel_all().unwrap();
+        let result = manager.cancel_all().await.unwrap();
         assert_eq!(result.cancelled, 3, "errors: {:?}", result.errors);
         assert!(result.errors.is_empty());
         for job in manager.list().unwrap() {
@@ -3531,8 +3721,8 @@ mod tests {
 
     /// A cancel that can never reach the runner Err dispatch — unknown id or an
     /// already-Done row — must retire its marker instead of leaking it.
-    #[test]
-    fn cancel_of_unknown_or_finished_job_leaves_no_stop_marker() {
+    #[tokio::test]
+    async fn cancel_of_unknown_or_finished_job_leaves_no_stop_marker() {
         let dir = tempfile::tempdir().unwrap();
         let flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
         let manager = manager_for(
@@ -3541,7 +3731,7 @@ mod tests {
             flags.clone(),
         );
 
-        assert!(manager.cancel("ghost").is_err());
+        assert!(manager.cancel("ghost").await.is_err());
         assert!(
             stop_kind_of(&flags, "ghost").is_none(),
             "a failed cancel must not leak its marker"
@@ -3550,7 +3740,7 @@ mod tests {
         let mut done = sample_job("job-done-cancel");
         done.status = JobStatus::Done;
         manager.db.lock().unwrap().insert_job(&done).unwrap();
-        manager.cancel("job-done-cancel").unwrap();
+        manager.cancel("job-done-cancel").await.unwrap();
         assert!(
             stop_kind_of(&flags, "job-done-cancel").is_none(),
             "a no-op cancel on a done row must not leak its marker"
@@ -3948,11 +4138,11 @@ mod tests {
             }
             sleep(Duration::from_millis(20)).await;
         }
-        manager.pause(job_id).unwrap();
+        manager.pause(job_id).await.unwrap();
 
         // Cross a wall-clock second so any re-bake at resume produces different bytes.
         sleep(Duration::from_millis(1100)).await;
-        manager.resume(job_id).unwrap();
+        manager.resume(job_id).await.unwrap();
         for _ in 0..200 {
             if seen.lock().unwrap().len() >= 2 {
                 break;
@@ -4011,7 +4201,7 @@ mod tests {
             manager.db.lock().unwrap().insert_job(&job).unwrap();
         }
 
-        let paused = manager.pause_all().unwrap();
+        let paused = manager.pause_all().await.unwrap();
         assert!(paused.errors.is_empty(), "errors: {:?}", paused.errors);
         assert_eq!(
             paused.paused, 1,
@@ -4023,7 +4213,7 @@ mod tests {
         assert_eq!(status_of(&jobs, "job-done"), JobStatus::Done);
         assert_eq!(status_of(&jobs, "job-failed"), JobStatus::Failed);
 
-        let resumed = manager.resume_all().unwrap();
+        let resumed = manager.resume_all().await.unwrap();
         assert!(resumed.errors.is_empty(), "errors: {:?}", resumed.errors);
         assert_eq!(resumed.resumed, 2, "both paused rows must resume");
         // Resumed rows re-enter the pipeline and complete.
@@ -4113,7 +4303,8 @@ mod tests {
         // interleaving is deterministic — no sleeps guessing at a race window.
         let children_guard = manager.children.lock().unwrap();
         let paused_manager = manager.clone();
-        let handle = std::thread::spawn(move || paused_manager.pause("job-race-done"));
+        let rt = tokio::runtime::Handle::current();
+        let handle = std::thread::spawn(move || rt.block_on(paused_manager.pause("job-race-done")));
         for _ in 0..400 {
             if stop_kind_of(&flags, "job-race-done") == Some(StopKind::Pause) {
                 break;
@@ -4178,7 +4369,7 @@ mod tests {
             .unwrap()
             .insert("job-rv".into(), StopKind::Cancel);
 
-        let resumed = manager.resume("job-rv").unwrap();
+        let resumed = manager.resume("job-rv").await.unwrap();
         assert_eq!(resumed.status, JobStatus::Pending);
         assert_eq!(
             stop_kind_of(&flags, "job-rv"),
@@ -4211,7 +4402,8 @@ mod tests {
         // terminal-race test), then delete the row out from under it.
         let children_guard = manager.children.lock().unwrap();
         let paused_manager = manager.clone();
-        let handle = std::thread::spawn(move || paused_manager.pause("job-vanish"));
+        let rt = tokio::runtime::Handle::current();
+        let handle = std::thread::spawn(move || rt.block_on(paused_manager.pause("job-vanish")));
         for _ in 0..400 {
             if stop_kind_of(&flags, "job-vanish") == Some(StopKind::Pause) {
                 break;
@@ -4457,6 +4649,9 @@ mod tests {
     /// runner's "用户暂停下载" lands on the resumed job and its tick overwrites
     /// the row; why_new=no test reaches the Err path of a runner a resume
     /// superseded; seam=none
+    // The gate guard held across the pause/resume awaits is the point: it keeps
+    // the runner parked in its synchronous stretch until the test releases it.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_superseded_runner_error_leaves_the_resumed_job_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -4554,11 +4749,11 @@ mod tests {
         // the row goes back to Pending, and the resumed runner queues behind the
         // permit the parked one still holds.
         assert_eq!(
-            manager.pause("job-stale-err").unwrap().status,
+            manager.pause("job-stale-err").await.unwrap().status,
             JobStatus::Paused
         );
         assert_eq!(
-            manager.resume("job-stale-err").unwrap().status,
+            manager.resume("job-stale-err").await.unwrap().status,
             JobStatus::Pending
         );
 
@@ -4735,6 +4930,9 @@ mod tests {
     /// fails_when=that check is missing — the stale runner writes Running and
     /// starts a second download; why_new=the existing pause-race tests park the
     /// *command* (a lock the test holds), never the runner itself; seam=none
+    // The settings guard held across the pause await is the point: it keeps the
+    // runner parked before its start section until the test releases it.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_superseded_runner_never_restarts_a_resumed_job() {
         let dir = tempfile::tempdir().unwrap();
@@ -4767,7 +4965,7 @@ mod tests {
         // The user pauses — marker raised, row Paused, runner token retired —
         // and then resumes.
         assert_eq!(
-            manager.pause("job-superseded").unwrap().status,
+            manager.pause("job-superseded").await.unwrap().status,
             JobStatus::Paused
         );
         {
@@ -4858,7 +5056,8 @@ mod tests {
         // children lock is what it takes next — then break the db under it.
         let children_guard = manager.children.lock().unwrap();
         let pausing = manager.clone();
-        let handle = std::thread::spawn(move || pausing.pause("job-pause-fail"));
+        let rt = tokio::runtime::Handle::current();
+        let handle = std::thread::spawn(move || rt.block_on(pausing.pause("job-pause-fail")));
         for _ in 0..400 {
             if stop_kind_of(&flags, "job-pause-fail") == Some(StopKind::Pause) {
                 break;
@@ -4903,7 +5102,8 @@ mod tests {
 
         let children_guard = manager.children.lock().unwrap();
         let cancelling = manager.clone();
-        let handle = std::thread::spawn(move || cancelling.cancel("job-cancel-fail"));
+        let rt = tokio::runtime::Handle::current();
+        let handle = std::thread::spawn(move || rt.block_on(cancelling.cancel("job-cancel-fail")));
         for _ in 0..400 {
             if stop_kind_of(&flags, "job-cancel-fail") == Some(StopKind::Cancel) {
                 break;
