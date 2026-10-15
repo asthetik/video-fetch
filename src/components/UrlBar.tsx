@@ -108,8 +108,7 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
           {error}
           <button
             type="button"
-            className="btn btn-sm"
-            style={{ marginLeft: "0.5rem" }}
+            className="btn btn-sm hint-action"
             onClick={handleRetry}
           >
             重试
