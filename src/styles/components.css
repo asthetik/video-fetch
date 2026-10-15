@@ -114,6 +114,12 @@
   color: var(--danger-ink);
 }
 
+/* Loading is its own tone, not the logged-out muted: the in-flight label
+   takes the AA-safe muted ink so it never blends into "未登录". */
+.auth-label.loading {
+  color: var(--muted-ink);
+}
+
 .btn {
   padding: 0.45rem 0.85rem;
   border: 1px solid var(--hairline);

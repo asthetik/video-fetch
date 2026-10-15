@@ -39,13 +39,23 @@ test("authStatusLabel shows a neutral placeholder while the read is in flight", 
 
 test("authLabelTone colors the error state as an error, not muted", () => {
   assert.equal(authLabelTone({ status: "error", message: "x" }), "error");
-  assert.equal(authLabelTone({ status: "loading" }), "muted");
   assert.equal(authLabelTone({ status: "ready", data: "logged_in" }), "ok");
   assert.equal(
     authLabelTone({ status: "ready", data: "possibly_expired" }),
     "warn",
   );
   assert.equal(authLabelTone({ status: "ready", data: "logged_out" }), "muted");
+});
+
+// The loading tone has its own class so .auth-label.loading can style the
+// in-flight read as its own state; reusing "muted" makes it momentarily
+// indistinguishable from "未登录".
+test("authLabelTone marks the in-flight read as loading, not muted", () => {
+  assert.equal(authLabelTone({ status: "loading" }), "loading");
+  assert.notEqual(
+    authLabelTone({ status: "loading" }),
+    authLabelTone({ status: "ready", data: "logged_out" }),
+  );
 });
 
 test("authChipView turns a failed read into a retry affordance", () => {
@@ -61,6 +71,17 @@ test("authChipView disables the chip while the read is in flight", () => {
   const view = authChipView({ status: "loading" });
   assert.equal(view.disabled, true);
   assert.notEqual(view.label, "登录");
+});
+
+// The in-flight chip gets its own stateClass so .auth-chip.loading can give it
+// a dedicated look; a generic class leaves the muted dot reading as "未登录".
+test("authChipView marks the in-flight read with a loading class", () => {
+  const view = authChipView({ status: "loading" });
+  assert.equal(view.stateClass, "loading");
+  assert.notEqual(
+    view.stateClass,
+    authChipView({ status: "ready", data: "logged_out" }).stateClass,
+  );
 });
 
 test("authChipView maps known statuses to login/logout actions", () => {
