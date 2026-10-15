@@ -147,6 +147,14 @@
   background: var(--warn);
 }
 
+.auth-chip.error {
+  color: var(--danger-ink);
+}
+
+.auth-chip.error .auth-chip-dot {
+  background: var(--danger-ink);
+}
+
 .app-main {
   flex: 1;
   max-width: 640px;
