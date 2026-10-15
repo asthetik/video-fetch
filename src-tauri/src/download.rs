@@ -1203,10 +1203,10 @@ impl DownloadManager {
 
     /// fail_job is the last write standing between a task and its Failed row;
     /// when even that fails the job would vanish from the log's perspective,
-    /// so leave a debug trace instead of a bare swallow.
+    /// so leave an error trace instead of a bare swallow.
     fn try_fail_job(&self, job_id: &str, token: u64, error: &str) {
         if let Err(e) = self.fail_job(job_id, token, error.to_string(), false) {
-            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+            tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
 
@@ -1216,15 +1216,15 @@ impl DownloadManager {
     /// between would leave a Paused row whose `.part` files are already gone.
     fn try_fail_download(&self, job_id: &str, token: u64, error: &str) {
         if let Err(e) = self.fail_job(job_id, token, error.to_string(), true) {
-            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+            tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
 
     /// Same contract as try_fail_job: cancel persists the Cancelled status, so
-    /// a swallowed failure must still leave a debug trace.
+    /// a swallowed failure must still leave an error trace.
     fn try_cancel(&self, job_id: &str) {
         if let Err(e) = self.cancel(job_id) {
-            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+            tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
     }
 
@@ -1241,7 +1241,7 @@ impl DownloadManager {
         drop_fragments: bool,
     ) -> AppResult<()> {
         let job = {
-            let db = self.db.lock().map_err(lock_err)?;
+            let db = lock_db(&self.db);
             if let Some(disposition) = self.stop_disposition_for(job_id, token) {
                 tracing::debug!(
                     target: "core",
@@ -1332,10 +1332,8 @@ impl DownloadManager {
             .map(|m| m.len())
             .or(done.file_size);
         done.error = None;
-        if let Ok(db) = self.db.lock()
-            && let Err(e) = db.update_job(&done)
-        {
-            tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+        if let Err(e) = lock_db(&self.db).update_job(&done) {
+            tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
         // Terminal writes retire the job's stop flag: a pause that raced this
         // completion otherwise leaves a marker no later path would ever clear.
@@ -1416,6 +1414,16 @@ fn new_job_id() -> String {
 
 fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
     AppError::Message("lock poisoned".into())
+}
+
+/// Acquire the job db with poison recovery, matching the `lock_tokens`
+/// precedent: a panic while holding the lock must not freeze every later
+/// terminal write behind "lock poisoned" — the poisoned guard still holds a
+/// sound `Db` (SQLite owns row-level consistency), and the panic/error paths'
+/// Failed/Done writes are the last thing standing between a stopped runner
+/// and a row stuck at Running.
+fn lock_db(db: &Mutex<Db>) -> std::sync::MutexGuard<'_, Db> {
+    db.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
@@ -4535,6 +4543,39 @@ mod tests {
         assert!(manager.db.lock().is_err(), "the db lock must be poisoned");
     }
 
+    /// Capture tracing output emitted on this thread while `f` runs, so a test
+    /// can pin the level of a swallowed write failure without a global
+    /// subscriber (which would race the parallel test suite).
+    fn capture_logs(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+    }
+
     /// A pause that fails after raising its marker must retract it: the leaked
     /// marker parks the live runner at its next checkpoint (ReturnSilently)
     /// while the row stays Running with nothing to resume it — and the UI's
@@ -4630,6 +4671,150 @@ mod tests {
             stop_kind_of(&flags, "job-cancel-fail").is_none(),
             "a failed cancel must not leave its marker behind"
         );
+    }
+
+    /// A panic while holding the db lock poisons it for good: every later
+    /// `lock()` reports poisoned until restart. The terminal Failed write is
+    /// the panic path's last stand against a row frozen at Running, so it must
+    /// recover the guard instead of erroring out behind `map_err(lock_err)`.
+    ///
+    /// Value: protects=poison recovery (lock_db) on fail_job's terminal write;
+    /// fails_when=a poisoned db lock also freezes the Failed row —
+    /// try_fail_job's write cannot re-acquire the lock and the swallow hides
+    /// it; why_new=the panic wrapper from the stderr-tail fix assumes the
+    /// Failed write lands, but a panic under the db lock poisoned it and no
+    /// recovery existed; seam=none
+    #[test]
+    fn a_poisoned_db_lock_still_lands_the_failed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let mut job = sample_job("job-poison-fail");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+        let token = manager.mint_runner_token("job-poison-fail");
+
+        poison_db(&manager);
+        manager.try_fail_job("job-poison-fail", token, "boom");
+
+        let row = manager
+            .db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_job("job-poison-fail")
+            .unwrap();
+        assert_eq!(
+            row.status,
+            JobStatus::Failed,
+            "the terminal write must land through the poisoned lock"
+        );
+        assert_eq!(row.error.as_deref(), Some("boom"));
+    }
+
+    /// Same rule for the terminal Done write in complete_relocation: its
+    /// `if let Ok(db) = self.db.lock()` swallowed a poisoned lock silently and
+    /// returned Ok, delivering the file while the row stayed Running forever.
+    ///
+    /// Value: protects=poison recovery (lock_db) on complete_relocation's Done
+    /// write; fails_when=a poisoned db lock strands the row at Running after
+    /// the product already moved; why_new=the write was guarded by `if let
+    /// Ok`, so poison looked like success; seam=none
+    #[test]
+    fn a_poisoned_db_lock_still_lands_the_done_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let (manager, _rx) = test_manager(
+            &save_dir,
+            &work_root,
+            Arc::new(MockDownloader::success(0.0)),
+        );
+        let mut job = sample_job("job-poison-done");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+        let token = manager.mint_runner_token("job-poison-done");
+        let work = fsutil::work_dir_for(&work_root, "job-poison-done");
+        std::fs::create_dir_all(&work).unwrap();
+        let product = work.join("demo.mp4");
+        std::fs::write(&product, b"video").unwrap();
+
+        poison_db(&manager);
+        manager
+            .complete_relocation("job-poison-done", token, &job, &product, &save_dir)
+            .unwrap();
+
+        let row = manager
+            .db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_job("job-poison-done")
+            .unwrap();
+        assert_eq!(
+            row.status,
+            JobStatus::Done,
+            "the Done write must land through the poisoned lock"
+        );
+        assert!(save_dir.join("demo.mp4").is_file());
+    }
+
+    /// The try_* wrappers swallow a failed status write to keep the caller
+    /// alive, but that swallow is exactly what hid the frozen-row failures: a
+    /// write that cannot land must be visible at error level, not debug.
+    ///
+    /// Value: protects=error-level visibility of swallowed terminal-write
+    /// failures (try_fail_job and siblings); fails_when=the trace is demoted
+    /// to debug (invisible in release logs) or dropped; why_new=the swallow
+    /// existed with only a debug trace, so the failure that freezes rows never
+    /// surfaced; seam=none
+    #[test]
+    fn terminal_write_failures_log_at_error_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        // Each try_* path needs a real owned job whose row then vanishes:
+        // fail_job's ownership check stands down for unknown jobs without
+        // erroring, and only a missing row makes the write path fail.
+        // (try_cancel → cancel() has no ownership check; a missing row is
+        // enough to make its write fail.)
+        let mut tokens = Vec::new();
+        for id in ["job-log-fail", "job-log-fail-dl", "job-log-cancel"] {
+            let mut job = sample_job(id);
+            job.status = JobStatus::Running;
+            manager.db.lock().unwrap().insert_job(&job).unwrap();
+            if id != "job-log-cancel" {
+                tokens.push(manager.mint_runner_token(id));
+            }
+            manager.db.lock().unwrap().delete_job(id).unwrap();
+        }
+
+        let text = capture_logs(|| {
+            manager.try_fail_job("job-log-fail", tokens[0], "boom");
+            manager.try_fail_download("job-log-fail-dl", tokens[1], "boom");
+            manager.try_cancel("job-log-cancel");
+        });
+
+        let lines: Vec<&str> = text.lines().collect();
+        for id in ["job-log-fail", "job-log-fail-dl", "job-log-cancel"] {
+            assert!(
+                lines.iter().any(|l| l.starts_with("ERROR")
+                    && l.contains("状态写入失败")
+                    && l.contains(id)),
+                "missing error-level trace for {id}:\n{text}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.starts_with("DEBUG")
+                    && l.contains("状态写入失败")
+                    && l.contains(id)),
+                "swallowed write failure must not log at debug:\n{text}"
+            );
+        }
     }
 
     /// Value: protects=the startup keep-list wiring — paused (and failed) rows
