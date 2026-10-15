@@ -347,6 +347,10 @@ impl Drop for RunnerPermit<'_> {
 pub struct DownloadManager {
     db: Arc<Mutex<Db>>,
     settings: Arc<Mutex<AppSettings>>,
+    /// Session-only save dir standing in for `settings.save_dir` when the
+    /// configured one is unusable (e.g. a drive unmounted at startup). Never
+    /// persisted; `None` means the configured value is in effect.
+    save_dir_override: Arc<Mutex<Option<PathBuf>>>,
     downloader: Arc<dyn Downloader>,
     progress: Arc<dyn ProgressEmitter>,
     children: DownloadChildren,
@@ -406,6 +410,7 @@ impl DownloadManager {
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             settings: Arc::new(Mutex::new(settings)),
+            save_dir_override: Arc::new(Mutex::new(None)),
             downloader,
             progress,
             children,
@@ -457,7 +462,7 @@ impl DownloadManager {
         save_as_copy: bool,
     ) -> AppResult<EnqueueKind> {
         let settings = self.settings.lock().map_err(lock_err)?.clone();
-        let save_dir = PathBuf::from(&settings.save_dir);
+        let save_dir = self.effective_save_dir()?;
 
         // Skip-existing lookup is read-only and runs outside the enqueue critical
         // section below; only the decision moves inside it. Returning
@@ -561,8 +566,7 @@ impl DownloadManager {
         uploader: &str,
         template: &str,
     ) -> AppResult<DownloadConflict> {
-        let settings = self.settings.lock().map_err(lock_err)?.clone();
-        let save_dir = PathBuf::from(&settings.save_dir);
+        let save_dir = self.effective_save_dir()?;
         let db = self.db.lock().map_err(lock_err)?;
         let mut downloading = false;
         let mut exists = false;
@@ -978,7 +982,15 @@ impl DownloadManager {
 
     pub fn update_settings(&self, settings: AppSettings) -> AppResult<()> {
         let new_limit = settings.concurrency.max(1) as usize;
-        *self.settings.lock().map_err(lock_err)? = settings;
+        {
+            let mut current = self.settings.lock().map_err(lock_err)?;
+            // Picking a different save dir mid-session is an explicit user
+            // choice: honor it and drop any startup fallback standing in.
+            if current.save_dir != settings.save_dir {
+                *self.save_dir_override.lock().map_err(lock_err)? = None;
+            }
+            *current = settings;
+        }
         self.resize_concurrency(new_limit);
         Ok(())
     }
@@ -1138,7 +1150,7 @@ impl DownloadManager {
             return;
         }
 
-        let save_dir = match self.save_dir() {
+        let save_dir = match self.effective_save_dir() {
             Ok(dir) => dir,
             Err(e) => {
                 self.try_fail_job(&job_id, token, &e.to_string());
@@ -1512,10 +1524,22 @@ impl DownloadManager {
         });
     }
 
-    fn save_dir(&self) -> AppResult<PathBuf> {
+    /// Directory downloads write to: the session override while one is set,
+    /// else the configured `save_dir`.
+    pub fn effective_save_dir(&self) -> AppResult<PathBuf> {
+        if let Some(dir) = self.save_dir_override.lock().map_err(lock_err)?.clone() {
+            return Ok(dir);
+        }
         Ok(PathBuf::from(
             &self.settings.lock().map_err(lock_err)?.save_dir,
         ))
+    }
+
+    /// Stand-in save dir for this session only (startup fallback), or `None`
+    /// to go back to the configured value. Never written to settings.
+    pub fn set_save_dir_override(&self, dir: Option<PathBuf>) -> AppResult<()> {
+        *self.save_dir_override.lock().map_err(lock_err)? = dir;
+        Ok(())
     }
 }
 

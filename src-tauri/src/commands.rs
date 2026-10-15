@@ -66,6 +66,9 @@ pub struct AppState {
     pub auth: AuthManager,
     pub downloads: DownloadManager,
     pub settings: std::sync::Mutex<AppSettings>,
+    /// Startup notice for the UI: set when this session's downloads were
+    /// redirected because the configured save dir was unusable.
+    pub save_dir_notice: Option<String>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
     /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
@@ -294,6 +297,58 @@ pub fn default_save_dir(app: &AppHandle, app_dir: &Path) -> PathBuf {
     app.path()
         .download_dir()
         .unwrap_or_else(|_| fallback_save_dir(app_dir))
+}
+
+/// Surfaced in the UI when this session's downloads are redirected because the
+/// configured save directory could not be used.
+pub(crate) const SAVE_DIR_UNAVAILABLE_NOTICE: &str = "保存目录不可用";
+
+/// Where this session's downloads write, and any startup notice about it.
+pub(crate) struct SaveDirPlan {
+    /// Directory downloads use this session (may differ from
+    /// `settings.save_dir` when the configured one is unusable).
+    pub effective: PathBuf,
+    /// UI notice to show when `effective` is not the configured directory.
+    pub notice: Option<String>,
+}
+
+/// Fill in a first-run `save_dir` and choose the directory this session's
+/// downloads write to.
+pub(crate) fn apply_save_dir(
+    settings: &mut AppSettings,
+    default_dir: PathBuf,
+    app_dir: &Path,
+) -> AppResult<SaveDirPlan> {
+    let intended = if settings.save_dir.is_empty() {
+        // First run: record the default, but only when it survives a UTF-8
+        // round-trip. settings.json stores a String; a lossy write would pin a
+        // U+FFFD path the real directory can never match, and every later
+        // startup would keep falling back from that melt.
+        if let Ok(utf8) = default_dir.clone().into_os_string().into_string() {
+            settings.save_dir = utf8;
+            let _ = settings_store::save_settings(app_dir, settings);
+        }
+        default_dir
+    } else {
+        PathBuf::from(&settings.save_dir)
+    };
+
+    if std::fs::create_dir_all(&intended).is_ok() {
+        return Ok(SaveDirPlan {
+            effective: intended,
+            notice: None,
+        });
+    }
+    // A directory that cannot be created right now (external drive unmounted,
+    // network share gone) must not rewrite the configured save_dir: the
+    // fallback is for this session only, and the UI is told where downloads
+    // actually went.
+    let fallback = fallback_save_dir(app_dir);
+    std::fs::create_dir_all(&fallback)?;
+    Ok(SaveDirPlan {
+        effective: fallback,
+        notice: Some(SAVE_DIR_UNAVAILABLE_NOTICE.to_string()),
+    })
 }
 
 fn rematerialize_cookies(state: &AppState) -> AppResult<Option<PathBuf>> {
@@ -776,14 +831,16 @@ pub async fn enqueue_download(
 
     let save_as_copy = args.save_as_copy;
     let uploader = args.uploader;
-    let save_dir = Path::new(&settings.save_dir);
+    // Conflict naming must look where this session actually writes: the
+    // fallback dir while the configured save_dir is unavailable.
+    let save_dir = state.downloads.effective_save_dir()?;
     let page_count = args.page_indexes.len();
 
     let mut last = None;
     for page_index in args.page_indexes {
         let page_template = if save_as_copy {
             naming::next_available_output_template(
-                save_dir,
+                &save_dir,
                 &template,
                 &title,
                 &args.video_id,
@@ -1104,6 +1161,14 @@ pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
         .map_err(|_| AppError::Message("settings lock poisoned".into()))?
         .clone();
     Ok(settings)
+}
+
+/// Startup notice about the save directory: set when the configured one was
+/// unusable and this session's downloads were redirected to the fallback.
+/// `None` when nothing needs saying. Shown once by the UI at startup.
+#[tauri::command]
+pub fn get_save_dir_notice(state: State<'_, AppState>) -> Option<String> {
+    state.save_dir_notice.clone()
 }
 
 #[tauri::command]
@@ -1501,9 +1566,22 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
     }
     let mut roots: Vec<PathBuf> = Vec::new();
     roots.extend(resolve(state.activity_log.logs_dir(), "日志目录"));
-    match state.settings.lock() {
-        Ok(settings) => roots.extend(resolve(Path::new(&settings.save_dir), "保存目录")),
-        Err(_) => tracing::warn!("open_path: settings 锁中毒，保存目录不计入可打开范围"),
+    let configured = match state.settings.lock() {
+        Ok(settings) => Some(PathBuf::from(&settings.save_dir)),
+        Err(_) => {
+            tracing::warn!("open_path: settings 锁中毒，保存目录不计入可打开范围");
+            None
+        }
+    };
+    if let Some(dir) = &configured {
+        roots.extend(resolve(dir, "保存目录"));
+    }
+    // While a startup fallback is active, this session's downloads land in it
+    // even though the configured save_dir is unchanged; both stay openable.
+    if let Ok(effective) = state.downloads.effective_save_dir()
+        && Some(&effective) != configured.as_ref()
+    {
+        roots.extend(resolve(&effective, "本次会话的保存目录"));
     }
     let jobs = state.downloads.list().unwrap_or_else(|e| {
         tracing::warn!("open_path: 读取任务列表失败（{e}），历史任务的目录不计入");
@@ -1703,16 +1781,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let cookies_file = cache_dir.join("cookies.txt");
 
     let mut settings = settings_store::load_settings(&app_dir)?;
-    if settings.save_dir.is_empty() {
-        settings.save_dir = default_save_dir(app, &app_dir).to_string_lossy().into();
-        let _ = settings_store::save_settings(&app_dir, &settings);
-    }
-    if std::fs::create_dir_all(&settings.save_dir).is_err() {
-        let fb = fallback_save_dir(&app_dir);
-        std::fs::create_dir_all(&fb)?;
-        settings.save_dir = fb.to_string_lossy().into();
-        let _ = settings_store::save_settings(&app_dir, &settings);
-    }
+    let save_dir_plan = apply_save_dir(&mut settings, default_save_dir(app, &app_dir), &app_dir)?;
 
     let logs_dir = app_dir.join("logs");
     let activity_log = match crate::activity_log::install(
@@ -1752,6 +1821,16 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         progress,
         work_root.clone(),
     )?;
+    // The startup fallback lives only in this session's download path; the
+    // configured save_dir in settings stays as the user wrote it.
+    if save_dir_plan.effective != Path::new(&settings.save_dir) {
+        downloads.set_save_dir_override(Some(save_dir_plan.effective.clone()))?;
+        tracing::warn!(
+            target: "core",
+            "app: 保存目录不可用，本次下载改存 {}",
+            save_dir_plan.effective.display()
+        );
+    }
 
     let active_ids = work_dir_keep_ids(&downloads.list()?);
     let removed_orphans = cleanup_orphan_work_dirs(&work_root, &active_ids);
@@ -1777,6 +1856,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         auth,
         downloads,
         settings: std::sync::Mutex::new(settings),
+        save_dir_notice: save_dir_plan.notice,
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
         http_client,
@@ -2239,6 +2319,107 @@ mod window_theme_tests {
     }
 }
 
+#[cfg(test)]
+mod save_dir_tests {
+    use super::*;
+
+    fn app_dir_under(root: &Path) -> PathBuf {
+        let app_dir = root.join("app-data");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        app_dir
+    }
+
+    /// A path whose parent is a regular file: `create_dir_all` always fails,
+    /// the way a temporarily unmounted external/network drive does.
+    fn never_creatable(root: &Path) -> PathBuf {
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        blocker.join("save")
+    }
+
+    /// A transiently unavailable save_dir must not rewrite the persisted
+    /// config: if it did, a drive unmounted at startup would silently move
+    /// every future download into app data until the user noticed.
+    #[test]
+    fn transient_save_dir_failure_does_not_rewrite_or_persist_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_dir = app_dir_under(dir.path());
+        let configured = never_creatable(dir.path());
+        let mut settings = AppSettings {
+            save_dir: configured.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        // A real user config on disk: the fallback must not replace it there.
+        settings_store::save_settings(&app_dir, &settings).unwrap();
+
+        let plan = apply_save_dir(&mut settings, dir.path().join("Downloads"), &app_dir)
+            .expect("session fallback must still start the app");
+
+        // The configured value survives in memory and on disk...
+        assert_eq!(settings.save_dir, configured.to_string_lossy());
+        let on_disk = settings_store::load_settings(&app_dir).expect("settings must load");
+        assert_eq!(on_disk.save_dir, configured.to_string_lossy());
+        // ...while this session downloads into the app-data fallback.
+        assert_eq!(plan.effective, app_dir.join("downloads"));
+        assert!(plan.effective.is_dir());
+        assert_eq!(plan.notice.as_deref(), Some(SAVE_DIR_UNAVAILABLE_NOTICE));
+    }
+
+    /// A path segment valid in the OS's native encoding but not in UTF-8:
+    /// raw bytes on Unix, an unpaired UTF-16 surrogate on Windows. `to_string_lossy`
+    /// melts either into U+FFFD.
+    fn non_utf8_name() -> std::ffi::OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"Downloads-\xff".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'D'), 0xD800])
+        }
+    }
+
+    /// `to_string_lossy` melts a non-UTF-8 Downloads path into a U+FFFD string
+    /// that never matches the real directory; persisting that melt (or the
+    /// fallback it then collides with) makes the wrong path sticky across
+    /// startups.
+    #[test]
+    fn non_utf8_default_save_dir_is_not_melted_into_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_dir = app_dir_under(dir.path());
+        let raw = dir.path().join(non_utf8_name());
+        // Whether the fs accepts the name is platform-dependent (APFS
+        // requires valid UTF-8); the bug is about what gets recorded and used
+        // either way.
+        let raw_usable = std::fs::create_dir_all(&raw).is_ok();
+        // First run: no configured save_dir, the default must not be melted.
+        let mut settings = AppSettings::default();
+
+        let plan =
+            apply_save_dir(&mut settings, raw.clone(), &app_dir).expect("startup must not fail");
+
+        // Nothing melted is recorded, in memory or on disk.
+        assert!(settings.save_dir.is_empty());
+        let on_disk = settings_store::load_settings(&app_dir).expect("settings must load");
+        assert!(on_disk.save_dir.is_empty());
+        assert!(!on_disk.save_dir.contains('\u{FFFD}'));
+        // The session uses the real path bytes (when the fs accepts them) or
+        // the app-data fallback — never a melted U+FFFD copy.
+        let melted = PathBuf::from(raw.to_string_lossy().into_owned());
+        assert_ne!(
+            plan.effective, melted,
+            "save path must not be melted into U+FFFD"
+        );
+        if raw_usable {
+            assert_eq!(plan.effective, raw);
+        } else {
+            assert_eq!(plan.effective, app_dir.join("downloads"));
+        }
+    }
+}
+
 /// Restart entry points (resume/retry) must rematerialize `cookies.txt` before
 /// a runner spawns yt-dlp: a session whose startup materialization failed (AV
 /// lock / ACL) would otherwise run the whole download logged-out while the UI
@@ -2334,6 +2515,7 @@ mod restart_cookie_tests {
         .unwrap();
         let state = AppState {
             openable_roots_cache: Default::default(),
+            save_dir_notice: None,
             app_dir: root.path().to_path_buf(),
             auth: AuthManager::new(cache_dir),
             downloads,
