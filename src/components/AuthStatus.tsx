@@ -1,12 +1,7 @@
 import { useAuthActions } from "../hooks/useAuthActions";
+import { authLabelTone, authStatusLabel } from "../lib/authUi";
 import { LogoutConfirmDialog } from "./LogoutConfirmDialog";
 import type { AuthStatus as AuthStatusType } from "../types";
-
-const STATUS_LABEL: Record<AuthStatusType, string> = {
-  logged_out: "未登录",
-  logged_in: "已登录",
-  possibly_expired: "登录可能过期",
-};
 
 interface AuthStatusProps {
   onStatusChange?: (status: AuthStatusType) => void;
@@ -15,29 +10,33 @@ interface AuthStatusProps {
 /** Settings auth row: state label, login/logout buttons, inline hint line. */
 export function AuthStatus({ onStatusChange }: AuthStatusProps) {
   const {
-    status,
+    authState,
     loggingIn,
     loggingOut,
     confirmLogout,
     hint,
     login,
     logout,
+    retryStatus,
     requestLogout,
     cancelLogout,
   } = useAuthActions(onStatusChange);
 
-  const labelClass =
-    status === "logged_in"
-      ? "ok"
-      : status === "possibly_expired"
-        ? "warn"
-        : "muted";
-
   return (
     <div className="auth-status-wrap">
       <div className="auth-status">
-        <span className={`auth-label ${labelClass}`}>{STATUS_LABEL[status]}</span>
-        {status === "logged_out" ? (
+        <span className={`auth-label ${authLabelTone(authState)}`}>
+          {authStatusLabel(authState)}
+        </span>
+        {authState.status === "error" ? (
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => void retryStatus()}
+          >
+            重试
+          </button>
+        ) : authState.status === "ready" && authState.data === "logged_out" ? (
           <button
             type="button"
             className="btn btn-sm"
@@ -46,7 +45,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
           >
             {loggingIn ? "登录中…" : "登录"}
           </button>
-        ) : (
+        ) : authState.status === "ready" ? (
           <button
             type="button"
             className="btn btn-sm"
@@ -55,7 +54,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
           >
             {loggingOut ? "登出中…" : "登出"}
           </button>
-        )}
+        ) : null}
       </div>
       {hint && <p className="auth-hint">{hint}</p>}
 

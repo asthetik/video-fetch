@@ -52,7 +52,11 @@ export function HomePage({
   authRef.current = authStatus;
 
   const handleResolve = useCallback(
-    async (nextUrl: string, force = false, clearExisting = !force) => {
+    async (
+      nextUrl: string,
+      force = false,
+      clearExisting = !force,
+    ): Promise<boolean> => {
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
       setLoading(true);
@@ -63,14 +67,14 @@ export function HomePage({
       try {
         const kind = await api.detectUrl(nextUrl);
         if (requestIdRef.current !== requestId) {
-          return;
+          return false;
         }
         if (kind.kind === "space") {
           setSpace({ mid: kind.mid });
           setMeta(null);
           setResolveStatus((s) => reduceResolveStatus(s, { type: "settled_idle" }));
           setLoading(false);
-          return;
+          return true;
         }
         if (kind.kind === "invalid_space") {
           setSpace(null);
@@ -82,12 +86,12 @@ export function HomePage({
             }),
           );
           setLoading(false);
-          return;
+          return false;
         }
         setSpace(null);
         const result = await api.resolveUrl(nextUrl, force, requestId);
         if (requestIdRef.current !== requestId) {
-          return;
+          return false;
         }
         setMeta(result);
         if (shouldDispatchComplete(result)) {
@@ -96,9 +100,10 @@ export function HomePage({
         // Only a meta with no formats of either kind is left to the
         // complete / formats_failed events; anything carrying video or audio
         // formats is complete as returned (cache hits emit no events at all).
+        return true;
       } catch (err) {
         if (requestIdRef.current !== requestId) {
-          return;
+          return false;
         }
         // Unconditional: a rejected resolve always ends the formats spinner and
         // folds the message into formatsError (in-card retry), even when a card
@@ -112,6 +117,12 @@ export function HomePage({
             hasCard: metaRef.current !== null,
           }),
         );
+        if (metaRef.current) {
+          // A result is still on screen (partial meta or a kept card): the URL
+          // itself resolved, so the caller may treat this as a success.
+          return true;
+        }
+        return false;
       } finally {
         if (requestIdRef.current === requestId) {
           setLoading(false);
@@ -211,7 +222,7 @@ export function HomePage({
         loading={loading}
         error={resolveStatus.error}
         onUrlChange={setUrl}
-        onResolve={(next) => void handleResolve(next)}
+        onResolve={(next) => handleResolve(next)}
       />
 
       {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
