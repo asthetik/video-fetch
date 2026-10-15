@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -949,6 +948,11 @@ async fn fetch_formats_for_url(
 pub struct DownloadRequest<'a> {
     pub cfg: &'a YtDlpConfig,
     pub job_id: &'a str,
+    /// The run's registration token (the manager's runner token): the only
+    /// identity under which this run may take or kill its child, and the
+    /// handle a panic cleanup outside this function uses to kill the same
+    /// registration. Minted once per run, so it never names two children.
+    pub token: u64,
     pub url: &'a str,
     pub format_id: &'a str,
     pub audio_format: Option<&'a str>,
@@ -1008,6 +1012,7 @@ pub async fn download(
     let DownloadRequest {
         cfg,
         job_id,
+        token,
         url,
         format_id,
         audio_format,
@@ -1116,7 +1121,7 @@ pub async fn download(
         .take()
         .ok_or_else(|| AppError::Message("yt-dlp stderr unavailable".into()))?;
 
-    let token = register_child(children, job_id, child)?;
+    register_child(children, job_id, token, child)?;
 
     // A stop may have raced before the child was registered; honor it now.
     if let Some(kind) = stop_kind_of(stop_flags, job_id) {
@@ -1249,6 +1254,8 @@ pub async fn download(
 /// predecessor left behind; only the token tells whose process is whose, and a
 /// superseded run that wakes up in a synchronous stretch (where `abort()` cannot
 /// reach it) must not adopt — and then kill on drop — its successor's child.
+/// The token is the run's runner token, so a cleanup that runs outside this
+/// module (the manager's panic path) can kill the same registration by it.
 pub struct RegisteredChild {
     pub(crate) token: u64,
     pub(crate) child: tokio::process::Child,
@@ -1256,27 +1263,27 @@ pub struct RegisteredChild {
 
 pub type DownloadChildren = Arc<Mutex<HashMap<String, RegisteredChild>>>;
 
-/// Registration tokens only have to be unique within the process.
-static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(0);
-
-/// Register the child this run just spawned under a token only this run knows.
-fn register_child(
+/// Register the child this run just spawned under the run's own token. The
+/// caller supplies the token (its runner token) so a cleanup that runs where
+/// this future cannot — the manager's panic path — can kill exactly this
+/// registration and nothing a successor registered under the same job id.
+pub(crate) fn register_child(
     children: &DownloadChildren,
     job_id: &str,
+    token: u64,
     child: tokio::process::Child,
-) -> AppResult<u64> {
-    let token = NEXT_REGISTRATION.fetch_add(1, Ordering::SeqCst) + 1;
+) -> AppResult<()> {
     children
         .lock()
         .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?
         .insert(job_id.to_string(), RegisteredChild { token, child });
-    Ok(token)
+    Ok(())
 }
 
 /// Kill and unregister the child this run registered — same ownership rule as
 /// `take_child`, so a run that reacts to a stop cannot kill a process its
 /// successor registered meanwhile.
-fn kill_registered_child(children: &DownloadChildren, job_id: &str, token: u64) -> bool {
+pub(crate) fn kill_registered_child(children: &DownloadChildren, job_id: &str, token: u64) -> bool {
     let Ok(mut guard) = children.lock() else {
         return false;
     };
@@ -2031,7 +2038,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             let downloader = Arc::clone(&downloader);
             async move {
                 use crate::download::Downloader as _;
-                downloader.run(&job, Box::new(|_| {})).await
+                downloader.run(&job, 1, Box::new(|_| {})).await
             }
         });
 
@@ -2099,6 +2106,10 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     async fn a_run_only_touches_the_child_it_registered() {
         let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
         const JOB_ID: &str = "job-registry";
+        // Two run tokens, one identity per run — the shape `mint_runner_token`
+        // produces for real runners (a process-wide sequence, never reused).
+        const STALE: u64 = 1;
+        const OWNER: u64 = 2;
         let spawn = || {
             let mut cmd = tokio::process::Command::new("sleep");
             cmd.arg("30");
@@ -2107,16 +2118,15 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             cmd.spawn().unwrap()
         };
 
-        let stale = register_child(&children, JOB_ID, spawn()).unwrap();
-        let owner = register_child(&children, JOB_ID, spawn()).unwrap();
-        assert_ne!(stale, owner, "every registration gets its own token");
+        register_child(&children, JOB_ID, STALE, spawn()).unwrap();
+        register_child(&children, JOB_ID, OWNER, spawn()).unwrap();
 
-        let err = take_child(&children, JOB_ID, stale)
+        let err = take_child(&children, JOB_ID, STALE)
             .unwrap_err()
             .to_string();
         assert!(err.contains("yt-dlp 进程已结束"), "unexpected: {err}");
         assert!(
-            !kill_registered_child(&children, JOB_ID, stale),
+            !kill_registered_child(&children, JOB_ID, STALE),
             "a superseded run must not kill the registered child"
         );
         assert!(
@@ -2124,7 +2134,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             "the successor's entry must survive both attempts"
         );
 
-        let mut mine = take_child(&children, JOB_ID, owner).unwrap();
+        let mut mine = take_child(&children, JOB_ID, OWNER).unwrap();
         let _ = mine.kill().await;
         assert!(children.lock().unwrap().is_empty());
     }
@@ -2205,7 +2215,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
 
         let err = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
             use crate::download::Downloader as _;
-            downloader.run(&job, Box::new(|_| {})).await
+            downloader.run(&job, 1, Box::new(|_| {})).await
         })
         .await
         .expect("the download must not hang on a panicking tail trim")
