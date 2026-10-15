@@ -150,9 +150,11 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   );
   const groups = useMemo(() => groupHistoryByDate(finished), [finished]);
   const showActive = activeJobs.length > 0 && statusFilter === "all";
-  const cancelCopy = pendingCancel
-    ? cancelConfirmFor(pendingCancel.status)
-    : null;
+  // History never lists paused rows (see historyVisibleJobs), so a cancellable
+  // row here is always pending or running and both share one confirm copy.
+  // Take it at a fixed status instead of dispatching on states this page
+  // cannot show; the paused-only copy stays in the lib for the download queue.
+  const cancelCopy = pendingCancel ? cancelConfirmFor("pending") : null;
 
   async function handleOpenFile(job: DownloadJob) {
     const path = job.output_path;
@@ -267,7 +269,9 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         </div>
         <span className={`queue-badge ${job.status}`}>{STATUS_LABEL[job.status]}</span>
         <div className="history-row-actions">
-          {active && (
+          {/* Cancel is wired for pending/running only: history never lists
+              paused rows, and finished rows have nothing to cancel. */}
+          {(job.status === "pending" || job.status === "running") && (
             <IconButton
               icon={X}
               label="取消"
