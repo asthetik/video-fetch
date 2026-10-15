@@ -2188,28 +2188,17 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(children.lock().unwrap().is_empty());
     }
 
-    /// The stderr tail is capped with a raw byte index (`split_off(len -
-    /// 4096)`), and `String::split_off` panics when that index lands mid
-    /// multi-byte character. yt-dlp WARNING/ERROR lines carry Chinese titles,
-    /// so a tail over 8KB whose cut misses a char boundary kills the runner
-    /// task: the job silently freezes at "downloading" with no auto-recovery.
-    /// Every line here is `ERROR: ` + 100 × `测` (308 bytes with the newline),
-    /// so 27 accumulated lines are 8316 bytes and the next trim cuts at byte
-    /// 4220 — offset 216 inside a line, the middle of a `测` — which panics
-    /// unless the cut is walked to a character boundary.
-    ///
-    /// Value: protects=the boundary-safe stderr tail cap; fails_when=the cap
-    /// cuts at a raw byte index again (the download panics and the caller
-    /// joins a panicked task instead of getting an error); why_new=no test
-    /// drove ytdlp::download with stderr large enough to trigger the tail
-    /// trim; seam=none
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_huge_multibyte_stderr_tail_fails_instead_of_panicking() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let payload_path = dir.path().join("stderr.txt");
+    /// Shared body of the huge-multibyte-stderr tail regression. `dir` holds
+    /// the payload file `stderr.txt`; `script` is the platform fake yt-dlp,
+    /// which must stream that file to stderr and exit 1. The payload and the
+    /// assertions live only here so the unix and Windows variants pin the same
+    /// contract byte-for-byte.
+    #[cfg(any(unix, windows))]
+    async fn assert_huge_multibyte_stderr_tail_fails_instead_of_panicking(
+        dir: &std::path::Path,
+        script: &std::path::Path,
+    ) {
+        let payload_path = dir.join("stderr.txt");
         let mut payload = String::new();
         for _ in 0..40 {
             payload.push_str("ERROR: ");
@@ -2218,17 +2207,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         }
         std::fs::write(&payload_path, &payload).unwrap();
 
-        let script = dir.path().join("fake-yt-dlp");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\n\
-             cat \"$(dirname \"$0\")/stderr.txt\" >&2\n\
-             exit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let work_root = dir.path().join("work");
+        let work_root = dir.join("work");
         let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
 
@@ -2254,7 +2233,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         };
         let downloader = crate::download::YtDlpDownloader::new(
             YtDlpConfig {
-                yt_dlp_path: script,
+                yt_dlp_path: script.to_path_buf(),
                 ffmpeg_path: None,
             },
             work_root,
@@ -2277,6 +2256,67 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             err.contains("ERROR: 测测测"),
             "the trimmed tail lost the newest stderr lines: {err}"
         );
+    }
+
+    /// The stderr tail is capped with a raw byte index (`split_off(len -
+    /// 4096)`), and `String::split_off` panics when that index lands mid
+    /// multi-byte character. yt-dlp WARNING/ERROR lines carry Chinese titles,
+    /// so a tail over 8KB whose cut misses a char boundary kills the runner
+    /// task: the job silently freezes at "downloading" with no auto-recovery.
+    /// Every line here is `ERROR: ` + 100 × `测` (308 bytes with the newline),
+    /// so 27 accumulated lines are 8316 bytes and the next trim cuts at byte
+    /// 4220 — offset 216 inside a line, the middle of a `测` — which panics
+    /// unless the cut is walked to a character boundary.
+    ///
+    /// Value: protects=the boundary-safe stderr tail cap; fails_when=the cap
+    /// cuts at a raw byte index again (the download panics and the caller
+    /// joins a panicked task instead of getting an error); why_new=no test
+    /// drove ytdlp::download with stderr large enough to trigger the tail
+    /// trim; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_huge_multibyte_stderr_tail_fails_instead_of_panicking() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-yt-dlp");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             cat \"$(dirname \"$0\")/stderr.txt\" >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_huge_multibyte_stderr_tail_fails_instead_of_panicking(dir.path(), &script).await;
+    }
+
+    /// Windows variant of the huge-multibyte-stderr tail regression: the same
+    /// payload and the same assertions (shared helper), driven by a `.bat`
+    /// fake yt-dlp so Windows CI — a primary platform — executes this e2e
+    /// path instead of compiling the unix-only shell script test away. The
+    /// fake `type`s the payload file to stderr and exits 1, mirroring the sh
+    /// launcher byte-for-byte on stderr.
+    ///
+    /// Value: protects=the boundary-safe stderr tail cap on Windows CI;
+    /// fails_when=the cap cuts at a raw byte index again (both variants share
+    /// trim_stderr_tail); why_new=the sh-only fake meant Windows never ran
+    /// the regression; seam=none
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_huge_multibyte_stderr_tail_fails_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-yt-dlp.bat");
+        std::fs::write(
+            &script,
+            "@echo off\r\n\
+             type \"%~dp0stderr.txt\" 1>&2\r\n\
+             exit /b 1\r\n",
+        )
+        .unwrap();
+
+        assert_huge_multibyte_stderr_tail_fails_instead_of_panicking(dir.path(), &script).await;
     }
 
     /// A9: the kill path must be awaitable — the Windows `taskkill` spawn waits
