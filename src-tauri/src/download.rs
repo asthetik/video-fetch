@@ -81,9 +81,15 @@ impl ProgressEmitter for ChannelProgressEmitter {
 
 #[async_trait]
 pub trait Downloader: Send + Sync {
+    /// `token` is the runner token of the run asking for the download. A
+    /// downloader that spawns a child process registers it under this token
+    /// (see `ytdlp::register_child`), so every cleanup — including the panic
+    /// path's, which runs where this future cannot — can kill exactly this
+    /// run's registration and never a successor's.
     async fn run(
         &self,
         job: &DownloadJob,
+        token: u64,
         on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
     ) -> Result<PathBuf, String>;
 }
@@ -213,6 +219,7 @@ impl Downloader for YtDlpDownloader {
     async fn run(
         &self,
         job: &DownloadJob,
+        token: u64,
         on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
     ) -> Result<PathBuf, String> {
         let work = fsutil::work_dir_for(&self.work_root, &job.id);
@@ -230,6 +237,7 @@ impl Downloader for YtDlpDownloader {
             ytdlp::DownloadRequest {
                 cfg: &self.cfg,
                 job_id: &job.id,
+                token,
                 url: &job.url,
                 format_id: &job.format_id,
                 audio_format: job.audio_format.as_deref(),
@@ -1076,6 +1084,18 @@ impl DownloadManager {
                 .await
                 .is_err();
             if panicked {
+                // The registered yt-dlp tree is owned by `children`, not by
+                // this future: dropping the panicked future would leave the
+                // process tree alive and writing the work dir a retry then
+                // reuses. Kill this run's own registration before the row is
+                // rewritten, covering both disposition branches below: a stop
+                // command's own kill may already have landed (the token guard
+                // makes this a harmless no-op), but a pause whose kill raced
+                // ahead of the runner's registration leaves this run's
+                // process alive under a marker only this call can reap. The
+                // token check keeps a child a superseding run registered out
+                // of reach, same as every other registry touch.
+                ytdlp::kill_registered_child(&this.children, &job_id, token).await;
                 // Same stop dispatch as a downloader error: a pause/cancel or
                 // a superseding command's marker wins over the Failed write
                 // (fail_job re-checks under the db lock).
@@ -1262,7 +1282,7 @@ impl DownloadManager {
             return;
         }
 
-        let result = self.downloader.run(&running, on_progress).await;
+        let result = self.downloader.run(&running, token, on_progress).await;
 
         if let Some(d) = self.stop_disposition_for(&job_id, token) {
             self.apply_stop_disposition(&job_id, d).await;
@@ -1751,6 +1771,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
+            _token: u64,
             on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             if self.delay_ms > 0 {
@@ -1801,6 +1822,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
+            _token: u64,
             _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             let work = fsutil::work_dir_for(&self.work_root, &job.id);
@@ -2112,6 +2134,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 panic!("simulated runner panic");
@@ -2136,6 +2159,292 @@ mod tests {
         assert_eq!(
             failed.error.as_deref(),
             Some("下载任务异常中止（内部错误），请重试")
+        );
+    }
+
+    /// Poll `kill(pid, 0)` until the process is gone. A killed child lingers
+    /// as a zombie until a reaper collects it, so death is observed by reap,
+    /// not by the signal, and the probe needs a bounded wait.
+    #[cfg(unix)]
+    async fn process_dead_within(pid: u32, limit: Duration) -> bool {
+        let mut waited = Duration::ZERO;
+        while waited < limit {
+            if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                return true;
+            }
+            sleep(Duration::from_millis(30)).await;
+            waited += Duration::from_millis(30);
+        }
+        false
+    }
+
+    /// A runner panic must kill the yt-dlp process tree the run registered,
+    /// not just fix up the row. The `children` registry — not the runner
+    /// future — owns the `Child`, so dropping the panicked future never
+    /// touches it: the row goes Failed while the process tree keeps writing
+    /// the work dir, and a retry then spawns a second writer into the same
+    /// `.part`. The panic path has to kill the run's own registration through
+    /// the process-group kill (a PyInstaller second stage / ffmpeg goes with
+    /// it) before that cascade can start.
+    ///
+    /// Value: protects=the registered-child kill in spawn_runner's panic
+    /// path; fails_when=the kill is removed (the `sleep` stand-in outlives the
+    /// Failed row and the death poll times out); why_new=the panic path
+    /// handled the row and task handle but never the process registry;
+    /// seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runner_panic_kills_the_registered_child() {
+        struct OrphanPanicDownloader {
+            children: DownloadChildren,
+            pid: Arc<Mutex<Option<u32>>>,
+        }
+
+        #[async_trait]
+        impl Downloader for OrphanPanicDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                token: u64,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                // A real process registered the way production registers
+                // yt-dlp: own process group (so the tree kill has a group to
+                // signal) and kill_on_drop as the drop-time backstop.
+                let mut cmd = tokio::process::Command::new("sleep");
+                cmd.arg("30");
+                cmd.process_group(0);
+                cmd.kill_on_drop(true);
+                let child = cmd.spawn().map_err(|e| e.to_string())?;
+                if let Ok(mut slot) = self.pid.lock() {
+                    *slot = child.id();
+                }
+                crate::ytdlp::register_child(&self.children, &job.id, token, child)
+                    .map_err(|e| e.to_string())?;
+                panic!("simulated runner panic");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let pid = Arc::new(Mutex::new(None));
+        let downloader = Arc::new(OrphanPanicDownloader {
+            children: Arc::clone(&children),
+            pid: Arc::clone(&pid),
+        }) as Arc<dyn Downloader>;
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let manager = DownloadManager::new(
+            db,
+            test_settings(dir.path()),
+            downloader,
+            Arc::new(emitter),
+            Arc::clone(&children),
+            dir.path().join("work"),
+        )
+        .unwrap();
+
+        let job = manager
+            .enqueue(sample_job("job-panic-orphan"), false)
+            .unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Failed).await;
+
+        let pid = pid
+            .lock()
+            .unwrap()
+            .expect("the stand-in process was spawned");
+        assert!(
+            process_dead_within(pid, Duration::from_secs(3)).await,
+            "the registered child survived the runner panic"
+        );
+        assert!(
+            children.lock().unwrap().is_empty(),
+            "the panic path must unregister the child it killed"
+        );
+    }
+
+    /// The panic path's kill is token-guarded like every other registry
+    /// touch: when the panicked run has already been superseded, the entry
+    /// under its job id is the successor's live download and must survive the
+    /// cleanup. An untokened kill here would tear down a healthy retried or
+    /// resumed download — the same rule `take_child` already enforces.
+    ///
+    /// Value: protects=the token check on the panic path's registered-child
+    /// kill; fails_when=the kill is untokened (kill_download-style: the
+    /// successor stand-in dies and the liveness probe fails); why_new=the
+    /// panic path is new and had no ownership test; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runner_panic_leaves_a_successors_child_running() {
+        /// Registered under a token that is never the panicking run's: the
+        /// registry shape of "a superseding run registered meanwhile".
+        const SUCCESSOR_TOKEN: u64 = 77;
+
+        struct SuccessorRegPanicDownloader {
+            children: DownloadChildren,
+            pid: Arc<Mutex<Option<u32>>>,
+        }
+
+        #[async_trait]
+        impl Downloader for SuccessorRegPanicDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                _token: u64,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                let mut cmd = tokio::process::Command::new("sleep");
+                cmd.arg("30");
+                cmd.process_group(0);
+                cmd.kill_on_drop(true);
+                let child = cmd.spawn().map_err(|e| e.to_string())?;
+                if let Ok(mut slot) = self.pid.lock() {
+                    *slot = child.id();
+                }
+                self.children.lock().map_err(|e| e.to_string())?.insert(
+                    job.id.clone(),
+                    crate::ytdlp::RegisteredChild {
+                        token: SUCCESSOR_TOKEN,
+                        child,
+                    },
+                );
+                panic!("simulated runner panic");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let pid = Arc::new(Mutex::new(None));
+        let downloader = Arc::new(SuccessorRegPanicDownloader {
+            children: Arc::clone(&children),
+            pid: Arc::clone(&pid),
+        }) as Arc<dyn Downloader>;
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let manager = DownloadManager::new(
+            db,
+            test_settings(dir.path()),
+            downloader,
+            Arc::new(emitter),
+            Arc::clone(&children),
+            dir.path().join("work"),
+        )
+        .unwrap();
+
+        let job = manager
+            .enqueue(sample_job("job-panic-successor"), false)
+            .unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Failed).await;
+
+        let pid = pid
+            .lock()
+            .unwrap()
+            .expect("the stand-in process was spawned");
+        sleep(Duration::from_millis(200)).await;
+        assert!(
+            unsafe { libc::kill(pid as i32, 0) } == 0,
+            "the panic path killed a child its successor registered"
+        );
+        assert!(
+            children.lock().unwrap().contains_key(&job.id),
+            "the successor's registration must survive the panic cleanup"
+        );
+        assert!(kill_download(&children, &job.id).await);
+    }
+
+    /// The panic kill runs in the stop-disposition branches too, not only the
+    /// plain Failed one: a pause whose kill_download raced ahead of the
+    /// runner's registration (the stop marker is visible before the child
+    /// exists) leaves the run's own process alive under a Pause marker. The
+    /// panic path must still kill it — that is the half of the cascade the
+    /// None branch never sees.
+    ///
+    /// Value: protects=the kill covering the stop-marker branch of the panic
+    /// path; fails_when=the kill is moved into the plain Failed branch only
+    /// (the stand-in survives and the death poll times out); why_new=the
+    /// Some(disposition) branch had no process-cleanup test; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runner_panic_kills_the_child_under_a_stop_marker() {
+        struct StopMarkedPanicDownloader {
+            children: DownloadChildren,
+            stop_flags: StopFlags,
+            pid: Arc<Mutex<Option<u32>>>,
+        }
+
+        #[async_trait]
+        impl Downloader for StopMarkedPanicDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                token: u64,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                let mut cmd = tokio::process::Command::new("sleep");
+                cmd.arg("30");
+                cmd.process_group(0);
+                cmd.kill_on_drop(true);
+                let child = cmd.spawn().map_err(|e| e.to_string())?;
+                if let Ok(mut slot) = self.pid.lock() {
+                    *slot = child.id();
+                }
+                crate::ytdlp::register_child(&self.children, &job.id, token, child)
+                    .map_err(|e| e.to_string())?;
+                // The stop marker lands after the registration — the race a
+                // pause's early kill_download cannot cover.
+                self.stop_flags
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .insert(job.id.clone(), StopKind::Pause);
+                panic!("simulated runner panic");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
+        let pid = Arc::new(Mutex::new(None));
+        let downloader = Arc::new(StopMarkedPanicDownloader {
+            children: Arc::clone(&children),
+            stop_flags: Arc::clone(&stop_flags),
+            pid: Arc::clone(&pid),
+        }) as Arc<dyn Downloader>;
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let manager = DownloadManager::new_with_stop_flags(
+            db,
+            test_settings(dir.path()),
+            downloader,
+            Arc::new(emitter),
+            Arc::clone(&children),
+            dir.path().join("work"),
+            Arc::clone(&stop_flags),
+        )
+        .unwrap();
+
+        let job = manager
+            .enqueue(sample_job("job-panic-marker"), false)
+            .unwrap();
+        // The stop branch writes no Failed row (a pause must not be painted as
+        // a failure); the registered pid is the proof the downloader ran.
+        let pid = {
+            let mut seen = None;
+            for _ in 0..100 {
+                seen = *pid.lock().unwrap();
+                if seen.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+            seen.expect("the stand-in process was spawned")
+        };
+        assert!(
+            process_dead_within(pid, Duration::from_secs(3)).await,
+            "the registered child survived the panic path under a stop marker"
+        );
+        assert!(
+            !children.lock().unwrap().contains_key(&job.id),
+            "the panic path must unregister the child it killed"
         );
     }
 
@@ -2403,6 +2712,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
+                _token: u64,
                 on_progress: ProgressCallback,
             ) -> Result<PathBuf, String> {
                 on_progress(ProgressUpdate {
@@ -2724,6 +3034,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 self.called.store(true, Ordering::SeqCst);
@@ -2782,6 +3093,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 self.called.store(true, Ordering::SeqCst);
@@ -2839,6 +3151,7 @@ mod tests {
                 async fn run(
                     &self,
                     _job: &DownloadJob,
+                    _token: u64,
                     _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
                 ) -> Result<PathBuf, String> {
                     if self
@@ -2980,6 +3293,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
+            _token: u64,
             _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             {
@@ -3262,6 +3576,7 @@ mod tests {
             async fn run(
                 &self,
                 _: &DownloadJob,
+                _: u64,
                 _: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 Err("should not run".into())
@@ -3309,6 +3624,7 @@ mod tests {
         async fn run(
             &self,
             _: &DownloadJob,
+            _token: u64,
             _: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             std::future::pending::<()>().await;
@@ -3421,6 +3737,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
+            _token: u64,
             _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             let nth_run = match self.runs.lock() {
@@ -3470,6 +3787,7 @@ mod tests {
         async fn run(
             &self,
             job: &DownloadJob,
+            _token: u64,
             _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
             if let Ok(mut runs) = self.runs.lock() {
@@ -4056,6 +4374,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 self.called.store(true, Ordering::SeqCst);
@@ -4139,6 +4458,7 @@ mod tests {
             async fn run(
                 &self,
                 _job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 self.called.store(true, Ordering::SeqCst);
@@ -4207,6 +4527,7 @@ mod tests {
             async fn run(
                 &self,
                 job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 if let Ok(mut seen) = self.seen.lock() {
@@ -4771,6 +5092,7 @@ mod tests {
             async fn run(
                 &self,
                 job: &DownloadJob,
+                _token: u64,
                 on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
@@ -4982,6 +5304,7 @@ mod tests {
             async fn run(
                 &self,
                 job: &DownloadJob,
+                _token: u64,
                 _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
             ) -> Result<PathBuf, String> {
                 let work = fsutil::work_dir_for(&self.work_root, &job.id);
