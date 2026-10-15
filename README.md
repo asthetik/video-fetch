@@ -68,7 +68,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 
 ### 校验安装包（可选）
 
-每个 Release 都附带一份 `SHA256SUMS`，列着全部安装包的 SHA-256 摘要。安装前可以先核对（示例文件名换成你下载的那一份）：
+自 v0.4.3 起，每个 Release 都附带一份 `SHA256SUMS`，列着全部安装包的 SHA-256 摘要。安装前可以先核对（示例文件名换成你下载的那一份）：
 
 ```bash
 # macOS

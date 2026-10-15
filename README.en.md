@@ -68,7 +68,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 
 ### Verify the installer (optional)
 
-Every release ships a `SHA256SUMS` file listing the SHA-256 digest of every installer. You can check what you downloaded before installing (swap in the file name you actually downloaded):
+As of v0.4.3, every release ships a `SHA256SUMS` file listing the SHA-256 digest of every installer. You can check what you downloaded before installing (swap in the file name you actually downloaded):
 
 ```bash
 # macOS
