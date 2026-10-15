@@ -167,6 +167,13 @@ pub fn bake_local_datetime_tokens(template: &str, when: &DateTime<Local>) -> Str
 fn expand_datetime_tokens(template: &str, when: &DateTime<Local>) -> String {
     let mut out = String::with_capacity(template.len());
     let bytes = template.as_bytes();
+    // Non-token text is copied as verbatim spans (`template[copied..i]`), never
+    // re-encoded byte by byte: `u8 as char` mapped each UTF-8 byte to a Latin-1
+    // codepoint (视 → è§†), so a second bake stacked another layer and
+    // pause/resume renamed the file. `%` cannot appear inside a multi-byte
+    // UTF-8 sequence, so scanning bytes for it never lands mid-character, and
+    // every slice below starts and ends on a char boundary.
+    let mut copied = 0;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
@@ -181,19 +188,23 @@ fn expand_datetime_tokens(template: &str, when: &DateTime<Local>) -> String {
                     field,
                     "timestamp" | "release_timestamp" | "epoch" | "upload_date"
                 ) {
+                    out.push_str(&template[copied..i]);
                     out.push_str(&when.format(fmt).to_string());
                     i = token_end;
+                    copied = i;
                     continue;
                 }
             } else if inner == "upload_date" || inner == "timestamp" {
+                out.push_str(&template[copied..i]);
                 out.push_str(&when.format("%Y-%m-%dT%H-%M-%S").to_string());
                 i = token_end;
+                copied = i;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
         i += 1;
     }
+    out.push_str(&template[copied..]);
     out
 }
 
@@ -579,5 +590,66 @@ mod tests {
             baked,
             format!("{}_%(title)s.%(ext)s", when.format("%Y-%m-%dT%H-%M-%S"))
         );
+    }
+
+    #[test]
+    fn bake_keeps_non_ascii_template_text_intact() {
+        let when = sample_local();
+        let template = "【%(uploader)s】%(title)s.%(ext)s";
+        assert_eq!(
+            bake_local_datetime_tokens(template, &when),
+            template,
+            "token-free bake must be the identity, not a byte-wise re-encode"
+        );
+    }
+
+    #[test]
+    fn bake_is_idempotent_for_non_ascii_templates() {
+        let when = sample_local();
+        let template = "【%(uploader)s】%(timestamp>%Y-%m-%dT%H-%M-%S)s_%(title)s.%(ext)s";
+        let once = bake_local_datetime_tokens(template, &when);
+        let twice = bake_local_datetime_tokens(&once, &when);
+        assert_eq!(
+            once, twice,
+            "bake(bake(x)) must equal bake(x) for CJK templates"
+        );
+        assert!(
+            once.starts_with(&format!(
+                "【%(uploader)s】{}",
+                when.format("%Y-%m-%dT%H-%M-%S")
+            )),
+            "CJK text must survive baking verbatim: {once}"
+        );
+
+        // Pin the old byte-wise expansion: `out.push(bytes[i] as char)` mapped
+        // each UTF-8 byte to a Latin-1 codepoint (视 → è§†), so a second pass
+        // stacked another layer (Ã¨Â§Â†) and pause/resume renamed the file.
+        // Replay that pass on the same input so the regression stays visible:
+        // the old pass must disagree with itself, while the real bake above
+        // agrees with itself.
+        fn byte_wise_latin1(s: &str) -> String {
+            s.bytes().map(|b| b as char).collect()
+        }
+        let mojibake_once = byte_wise_latin1(template);
+        let mojibake_twice = byte_wise_latin1(&mojibake_once);
+        assert_ne!(
+            mojibake_once, mojibake_twice,
+            "the old byte-wise expansion must stay non-idempotent to pin the regression"
+        );
+    }
+
+    #[test]
+    fn preview_keeps_non_ascii_template_text_intact() {
+        let when = sample_local();
+        let name = preview_filename_at(
+            "【%(uploader)s】%(title)s.%(ext)s",
+            "标题",
+            "BV1xx",
+            "UP主",
+            "mp4",
+            1,
+            &when,
+        );
+        assert_eq!(name, "【UP主】标题.mp4");
     }
 }
