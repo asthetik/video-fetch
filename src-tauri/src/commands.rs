@@ -860,6 +860,7 @@ pub async fn enqueue_download(
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title: title.clone(),
+            uploader: uploader.clone(),
             output_template: page_template,
             status: JobStatus::Pending,
             progress: 0.0,
@@ -989,6 +990,9 @@ pub async fn space_enqueue_batch(
             format_id: args.format_id.clone(),
             audio_format: audio_format.clone(),
             title,
+            // Batch enqueue has no per-video resolve, so no uploader name is at
+            // hand; leave it empty and predict the path the same way below.
+            uploader: String::new(),
             output_template: settings.filename_template.clone(),
             status: JobStatus::Pending,
             progress: 0.0,
@@ -2558,6 +2562,7 @@ mod restart_cookie_tests {
 
     fn probe_job(id: &str, video_id: &str) -> DownloadJob {
         DownloadJob {
+            uploader: String::new(),
             id: id.into(),
             url: format!("https://www.bilibili.com/video/{video_id}"),
             video_id: video_id.into(),

@@ -476,15 +476,18 @@ impl DownloadManager {
                 .map_err(lock_err)?
                 .find_done_output_paths(&job.video_id, job.page_index)?;
             let audio_format = job.audio_format.as_deref();
+            // Same prediction function and same inputs as check_conflict: the
+            // uploader included, or a `%(uploader)s` template would make the
+            // pre-check and this dedup disagree on the output path.
             existing_output = recorded_output_exists(&recorded, audio_format)
                 || local_output_exists(
                     &save_dir,
                     &job.output_template,
                     &job.title,
                     &job.video_id,
-                    "",
+                    &job.uploader,
                     job.page_index,
-                    naming::conflict_exts(audio_format),
+                    audio_format,
                 );
         }
 
@@ -588,7 +591,7 @@ impl DownloadManager {
                     video_id,
                     uploader,
                     page_index,
-                    naming::conflict_exts(audio_format),
+                    audio_format,
                 )
             {
                 file_exists = true;
@@ -1678,6 +1681,9 @@ fn recorded_output_exists(recorded_paths: &[String], audio_format: Option<&str>)
 }
 
 /// True when the predicted output name already exists on disk for this media kind.
+/// One prediction for both the enqueue dedup and check_conflict — same template,
+/// title, uploader and page inputs, so the pre-check and the enqueue check can
+/// never disagree about where the product will land.
 fn local_output_exists(
     save_dir: &Path,
     template: &str,
@@ -1685,9 +1691,9 @@ fn local_output_exists(
     video_id: &str,
     uploader: &str,
     page_index: u32,
-    exts: &[&str],
+    audio_format: Option<&str>,
 ) -> bool {
-    for ext in exts {
+    for ext in naming::conflict_exts(audio_format) {
         let relative =
             naming::preview_filename(template, title, video_id, uploader, ext, page_index);
         if save_dir.join(&relative).is_file() {
@@ -1877,6 +1883,7 @@ mod tests {
             format_id: "80".into(),
             audio_format: None,
             title: "demo".into(),
+            uploader: String::new(),
             output_template: "%(title)s [%(id)s].%(ext)s".into(),
             status: JobStatus::Pending,
             progress: 0.0,
@@ -2821,6 +2828,124 @@ mod tests {
             .enqueue(sample_job("job-dedupe"), false)
             .unwrap_err();
         assert!(err.to_string().contains("已跳过"));
+    }
+
+    /// Regression: the enqueue dedup must predict the output path with the same
+    /// uploader the conflict pre-check uses. With a `%(uploader)s` template the
+    /// old hardcoded empty uploader predicted a path that never exists, so
+    /// "skip existing files" silently re-downloaded the whole video.
+    #[tokio::test]
+    async fn enqueue_dedup_predicts_the_uploader_path_check_conflict_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = "%(uploader)s/%(title)s [%(id)s].%(ext)s";
+        // The file the built-in "UP主 / 标题" template produced on a previous run.
+        std::fs::create_dir_all(dir.path().join("up")).unwrap();
+        std::fs::write(dir.path().join("up/demo [BV1xx].mp4"), b"x").unwrap();
+
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::success(100.0)),
+        );
+
+        // The pre-check sees the file …
+        let conflict = manager
+            .check_conflict("BV1xx", &[1], "80", None, "demo", "up", template)
+            .unwrap();
+        assert!(
+            conflict.file_exists,
+            "pre-check must see the uploader-named file"
+        );
+
+        // … so the enqueue dedup must skip it instead of starting a fresh download.
+        let mut job = sample_job("job-up-dedupe");
+        job.output_template = template.into();
+        job.uploader = "up".into();
+        let kind = manager.enqueue_classified(&mut job, false).unwrap();
+        assert_eq!(kind, EnqueueKind::AlreadyExists);
+    }
+
+    /// Regression: when the enqueue dedup and the pre-check disagree on the
+    /// predicted path, yt-dlp writes the real uploader name while the dedup
+    /// predicted the empty one — skip-existing waves the download through and
+    /// relocation then dies on "搬迁到保存目录失败: destination exists".
+    #[tokio::test]
+    async fn uploader_template_skip_existing_must_not_collide_at_relocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        let template = "%(uploader)s/%(title)s [%(id)s].%(ext)s";
+        // A finished copy already sits at the path the real uploader expands to.
+        std::fs::create_dir_all(dir.path().join("up")).unwrap();
+        std::fs::write(dir.path().join("up/demo [BV1xx].mp4"), b"x").unwrap();
+
+        // Mimics yt-dlp: expands job.output_template with the real uploader and
+        // drops the product inside the work dir.
+        struct UploaderTemplateMockDownloader {
+            work_root: PathBuf,
+            uploader: &'static str,
+        }
+        #[async_trait]
+        impl Downloader for UploaderTemplateMockDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                _token: u64,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                let work = fsutil::work_dir_for(&self.work_root, &job.id);
+                std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+                let rel = naming::preview_filename(
+                    &job.output_template,
+                    &job.title,
+                    &job.video_id,
+                    self.uploader,
+                    "mp4",
+                    job.page_index,
+                );
+                let path = work.join(rel);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&path, b"video").map_err(|e| e.to_string())?;
+                Ok(path)
+            }
+        }
+
+        let downloader = Arc::new(UploaderTemplateMockDownloader {
+            work_root: work_root.clone(),
+            uploader: "up",
+        });
+        let (manager, _rx) = test_manager(dir.path(), &work_root, downloader);
+
+        let mut job = sample_job("job-up-reloc");
+        job.output_template = template.into();
+        job.uploader = "up".into();
+        match manager.enqueue(job, false) {
+            Err(e) => {
+                assert!(e.to_string().contains("已跳过"), "unexpected error: {e}");
+            }
+            Ok(enqueued) => {
+                // Old behavior: the download runs and dies at relocation. If a
+                // job does get enqueued it must still finish cleanly — never on
+                // a relocation collision with the pre-existing copy.
+                let mut terminal = None;
+                for _ in 0..100 {
+                    let listed = manager.list().unwrap();
+                    let cur = listed.into_iter().find(|x| x.id == enqueued.id).unwrap();
+                    if matches!(cur.status, JobStatus::Done | JobStatus::Failed) {
+                        terminal = Some(cur);
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+                let terminal = terminal.expect("job must reach a terminal state");
+                assert_eq!(
+                    (terminal.status.clone(), terminal.error.clone()),
+                    (JobStatus::Done, None),
+                    "skip-existing must stop the copy before relocation collides"
+                );
+            }
+        }
     }
 
     #[tokio::test]

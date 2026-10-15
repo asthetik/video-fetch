@@ -2054,6 +2054,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
 
         const JOB_ID: &str = "job-tree-kill";
         let job = crate::models::DownloadJob {
+            uploader: String::new(),
             id: JOB_ID.into(),
             url: "https://www.bilibili.com/video/BV1xx".into(),
             video_id: "BV1xx".into(),
@@ -2233,6 +2234,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
 
         const JOB_ID: &str = "job-stderr-tail";
         let job = crate::models::DownloadJob {
+            uploader: String::new(),
             id: JOB_ID.into(),
             url: "https://www.bilibili.com/video/BV1xx".into(),
             video_id: "BV1xx".into(),
