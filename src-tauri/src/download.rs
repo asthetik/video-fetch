@@ -3785,7 +3785,10 @@ mod tests {
     /// branches; fails_when=a cycle strands a permit or lets capacity drift
     /// from the pool; why_new=the existing tests observe the books only
     /// through whole download runs, never the drop's two branches in isolation
-    /// across repeated cycles
+    /// across repeated cycles; scope=quiescent bookkeeping only — this test
+    /// passes on the pre-fix tree, so the return-before-lock-release race it
+    /// accompanies rides on review, not on this pin (the interleaving window
+    /// is a few instructions wide and was verified unpinnable)
     #[test]
     fn permit_books_balance_across_acquire_return_cycles() {
         let dir = tempfile::tempdir().unwrap();
