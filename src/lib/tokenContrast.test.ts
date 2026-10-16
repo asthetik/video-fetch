@@ -235,6 +235,7 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   [shellCss, ".auth-chip.error", ["color: var(--danger-ink)"]],
   [shellCss, ".auth-chip.error .auth-chip-dot", ["background: var(--danger-ink)"]],
   [pagesCss, ".history-row-err", ["color: var(--danger-ink)"]],
+  [pagesCss, ".settings-input::placeholder", ["color: var(--muted-ink)"]],
   [pagesCss, ".about-card-hint", ["color: var(--muted-ink)"]],
   [pagesCss, ".about-card-label", ["color: var(--muted-ink)"]],
   [pagesCss, ".about-card:hover .about-card-hint", ["color: var(--accent-ink)"]],

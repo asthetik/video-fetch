@@ -5459,7 +5459,7 @@ mod tests {
     /// A stop flag landing after the runner's early checks but before it
     /// writes Running must not leave a zombie Running row (no process, no
     /// runner) behind. The runner is parked on the settings lock `run_job`
-    /// takes for save_dir(); the pause flag is set in that window, with the
+    /// takes for effective_save_dir(); the pause flag is set in that window, with the
     /// row deliberately still Pending — exactly the interleaving pause()'s
     /// flag-set / DB-write split can produce.
     ///
@@ -6151,7 +6151,7 @@ mod tests {
 
     /// The reported pause/resume race. `abort()` can only reach a runner at its
     /// next await, so one parked in a synchronous stretch — here the settings
-    /// lock `save_dir()` takes on the way to the start section, the same class
+    /// lock `effective_save_dir()` takes on the way to the start section, the same class
     /// of stall as a slow `check_save_dir_writable` — survives the pause. By the
     /// time it wakes the user has resumed: the Pause marker is gone and the row
     /// is back to Pending. The stale runner must not read that as its cue to
@@ -6182,7 +6182,7 @@ mod tests {
 
         // Park the runner before its start critical section, with a positive
         // signal that it is really parked there: it takes the only permit
-        // before `save_dir()` and never yields in between (tokio can only drop
+        // before `effective_save_dir()` and never yields in between (tokio can only drop
         // an aborted task at a yield point), so a permit count of zero means
         // the pause below cannot "win" by dropping a task that never started.
         let settings_guard = manager.settings.lock().unwrap();
