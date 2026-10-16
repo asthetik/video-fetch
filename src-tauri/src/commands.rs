@@ -1266,7 +1266,21 @@ pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
 /// `None` when nothing needs saying. Shown once by the UI at startup.
 #[tauri::command]
 pub fn get_save_dir_notice(state: State<'_, AppState>) -> Option<String> {
-    state.save_dir_notice.clone()
+    // Gated on the session override still being active: once the user
+    // changes the save dir, downloads go to the configured path and a
+    // persistent hint claiming the app-data fallback would lie for the
+    // rest of the session.
+    let override_active = state.downloads.save_dir_override_active().unwrap_or(false);
+    save_dir_notice_for(state.save_dir_notice.clone(), override_active)
+}
+
+/// Derivation of the save-dir hint: the startup notice is only shown while
+/// the session fallback it describes is still in effect.
+fn save_dir_notice_for(notice: Option<String>, override_active: bool) -> Option<String> {
+    if !override_active {
+        return None;
+    }
+    notice
 }
 
 /// Startup notice about login cookies: set when `cookies.txt` could not be
@@ -2709,6 +2723,22 @@ mod save_dir_tests {
     /// A transiently unavailable save_dir must not rewrite the persisted
     /// config: if it did, a drive unmounted at startup would silently move
     /// every future download into app data until the user noticed.
+    /// The pure derivation behind `get_save_dir_notice`: the startup notice
+    /// shows only while the session fallback is still active; once the user
+    /// changes the save dir the hint must disappear with the condition
+    /// instead of claiming the app-data fallback for the rest of the session.
+    #[test]
+    fn save_dir_notice_hides_once_the_override_is_dropped() {
+        let notice = Some(SAVE_DIR_UNAVAILABLE_NOTICE.to_string());
+        assert_eq!(save_dir_notice_for(notice.clone(), true), notice);
+        assert_eq!(
+            save_dir_notice_for(notice, false),
+            None,
+            "a dropped override means the fallback is over; the hint must not survive it"
+        );
+        assert_eq!(save_dir_notice_for(None, true), None);
+    }
+
     #[test]
     fn transient_save_dir_failure_does_not_rewrite_or_persist_settings() {
         let dir = tempfile::tempdir().unwrap();

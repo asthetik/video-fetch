@@ -1551,6 +1551,14 @@ impl DownloadManager {
 
     /// Directory downloads write to: the session override while one is set,
     /// else the configured `save_dir`.
+    /// Whether the session-only save-dir fallback is still in effect. The
+    /// startup notice derived from it is only truthful while this is true:
+    /// once the user changes the save dir, `update_settings` drops the
+    /// override and downloads go to the configured path.
+    pub fn save_dir_override_active(&self) -> AppResult<bool> {
+        Ok(self.save_dir_override.lock().map_err(lock_err)?.is_some())
+    }
+
     pub fn effective_save_dir(&self) -> AppResult<PathBuf> {
         if let Some(dir) = self.save_dir_override.lock().map_err(lock_err)?.clone() {
             return Ok(dir);
@@ -3999,6 +4007,37 @@ mod tests {
             }
             assert_eq!(manager.semaphore.available_permits(), 1);
         }
+    }
+
+    /// The override flag backs the startup notice's live derivation: set at
+    /// startup alongside the fallback, dropped the moment the user picks a
+    /// different save dir, kept for unrelated settings changes.
+    #[test]
+    fn save_dir_override_active_tracks_update_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        assert!(!manager.save_dir_override_active().unwrap());
+
+        manager
+            .set_save_dir_override(Some(PathBuf::from("/tmp/vf-fallback")))
+            .unwrap();
+        assert!(manager.save_dir_override_active().unwrap());
+
+        // An unrelated change keeps the fallback...
+        let mut settings = manager.settings.lock().unwrap().clone();
+        settings.concurrency = settings.concurrency.saturating_add(1);
+        manager.update_settings(settings).unwrap();
+        assert!(manager.save_dir_override_active().unwrap());
+
+        // ...but a changed save dir ends it, and with it the hint.
+        let mut settings = manager.settings.lock().unwrap().clone();
+        settings.save_dir = dir.path().join("elsewhere").to_string_lossy().into();
+        manager.update_settings(settings).unwrap();
+        assert!(!manager.save_dir_override_active().unwrap());
     }
 
     #[test]

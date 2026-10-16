@@ -8,6 +8,7 @@ import {
   withToast,
   type LoadState,
 } from "../lib/asyncAction";
+import { saveDirRowHint } from "../lib/saveDirNotice";
 import { AuthStatus } from "../components/AuthStatus";
 import { NamingPreview } from "../components/NamingPreview";
 import { Segmented } from "../components/Segmented";
@@ -39,6 +40,11 @@ export function SettingsPage() {
   const settings = settingsState.status === "ready" ? settingsState.data : null;
   const [importing, setImporting] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
+  // Session notice from the backend: set when the configured save directory
+  // was unusable at startup and downloads fell back to app data. Mirrors the
+  // startup toast in App.tsx, which is easy to miss; the row hint below stays
+  // up for the whole session so the condition stays discoverable.
+  const [saveDirNotice, setSaveDirNotice] = useState<string | null>(null);
   const { mode, setMode } = useTheme();
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,6 +66,28 @@ export function SettingsPage() {
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    // Re-derived on every save-dir change: the backend gates the notice on
+    // the session fallback still being active, so picking a working
+    // directory clears the hint instead of leaving it claiming app-data for
+    // the rest of the session.
+    let cancelled = false;
+    api
+      .getSaveDirNotice()
+      .then((notice) => {
+        if (!cancelled) {
+          setSaveDirNotice(notice);
+        }
+      })
+      .catch(() => {
+        // A notice read failure must never break the settings page; the row
+        // just shows no hint.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [settings?.save_dir]);
 
   useEffect(() => {
     return () => {
@@ -172,6 +200,7 @@ export function SettingsPage() {
   }
 
   const activePreset = NAMING_PRESETS.find((p) => p.template === settings.filename_template);
+  const saveDirHint = saveDirRowHint(saveDirNotice);
 
   return (
     <div className="settings-page">
@@ -223,6 +252,7 @@ export function SettingsPage() {
               打开
             </button>
           </div>
+          {saveDirHint ? <p className="settings-hint warn">{saveDirHint}</p> : null}
         </label>
 
         <div className="settings-row-block concurrency-row">
