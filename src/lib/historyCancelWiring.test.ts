@@ -12,21 +12,20 @@ import { join } from "node:path";
 //
 // These assertions read the source text because the repo has no component
 // test harness. They pin the literal gate form in renderRow: extracting the
-// status check into a shared helper would need this file updated.
+// status check into a shared helper would need this file updated. If pause
+// ever returns to this page, revisit both the frozen-snapshot assumption
+// here and isActiveStatus (it counts paused as still-cancelable).
 
 const HISTORY_PAGE = join(import.meta.dirname, "..", "pages", "HistoryPage.tsx");
 
 const src = readFileSync(HISTORY_PAGE, "utf8");
 
-test("the history page never references the paused status as a value", () => {
-  // "paused" survives only as the unquoted STATUS_LABEL key and in prose
-  // comments; any quoted use is a paused branch creeping back into a page
-  // that cannot show paused rows.
-  assert.doesNotMatch(
-    src,
-    /["']paused["']/,
-    `HistoryPage.tsx must not branch on "paused": paused jobs live only in the download queue`,
-  );
+test("the history page never branches on the paused status", () => {
+  // "paused" may appear in prose; a comparison against it or a confirm-copy
+  // dispatch on it would branch for a state this page's filters strip.
+  assert.doesNotMatch(src, /[!=]==?\s*["']paused["']/);
+  assert.doesNotMatch(src, /["']paused["']\s*[!=]==?/);
+  assert.doesNotMatch(src, /cancelConfirmFor\(\s*["']paused["']/);
 });
 
 test("the active section filters exactly pending/running", () => {
@@ -48,10 +47,12 @@ test("cancel is wired for pending/running only", () => {
   const markers = [...src.matchAll(/action="cancel-job"/g)];
   assert.equal(markers.length, 1, "history rows keep a single cancel entry point");
   const at = markers[0].index;
-  // The gate sits directly above the IconButton; a backward window covers the
-  // JSX condition wrapping it without reaching the row's other status branches
-  // (the retry button below is gated on "failed").
-  const window = src.slice(at - 280, at);
+  // Anchor on the actions container rather than a magic-length window: the
+  // gate sits between it and the button, while the failed/done-only buttons
+  // live after the marker and stay out of the slice.
+  const start = src.lastIndexOf('<div className="history-row-actions">', at);
+  assert.notEqual(start, -1, "actions container not found above the cancel button");
+  const window = src.slice(start, at);
   assert.match(window, /status === "pending"/, "cancel must be wired for pending");
   assert.match(window, /status === "running"/, "cancel must be wired for running");
   assert.doesNotMatch(
@@ -64,7 +65,7 @@ test("cancel is wired for pending/running only", () => {
 test("confirm copy is shared, not selected by job status", () => {
   assert.doesNotMatch(
     src,
-    /cancelConfirmFor\([^)\n]*status/,
+    /cancelConfirmFor\(\s*[^)]*status/,
     "HistoryPage must not dispatch confirm copy on job status (pending/running share one copy)",
   );
   assert.match(

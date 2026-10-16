@@ -152,8 +152,9 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const showActive = activeJobs.length > 0 && statusFilter === "all";
   // History never lists paused rows (see historyVisibleJobs), so a cancellable
   // row here is always pending or running and both share one confirm copy.
-  // Take it at a fixed status instead of dispatching on states this page
-  // cannot show; the paused-only copy stays in the lib for the download queue.
+  // Take it at one fixed status instead: the cancel entry point only ever
+  // renders for those rows, and the paused-only copy stays in the lib for the
+  // download queue.
   const cancelCopy = pendingCancel ? cancelConfirmFor("pending") : null;
 
   async function handleOpenFile(job: DownloadJob) {
