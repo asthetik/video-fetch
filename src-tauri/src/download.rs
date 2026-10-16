@@ -1931,6 +1931,22 @@ mod tests {
         panic!("timed out waiting for status {status:?}");
     }
 
+    /// Retry-until for a semaphore permit count, same shape as
+    /// `wait_for_status`. A runner's row can read Done a few instructions
+    /// before its permit is returned, so a one-shot `available_permits` read
+    /// right after a Done wait can catch the pre-return count; poll instead.
+    /// The trailing assert doubles as the timeout failure, so the caller's
+    /// regression message is what surfaces when the count never settles.
+    async fn wait_for_available_permits(manager: &DownloadManager, expected: usize, msg: &str) {
+        for _ in 0..100 {
+            if manager.semaphore.available_permits() == expected {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(manager.semaphore.available_permits(), expected, "{msg}");
+    }
+
     #[test]
     fn cleanup_orphan_work_dirs_removes_orphans_keeps_active() {
         let dir = tempfile::tempdir().unwrap();
@@ -3586,7 +3602,7 @@ mod tests {
             3,
             "expected three downloads running under concurrency 3"
         );
-        assert_eq!(manager.semaphore.available_permits(), 0);
+        wait_for_available_permits(&manager, 0, "all three permits must be held under load").await;
 
         // The round-trip under load: nothing is reclaimable on the way down,
         // and the way up must reconcile against the true capacity rather than
@@ -3632,11 +3648,12 @@ mod tests {
 
         // The drained semaphore must be back at exactly the stated limit, not
         // the inflated leftover of the toggle.
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "the semaphore must drain back to the stated limit of 3"
-        );
+            "the semaphore must drain back to the stated limit of 3",
+        )
+        .await;
     }
 
     /// Repeated limit round-trips under load must not grow the pool. A4's
@@ -3750,7 +3767,7 @@ mod tests {
         }
         let held = downloader.running_ids();
         assert_eq!(held.len(), 3, "expected three downloads running: {held:?}");
-        assert_eq!(manager.semaphore.available_permits(), 0);
+        wait_for_available_permits(&manager, 0, "all three permits must be held under load").await;
 
         // Lower to 1 while all three slots are busy.
         let mut lowered = test_settings(dir.path());
@@ -3820,27 +3837,25 @@ mod tests {
             wait_for_status(&manager, id, JobStatus::Done).await;
         }
 
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             1,
-            "after draining under concurrency 1 the pool must hold exactly one permit"
-        );
+            "after draining under concurrency 1 the pool must hold exactly one permit",
+        )
+        .await;
         let mut raised = test_settings(dir.path());
         raised.concurrency = 3;
         manager.update_settings(raised).unwrap();
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "a raise must add permits relative to the true capacity, not a stale leftover"
-        );
+            "a raise must add permits relative to the true capacity, not a stale leftover",
+        )
+        .await;
         let mut idle_lower = test_settings(dir.path());
         idle_lower.concurrency = 2;
         manager.update_settings(idle_lower).unwrap();
-        assert_eq!(
-            manager.semaphore.available_permits(),
-            2,
-            "a lower limit must withdraw idle permits"
-        );
+        wait_for_available_permits(&manager, 2, "a lower limit must withdraw idle permits").await;
     }
 
     #[test]
