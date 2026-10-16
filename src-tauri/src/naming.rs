@@ -595,7 +595,12 @@ mod tests {
     #[test]
     fn bake_keeps_non_ascii_template_text_intact() {
         let when = sample_local();
-        let template = "【%(uploader)s】%(title)s.%(ext)s";
+        // 🎬/📼 are 4-byte UTF-8 sequences flanking the 3-byte CJK brackets.
+        // Bake, the pause/resume re-bake, and preview all expand through the
+        // same verbatim span copy in `expand_datetime_tokens`, so exercising
+        // the widest literal width here covers the whole family (the old
+        // byte-wise re-encode mangled 3-byte and 4-byte text alike).
+        let template = "🎬【%(uploader)s】📼%(title)s.%(ext)s";
         assert_eq!(
             bake_local_datetime_tokens(template, &when),
             template,
