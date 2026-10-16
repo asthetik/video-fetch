@@ -3656,6 +3656,90 @@ mod tests {
         .await;
     }
 
+    /// Repeated limit round-trips under load must not grow the pool. A4's
+    /// original bug was exactly this shape: every downgrade reclaims nothing
+    /// while the slots are busy, and every upgrade then adds `new - old` on
+    /// top of a capacity the downgrade never shrank, so toggling the limit
+    /// under load made effective concurrency grow monotonically round after
+    /// round. The accounting is convergent for any number of round trips;
+    /// this test pins several of them.
+    ///
+    /// Value: protects=concurrency resize accounting across repeated limit
+    /// toggles; fails_when=each upgrade adds `new - old` while each downgrade
+    /// gives up on the held permits, so repeated round trips inflate the pool
+    /// monotonically; why_new=the existing tests drive a single round trip,
+    /// which proves one toggle but not convergence
+    #[tokio::test]
+    async fn repeated_concurrency_toggles_stay_convergent_under_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader.clone());
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 3;
+        manager.update_settings(settings).unwrap();
+        let ids = enqueue_distinct_jobs(&manager, "job-rt", 6);
+
+        // Saturate: three permits held by runs that never finish on their own,
+        // three runners parked on the semaphore.
+        for _ in 0..200 {
+            if downloader.running_ids().len() == 3 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            downloader.running_ids().len(),
+            3,
+            "expected three downloads running under concurrency 3"
+        );
+        assert_eq!(manager.semaphore.available_permits(), 0);
+
+        // 3 -> 1 -> 3 -> 1 -> 3 under load. Every hop must leave effective
+        // concurrency at the stated limit of 3: the pool must not grow a
+        // single permit, however many times the limit is toggled.
+        for round in 0..2 {
+            for limit in [1u32, 3] {
+                let mut settings = test_settings(dir.path());
+                settings.concurrency = limit;
+                manager.update_settings(settings).unwrap();
+                // Give any wrongly-woken runner time to enter `run`.
+                let mut inflated: Option<Vec<String>> = None;
+                for _ in 0..10 {
+                    let running = downloader.running_ids();
+                    if running.len() > 3 {
+                        inflated = Some(running);
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+                assert_eq!(
+                    inflated, None,
+                    "round {round} hop to {limit}: effective concurrency exceeded the stated limit of 3: {inflated:?}"
+                );
+            }
+        }
+        assert_eq!(
+            downloader.peak.load(Ordering::SeqCst),
+            3,
+            "peak concurrent downloads must never exceed the stated limit"
+        );
+
+        // Drain everything. The pool must settle at the final stated limit of
+        // 3 — not the inflated leftover the repeated toggles would leave.
+        // Retry-until, not a one-shot read: Done is committed before the
+        // runner's permit is returned, so a direct read can catch the gap.
+        for id in &ids {
+            downloader.release(id);
+            wait_for_status(&manager, id, JobStatus::Done).await;
+        }
+        wait_for_available_permits(
+            &manager,
+            3,
+            "after repeated round trips the pool must settle at the final limit of 3",
+        )
+        .await;
+    }
+
     /// A downgrade must take effect even while every slot is busy: the surplus
     /// permits cannot be reclaimed up front (every one of them is held), so
     /// they must be absorbed as the running jobs return them. Only one queued
