@@ -152,7 +152,7 @@ Don’t skip the second step: it downloads the yt-dlp and ffmpeg binaries for yo
 ### Integration / stress tests (fetch the sidecars first)
 
 ```bash
-# Deterministic regression suite (what CI runs, serial; run before pushing engine changes)
+# Deterministic regression suite (serial; run before pushing engine changes)
 cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
 # Long soak test (local, 5 minutes by default; SOAK_SEED reproduces the operation sequence)
@@ -161,7 +161,7 @@ SOAK_MINUTES=10 cargo test --manifest-path src-tauri/Cargo.toml --features test-
 
 ### Pre-push checks
 
-After touching the download engine, run the same gates as CI locally before pushing: fmt + clippy (default and with `--features test-utils`) + unit tests + the regression suite (serial).
+After touching the download engine, run the following gates locally before pushing: fmt + clippy (default and with `--features test-utils`) + unit tests + the regression suite (serial).
 
 ```bash
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
