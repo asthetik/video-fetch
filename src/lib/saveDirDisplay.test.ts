@@ -12,22 +12,15 @@ import { saveDirPlaceholder } from "./saveDirDisplay.ts";
 // shows a clear stand-in placeholder instead.
 
 test("empty save_dir with a session effective dir shows the stand-in placeholder", () => {
-  assert.equal(saveDirPlaceholder("", true), "（本次会话使用系统默认下载目录）");
+  assert.equal(saveDirPlaceholder(""), "（本次会话使用系统默认下载目录）");
 });
 
 test("a configured save_dir is the input value and gets no placeholder", () => {
-  assert.equal(saveDirPlaceholder("/Users/me/Downloads", true), "");
-  assert.equal(saveDirPlaceholder("/Users/me/Downloads", false), "");
-});
-
-test("without a session effective dir an empty field stays empty", () => {
-  // Nothing is running the downloads into: claiming a session default would
-  // be a lie, so the field honestly reads as not configured.
-  assert.equal(saveDirPlaceholder("", false), "");
+  assert.equal(saveDirPlaceholder("/Users/me/Downloads"), "");
 });
 
 test("the placeholder is a stand-in label, never a melted path", () => {
-  const text = saveDirPlaceholder("", true);
+  const text = saveDirPlaceholder("");
   assert.ok(text.length > 0);
   // U+FFFD is what to_string_lossy melts a raw OS path into; the whole point
   // of the placeholder is to avoid surfacing such a melt as a path.

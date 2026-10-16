@@ -246,7 +246,7 @@ export function SettingsPage() {
               // A mounted settings page always runs under a backend session
               // that has an effective save dir; an empty setting means that
               // dir cannot cross IPC as a String, not "not configured".
-              placeholder={saveDirPlaceholder(settings.save_dir, true)}
+              placeholder={saveDirPlaceholder(settings.save_dir)}
               readOnly
             />
             <button type="button" className="btn" onClick={() => void handlePickDir()}>
