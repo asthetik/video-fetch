@@ -2788,6 +2788,31 @@ mod save_dir_tests {
         }
     }
 
+    /// The melt guard must not regress into never-persisting: a first-run
+    /// default that IS valid UTF-8 is still recorded (memory + disk), so the
+    /// next startup reuses the recorded directory instead of re-deriving a
+    /// default that may no longer be the user's Downloads folder.
+    #[test]
+    fn utf8_first_run_default_save_dir_is_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_dir = app_dir_under(dir.path());
+        let default_dir = dir.path().join("Downloads");
+        // First run: no configured save_dir.
+        let mut settings = AppSettings::default();
+
+        let plan = apply_save_dir(&mut settings, default_dir.clone(), &app_dir)
+            .expect("startup must not fail");
+
+        // The default is recorded in memory and on disk...
+        assert_eq!(settings.save_dir, default_dir.to_string_lossy());
+        let on_disk = settings_store::load_settings(&app_dir).expect("settings must load");
+        assert_eq!(on_disk.save_dir, default_dir.to_string_lossy());
+        // ...and this session downloads there without a fallback notice.
+        assert_eq!(plan.effective, default_dir);
+        assert!(plan.effective.is_dir());
+        assert_eq!(plan.notice, None);
+    }
+
     /// A UTF-8 pick must survive the conversion unchanged: this exact string
     /// is what the frontend persists as `save_dir`.
     #[test]
