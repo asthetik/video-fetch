@@ -4007,6 +4007,66 @@ mod tests {
         check_save_dir_writable(dir.path()).unwrap();
     }
 
+    /// The startup fallback is a session stand-in: once the user picks a save
+    /// dir in settings, that explicit choice replaces the stand-in and
+    /// downloads must follow the configured path again.
+    #[test]
+    fn changing_save_dir_in_settings_clears_the_session_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::success(1.0)),
+        );
+        // Simulate the startup fallback: configured dir unusable, the session
+        // redirected elsewhere for the rest of the run.
+        let fallback = dir.path().join("session-fallback");
+        std::fs::create_dir_all(&fallback).unwrap();
+        manager
+            .set_save_dir_override(Some(fallback.clone()))
+            .unwrap();
+        assert_eq!(manager.effective_save_dir().unwrap(), fallback);
+
+        // The user changes save_dir in settings: the stand-in must go.
+        let picked = dir.path().join("picked");
+        manager.update_settings(test_settings(&picked)).unwrap();
+
+        assert_eq!(
+            manager.effective_save_dir().unwrap(),
+            picked,
+            "an explicit save_dir choice must replace the session fallback"
+        );
+    }
+
+    /// Only a save_dir change may drop the stand-in: an unrelated settings
+    /// edit must leave the session fallback in place, or a mid-download
+    /// concurrency tweak would silently redirect the rest of the session.
+    #[test]
+    fn unrelated_settings_change_keeps_the_session_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::success(1.0)),
+        );
+        let fallback = dir.path().join("session-fallback");
+        std::fs::create_dir_all(&fallback).unwrap();
+        manager
+            .set_save_dir_override(Some(fallback.clone()))
+            .unwrap();
+
+        // Same save_dir, a different setting (concurrency).
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 2;
+        manager.update_settings(settings).unwrap();
+
+        assert_eq!(
+            manager.effective_save_dir().unwrap(),
+            fallback,
+            "an unrelated settings change must not drop the session fallback"
+        );
+    }
+
     #[tokio::test]
     async fn enqueue_classified_flags_duplicate_active() {
         let dir = tempfile::tempdir().unwrap();
