@@ -306,7 +306,7 @@ fn lock_concurrency(
 /// above the desired limit — a downgraded limit draining — the permit is
 /// forgotten instead of returned, so it cannot wake a queued runner past the
 /// limit. It re-enters the pool only when a slot is free under the desired
-/// limit.
+/// limit. Either way the permit's disposition completes under the state lock.
 struct RunnerPermit<'a> {
     permit: Option<SemaphorePermit<'a>>,
     state: &'a Mutex<ConcurrencyState>,
@@ -335,11 +335,22 @@ impl Drop for RunnerPermit<'_> {
             // Still at or over the limit: absorb this permit so the queue
             // cannot run more than `desired` downloads. Capacity must follow.
             state.capacity = state.capacity.saturating_sub(1);
-            drop(state);
             permit.forget();
+        } else {
+            // Otherwise the permit returns to the pool: active + idle adds up
+            // to the desired limit again. The explicit `drop` is the point,
+            // not dead code: the permit must land in the pool while `state` is
+            // still held. Releasing the lock first opens a window where the
+            // books count the permit idle but the pool has not received it
+            // yet — a concurrent `resize_concurrency` reclaim comes up empty
+            // and books it as held ("will be absorbed as the runners return
+            // it"), and a return that is never absorbed overshoots the pool
+            // to `desired + 1` until the next settings change re-reconciles
+            // it.
+            drop(permit);
         }
-        // Otherwise the permit returns to the pool: active + idle adds up to
-        // the desired limit again.
+        // Both branches settle the permit under the lock; `state` releases
+        // only now, with the pool and the counters already back in step.
     }
 }
 
@@ -630,7 +641,10 @@ impl DownloadManager {
             handle.abort();
         }
 
-        let db = self.db.lock().map_err(lock_err)?;
+        // Terminal write with poison recovery (lock_db), same as fail_job and
+        // complete_relocation: a panic elsewhere must not freeze the cancel
+        // write behind "lock poisoned" and strand the row at its old status.
+        let db = lock_db(&self.db);
         let mut job = db.get_job(id)?;
         let _ = fsutil::remove_job_work_dir(&self.work_root, &job.id);
         if job.status == JobStatus::Done {
@@ -643,6 +657,9 @@ impl DownloadManager {
 
         job.status = JobStatus::Failed;
         job.error = Some(stop_message(StopKind::Cancel).into());
+        // Test seam: drops the row so the write misses (see terminal_write_hook).
+        #[cfg(test)]
+        terminal_write_hook::fire(&db, id);
         db.update_job(&job)?;
         drop(db);
 
@@ -745,12 +762,11 @@ impl DownloadManager {
     /// Async like `cancel`: the kill must not run on Tauri's main thread.
     pub async fn pause(&self, id: &str) -> AppResult<DownloadJob> {
         // Preliminary guard for a friendly error; the locked re-read below is
-        // the authority (races resolve there).
+        // the authority (races resolve there). Poison recovery here too —
+        // a poisoned lock must not fail pause before the authoritative write
+        // even gets its chance (the arbitration #181 landed for cancel).
         {
-            let job = self
-                .db
-                .lock()
-                .map_err(lock_err)?
+            let job = lock_db(&self.db)
                 .find_job(id)?
                 .ok_or_else(missing_job_err)?;
             match job.status {
@@ -795,12 +811,18 @@ impl DownloadManager {
         // have reached a terminal state between the kill and this read — that
         // state wins, a finished or failed job must not become Paused. A row
         // that vanished (concurrent delete) is left to pause()'s retract.
+        // Terminal write with poison recovery (lock_db), same as cancel_marked
+        // and fail_job: a panic elsewhere must not freeze the pause write
+        // behind "lock poisoned" and strand the row at Running.
         let job = {
-            let db = self.db.lock().map_err(lock_err)?;
+            let db = lock_db(&self.db);
             let mut job = db.find_job(id)?.ok_or_else(missing_job_err)?;
             if matches!(job.status, JobStatus::Pending | JobStatus::Running) {
                 job.status = JobStatus::Paused;
                 job.error = None;
+                // Test seam: drops the row so the write misses (see terminal_write_hook).
+                #[cfg(test)]
+                terminal_write_hook::fire(&db, id);
                 db.update_job(&job)?;
             }
             job
@@ -1654,6 +1676,54 @@ mod enqueue_race_hook {
     }
 }
 
+/// Test-only fault injection for the cancel/pause terminal-write failure
+/// regression tests. When armed for a job id, the hook drops that row in the
+/// gap between `cancel_marked`/`pause_marked`'s row read and the terminal
+/// write, so the UPDATE misses (`updated == 0`) and the write fails the way a
+/// vanished row does. Poisoning can no longer fail these writes now that
+/// `lock_db` recovers the guard, so the write itself must be broken to pin
+/// the failure paths. Unarmed — and in production builds — the hook is never
+/// called.
+#[cfg(test)]
+mod terminal_write_hook {
+    use std::sync::Mutex;
+
+    use crate::db::Db;
+
+    /// A set, not a single slot: the cancel and pause failure tests arm
+    /// different ids in parallel, and one slot would let either test
+    /// disarm the other.
+    static ARMED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// Disarms its own id when dropped (also on test panic).
+    pub struct Guard {
+        job_id: String,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ARMED.lock().unwrap().retain(|id| id != &self.job_id);
+        }
+    }
+
+    /// Arm the hook for calls whose job id matches.
+    pub fn arm(job_id: &str) -> Guard {
+        ARMED.lock().unwrap().push(job_id.to_owned());
+        Guard {
+            job_id: job_id.to_owned(),
+        }
+    }
+
+    /// Called between the row read and the terminal write. See module docs.
+    pub fn fire(db: &Db, job_id: &str) {
+        let armed = ARMED.lock().unwrap();
+        if armed.iter().any(|id| id == job_id) {
+            drop(armed);
+            let _ = db.delete_job(job_id);
+        }
+    }
+}
+
 /// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
 /// Needed because `--print after_move:filepath` can be garbled on Windows locales.
 fn resolve_work_product(work: &Path, reported: &Path) -> Option<PathBuf> {
@@ -1929,6 +1999,22 @@ mod tests {
             sleep(Duration::from_millis(20)).await;
         }
         panic!("timed out waiting for status {status:?}");
+    }
+
+    /// Retry-until for a semaphore permit count, same shape as
+    /// `wait_for_status`. A runner's row can read Done a few instructions
+    /// before its permit is returned, so a one-shot `available_permits` read
+    /// right after a Done wait can catch the pre-return count; poll instead.
+    /// The trailing assert doubles as the timeout failure, so the caller's
+    /// regression message is what surfaces when the count never settles.
+    async fn wait_for_available_permits(manager: &DownloadManager, expected: usize, msg: &str) {
+        for _ in 0..100 {
+            if manager.semaphore.available_permits() == expected {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(manager.semaphore.available_permits(), expected, "{msg}");
     }
 
     #[test]
@@ -3586,7 +3672,7 @@ mod tests {
             3,
             "expected three downloads running under concurrency 3"
         );
-        assert_eq!(manager.semaphore.available_permits(), 0);
+        wait_for_available_permits(&manager, 0, "all three permits must be held under load").await;
 
         // The round-trip under load: nothing is reclaimable on the way down,
         // and the way up must reconcile against the true capacity rather than
@@ -3632,11 +3718,96 @@ mod tests {
 
         // The drained semaphore must be back at exactly the stated limit, not
         // the inflated leftover of the toggle.
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "the semaphore must drain back to the stated limit of 3"
+            "the semaphore must drain back to the stated limit of 3",
+        )
+        .await;
+    }
+
+    /// Repeated limit round-trips under load must not grow the pool. A4's
+    /// original bug was exactly this shape: every downgrade reclaims nothing
+    /// while the slots are busy, and every upgrade then adds `new - old` on
+    /// top of a capacity the downgrade never shrank, so toggling the limit
+    /// under load made effective concurrency grow monotonically round after
+    /// round. The accounting is convergent for any number of round trips;
+    /// this test pins several of them.
+    ///
+    /// Value: protects=concurrency resize accounting across repeated limit
+    /// toggles; fails_when=each upgrade adds `new - old` while each downgrade
+    /// gives up on the held permits, so repeated round trips inflate the pool
+    /// monotonically; why_new=the existing tests drive a single round trip,
+    /// which proves one toggle but not convergence
+    #[tokio::test]
+    async fn repeated_concurrency_toggles_stay_convergent_under_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader.clone());
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 3;
+        manager.update_settings(settings).unwrap();
+        let ids = enqueue_distinct_jobs(&manager, "job-rt", 6);
+
+        // Saturate: three permits held by runs that never finish on their own,
+        // three runners parked on the semaphore.
+        for _ in 0..200 {
+            if downloader.running_ids().len() == 3 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            downloader.running_ids().len(),
+            3,
+            "expected three downloads running under concurrency 3"
         );
+        assert_eq!(manager.semaphore.available_permits(), 0);
+
+        // 3 -> 1 -> 3 -> 1 -> 3 under load. Every hop must leave effective
+        // concurrency at the stated limit of 3: the pool must not grow a
+        // single permit, however many times the limit is toggled.
+        for round in 0..2 {
+            for limit in [1u32, 3] {
+                let mut settings = test_settings(dir.path());
+                settings.concurrency = limit;
+                manager.update_settings(settings).unwrap();
+                // Give any wrongly-woken runner time to enter `run`.
+                let mut inflated: Option<Vec<String>> = None;
+                for _ in 0..10 {
+                    let running = downloader.running_ids();
+                    if running.len() > 3 {
+                        inflated = Some(running);
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+                assert_eq!(
+                    inflated, None,
+                    "round {round} hop to {limit}: effective concurrency exceeded the stated limit of 3: {inflated:?}"
+                );
+            }
+        }
+        assert_eq!(
+            downloader.peak.load(Ordering::SeqCst),
+            3,
+            "peak concurrent downloads must never exceed the stated limit"
+        );
+
+        // Drain everything. The pool must settle at the final stated limit of
+        // 3 — not the inflated leftover the repeated toggles would leave.
+        // Retry-until, not a one-shot read: Done is committed before the
+        // runner's permit is returned, so a direct read can catch the gap.
+        for id in &ids {
+            downloader.release(id);
+            wait_for_status(&manager, id, JobStatus::Done).await;
+        }
+        wait_for_available_permits(
+            &manager,
+            3,
+            "after repeated round trips the pool must settle at the final limit of 3",
+        )
+        .await;
     }
 
     /// A downgrade must take effect even while every slot is busy: the surplus
@@ -3669,7 +3840,7 @@ mod tests {
         }
         let held = downloader.running_ids();
         assert_eq!(held.len(), 3, "expected three downloads running: {held:?}");
-        assert_eq!(manager.semaphore.available_permits(), 0);
+        wait_for_available_permits(&manager, 0, "all three permits must be held under load").await;
 
         // Lower to 1 while all three slots are busy.
         let mut lowered = test_settings(dir.path());
@@ -3739,27 +3910,95 @@ mod tests {
             wait_for_status(&manager, id, JobStatus::Done).await;
         }
 
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             1,
-            "after draining under concurrency 1 the pool must hold exactly one permit"
-        );
+            "after draining under concurrency 1 the pool must hold exactly one permit",
+        )
+        .await;
         let mut raised = test_settings(dir.path());
         raised.concurrency = 3;
         manager.update_settings(raised).unwrap();
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "a raise must add permits relative to the true capacity, not a stale leftover"
-        );
+            "a raise must add permits relative to the true capacity, not a stale leftover",
+        )
+        .await;
         let mut idle_lower = test_settings(dir.path());
         idle_lower.concurrency = 2;
         manager.update_settings(idle_lower).unwrap();
-        assert_eq!(
-            manager.semaphore.available_permits(),
-            2,
-            "a lower limit must withdraw idle permits"
-        );
+        wait_for_available_permits(&manager, 2, "a lower limit must withdraw idle permits").await;
+    }
+
+    /// RunnerPermit's drop is the reconciliation point the books hang on, and
+    /// both dispositions must complete under the state lock: the absorb branch
+    /// forgets the permit and the capacity with it; the return branch lands
+    /// the permit back in the pool without touching capacity. Repeated
+    /// acquire/return cycles through both branches must leave the books
+    /// balanced after every drop — `capacity == active + available` — and the
+    /// pool back at the stated limit once every holder is gone.
+    ///
+    /// Value: protects=RunnerPermit's absorb/return accounting in both
+    /// branches; fails_when=a cycle strands a permit or lets capacity drift
+    /// from the pool; why_new=the existing tests observe the books only
+    /// through whole download runs, never the drop's two branches in isolation
+    /// across repeated cycles; scope=quiescent bookkeeping only — this test
+    /// passes on the pre-fix tree, so the return-before-lock-release race it
+    /// accompanies rides on review, not on this pin (the interleaving window
+    /// is a few instructions wide and was verified unpinnable)
+    #[test]
+    fn permit_books_balance_across_acquire_return_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader);
+
+        for _ in 0..64 {
+            // Two holders under limit 2.
+            manager.resize_concurrency(2);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (2, 0, 2));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 2);
+            let r1 = RunnerPermit::new(
+                manager.semaphore.try_acquire().unwrap(),
+                &manager.concurrency,
+            );
+            let r2 = RunnerPermit::new(
+                manager.semaphore.try_acquire().unwrap(),
+                &manager.concurrency,
+            );
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (2, 2, 2));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 0);
+
+            // Downgrade while both are held: nothing is reclaimable up front.
+            manager.resize_concurrency(1);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (1, 2, 2));
+            }
+
+            // Absorb branch: still at or over the limit after the decrement,
+            // so the permit is forgotten and the capacity with it.
+            drop(r1);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (1, 1, 1));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 0);
+
+            // Return branch: a free slot under the limit re-enters the pool.
+            drop(r2);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (1, 0, 1));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 1);
+        }
     }
 
     #[test]
@@ -5796,8 +6035,11 @@ mod tests {
         job.status = JobStatus::Running;
         manager.db.lock().unwrap().insert_job(&job).unwrap();
 
+        let _hook = terminal_write_hook::arm("job-pause-fail");
+
         // Park pause() between its marker insert and the row write — the
-        // children lock is what it takes next — then break the db under it.
+        // children lock is what it takes next — then let the armed hook drop
+        // the row so the write misses (poisoning can no longer fail it).
         let children_guard = manager.children.lock().unwrap();
         let pausing = manager.clone();
         let rt = tokio::runtime::Handle::current();
@@ -5812,11 +6054,13 @@ mod tests {
             stop_kind_of(&flags, "job-pause-fail"),
             Some(StopKind::Pause)
         );
-        poison_db(&manager);
         drop(children_guard);
 
         let err = handle.join().unwrap().unwrap_err().to_string();
-        assert!(err.contains("lock poisoned"), "unexpected: {err}");
+        assert!(
+            err.contains(crate::db::MISSING_JOB_MESSAGE),
+            "unexpected: {err}"
+        );
         assert!(
             stop_kind_of(&flags, "job-pause-fail").is_none(),
             "a failed pause must not leave its marker behind"
@@ -5825,11 +6069,15 @@ mod tests {
 
     /// Cancel raises its marker before the id is even validated, so the same
     /// rule holds: a cancel that cannot write the row must retract it, or the
-    /// marker outlives the job as a poison pill for whatever runs next.
+    /// marker outlives the job as a poison pill for whatever runs next. The
+    /// injected failure is the terminal write missing its row (the hook drops
+    /// it between the read and the update): poisoning can no longer fail this
+    /// write now that cancel recovers the guard via `lock_db`.
     ///
     /// Value: protects=cancel()'s retract-on-any-failure wrapper; fails_when=the
     /// marker survives a failed cancel; why_new=only the unknown-id and Done-row
-    /// paths were covered, and both removed the marker by hand; seam=none
+    /// paths were covered, and both removed the marker by hand;
+    /// seam=terminal_write_hook (drops the row so the terminal write misses)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_cancel_leaves_no_stop_marker() {
         let dir = tempfile::tempdir().unwrap();
@@ -5843,6 +6091,8 @@ mod tests {
         job.video_id = "BV1cf".into();
         job.status = JobStatus::Running;
         manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        let _hook = terminal_write_hook::arm("job-cancel-fail");
 
         let children_guard = manager.children.lock().unwrap();
         let cancelling = manager.clone();
@@ -5858,11 +6108,13 @@ mod tests {
             stop_kind_of(&flags, "job-cancel-fail"),
             Some(StopKind::Cancel)
         );
-        poison_db(&manager);
         drop(children_guard);
 
         let err = handle.join().unwrap().unwrap_err().to_string();
-        assert!(err.contains("lock poisoned"), "unexpected: {err}");
+        assert!(
+            err.contains(crate::db::MISSING_JOB_MESSAGE),
+            "unexpected: {err}"
+        );
         assert!(
             stop_kind_of(&flags, "job-cancel-fail").is_none(),
             "a failed cancel must not leave its marker behind"
@@ -5910,6 +6162,41 @@ mod tests {
         assert_eq!(row.error.as_deref(), Some("boom"));
     }
 
+    /// The cancel arbitration extended to pause: a poisoned db lock must not
+    /// freeze pause's row write either — the preliminary guard in `pause()`
+    /// and the authoritative re-read in `pause_marked` both recover via
+    /// `lock_db`, so the row still lands Paused (a live Paused row
+    /// legitimately keeps its marker until resume).
+    #[tokio::test]
+    async fn a_poisoned_db_lock_still_lands_the_pause_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let mut job = sample_job("job-poison-pause");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        poison_db(&manager);
+        let paused = manager.pause("job-poison-pause").await.unwrap();
+
+        assert_eq!(paused.status, JobStatus::Paused);
+        let row = manager
+            .db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_job("job-poison-pause")
+            .unwrap();
+        assert_eq!(
+            row.status,
+            JobStatus::Paused,
+            "the pause write must land through the poisoned lock"
+        );
+        assert_eq!(row.error, None);
+    }
+
     /// Same rule for the terminal Done write in complete_relocation: its
     /// `if let Ok(db) = self.db.lock()` swallowed a poisoned lock silently and
     /// returned Ok, delivering the file while the row stayed Running forever.
@@ -5955,6 +6242,47 @@ mod tests {
             "the Done write must land through the poisoned lock"
         );
         assert!(save_dir.join("demo.mp4").is_file());
+    }
+
+    /// Same rule for cancel's terminal write: cancel_marked acquired the db
+    /// with `map_err(lock_err)`, so a poisoned lock failed the very write that
+    /// was supposed to retire the row after a panic — the cancel errored out
+    /// and the row stayed active.
+    ///
+    /// Value: protects=poison recovery (lock_db) on cancel_marked's terminal
+    /// write; fails_when=a poisoned db lock freezes the cancel write too — the
+    /// command fails with "lock poisoned" and the row never leaves its active
+    /// status; why_new=fail_job and complete_relocation recovered the guard,
+    /// but cancel's Failed write stayed on `map_err(lock_err)` behind the
+    /// poisoned-lock fault injection of the marker test; seam=none
+    #[tokio::test]
+    async fn a_poisoned_db_lock_still_lands_the_cancel_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let mut job = sample_job("job-poison-cancel");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        poison_db(&manager);
+        let cancelled = manager.cancel("job-poison-cancel").await.unwrap();
+
+        assert_eq!(cancelled.status, JobStatus::Failed);
+        let row = manager
+            .db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_job("job-poison-cancel")
+            .unwrap();
+        assert_eq!(
+            row.status,
+            JobStatus::Failed,
+            "the cancel write must land through the poisoned lock"
+        );
+        assert_eq!(row.error.as_deref(), Some(stop_message(StopKind::Cancel)));
     }
 
     /// The try_* wrappers swallow a failed status write to keep the caller
