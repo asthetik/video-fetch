@@ -2437,6 +2437,7 @@ mod openable_roots_delete_tests {
             downloads,
             settings: Mutex::new(settings),
             save_dir_notice: None,
+            cookie_notice: None,
             ytdlp: YtDlpConfig {
                 yt_dlp_path: root.path().join("yt-dlp"),
                 ffmpeg_path: None,
