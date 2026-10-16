@@ -306,7 +306,7 @@ fn lock_concurrency(
 /// above the desired limit — a downgraded limit draining — the permit is
 /// forgotten instead of returned, so it cannot wake a queued runner past the
 /// limit. It re-enters the pool only when a slot is free under the desired
-/// limit.
+/// limit. Either way the permit's disposition completes under the state lock.
 struct RunnerPermit<'a> {
     permit: Option<SemaphorePermit<'a>>,
     state: &'a Mutex<ConcurrencyState>,
@@ -335,11 +335,22 @@ impl Drop for RunnerPermit<'_> {
             // Still at or over the limit: absorb this permit so the queue
             // cannot run more than `desired` downloads. Capacity must follow.
             state.capacity = state.capacity.saturating_sub(1);
-            drop(state);
             permit.forget();
+        } else {
+            // Otherwise the permit returns to the pool: active + idle adds up
+            // to the desired limit again. The explicit `drop` is the point,
+            // not dead code: the permit must land in the pool while `state` is
+            // still held. Releasing the lock first opens a window where the
+            // books count the permit idle but the pool has not received it
+            // yet — a concurrent `resize_concurrency` reclaim comes up empty
+            // and books it as held ("will be absorbed as the runners return
+            // it"), and a return that is never absorbed overshoots the pool
+            // to `desired + 1` until the next settings change re-reconciles
+            // it.
+            drop(permit);
         }
-        // Otherwise the permit returns to the pool: active + idle adds up to
-        // the desired limit again.
+        // Both branches settle the permit under the lock; `state` releases
+        // only now, with the pool and the counters already back in step.
     }
 }
 
@@ -3918,6 +3929,76 @@ mod tests {
         idle_lower.concurrency = 2;
         manager.update_settings(idle_lower).unwrap();
         wait_for_available_permits(&manager, 2, "a lower limit must withdraw idle permits").await;
+    }
+
+    /// RunnerPermit's drop is the reconciliation point the books hang on, and
+    /// both dispositions must complete under the state lock: the absorb branch
+    /// forgets the permit and the capacity with it; the return branch lands
+    /// the permit back in the pool without touching capacity. Repeated
+    /// acquire/return cycles through both branches must leave the books
+    /// balanced after every drop — `capacity == active + available` — and the
+    /// pool back at the stated limit once every holder is gone.
+    ///
+    /// Value: protects=RunnerPermit's absorb/return accounting in both
+    /// branches; fails_when=a cycle strands a permit or lets capacity drift
+    /// from the pool; why_new=the existing tests observe the books only
+    /// through whole download runs, never the drop's two branches in isolation
+    /// across repeated cycles; scope=quiescent bookkeeping only — this test
+    /// passes on the pre-fix tree, so the return-before-lock-release race it
+    /// accompanies rides on review, not on this pin (the interleaving window
+    /// is a few instructions wide and was verified unpinnable)
+    #[test]
+    fn permit_books_balance_across_acquire_return_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader);
+
+        for _ in 0..64 {
+            // Two holders under limit 2.
+            manager.resize_concurrency(2);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (2, 0, 2));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 2);
+            let r1 = RunnerPermit::new(
+                manager.semaphore.try_acquire().unwrap(),
+                &manager.concurrency,
+            );
+            let r2 = RunnerPermit::new(
+                manager.semaphore.try_acquire().unwrap(),
+                &manager.concurrency,
+            );
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (2, 2, 2));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 0);
+
+            // Downgrade while both are held: nothing is reclaimable up front.
+            manager.resize_concurrency(1);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (1, 2, 2));
+            }
+
+            // Absorb branch: still at or over the limit after the decrement,
+            // so the permit is forgotten and the capacity with it.
+            drop(r1);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (1, 1, 1));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 0);
+
+            // Return branch: a free slot under the limit re-enters the pool.
+            drop(r2);
+            {
+                let s = lock_concurrency(&manager.concurrency);
+                assert_eq!((s.desired, s.active, s.capacity), (1, 0, 1));
+            }
+            assert_eq!(manager.semaphore.available_permits(), 1);
+        }
     }
 
     #[test]
