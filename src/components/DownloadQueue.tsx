@@ -20,6 +20,7 @@ import {
 import { IconButton } from "./IconButton";
 import { withToast } from "../lib/asyncAction";
 import { cancelConfirmFor } from "../lib/cancelConfirm";
+import { pendingCancelStillCancelable } from "../lib/pendingCancel";
 import { api } from "../lib/tauri";
 import { formatBytes } from "../lib/format";
 import {
@@ -120,6 +121,19 @@ export function DownloadQueue({
       unlisten?.();
     };
   }, [loadJobs]);
+
+  // Live progress patches merge into `jobs` while the cancel-confirm dialog
+  // is open. Once the tracked job reaches a terminal state (or leaves the
+  // list) its cancel is a no-op, so drop it instead of keeping stale copy.
+  useEffect(() => {
+    if (!pendingCancel) {
+      return;
+    }
+    const live = jobs.find((j) => j.id === pendingCancel.id);
+    if (!pendingCancelStillCancelable(live)) {
+      setPendingCancel(null);
+    }
+  }, [jobs, pendingCancel]);
 
   async function handleCancel(id: string) {
     try {

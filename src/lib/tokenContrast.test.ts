@@ -200,6 +200,7 @@ const shellCss = readFileSync(SHELL_CSS, "utf8");
 
 /** [file css, selector, required declaration snippets]. */
 const CONSUMER_RULES: Array<[string, string, string[]]> = [
+  [pagesCss, ".settings-hint.warn", ["color: var(--warn-ink)"]],
   [pagesCss, ".queue-badge.pending", ["background: var(--muted-tint)", "color: var(--muted-ink)"]],
   [pagesCss, ".queue-badge.running", ["background: var(--accent-tint)", "color: var(--accent-ink)"]],
   [pagesCss, ".queue-badge.done", ["background: var(--success-tint)", "color: var(--success-ink)"]],
