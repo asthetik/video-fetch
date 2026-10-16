@@ -68,6 +68,10 @@ export function SettingsPage() {
   }, [loadSettings]);
 
   useEffect(() => {
+    // Re-derived on every save-dir change: the backend gates the notice on
+    // the session fallback still being active, so picking a working
+    // directory clears the hint instead of leaving it claiming app-data for
+    // the rest of the session.
     let cancelled = false;
     api
       .getSaveDirNotice()
@@ -83,7 +87,7 @@ export function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settings?.save_dir]);
 
   useEffect(() => {
     return () => {

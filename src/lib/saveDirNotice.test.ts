@@ -35,10 +35,22 @@ test("settings save-dir row renders the hint whenever the notice is set", () => 
   assert.match(settings, /getSaveDirNotice\(/);
   // ...decide the hint through the helper...
   assert.match(settings, /saveDirRowHint\(/);
-  // ...and render the hint inside the save-dir row, not elsewhere.
+  // ...and render the hint inside the save-dir row, not elsewhere. The
+  // hint must sit directly inside the conditional — substring pins
+  // satisfiable by dead remnants are the failure mode this guards against.
   const saveDirSection = settings.slice(settings.indexOf("保存目录"));
-  assert.match(saveDirSection, /\{saveDirHint/);
-  assert.match(saveDirSection, /settings-hint warn/);
+  assert.match(
+    saveDirSection,
+    /\{saveDirHint \? <p className="settings-hint warn">/,
+    "the hint element must render inside the saveDirHint conditional",
+  );
+  // ...and re-derive it whenever the save dir changes, so the backend's
+  // live gate (override dropped => None) actually clears the hint.
+  assert.match(
+    settings,
+    /\}, \[settings\?\.save_dir\]\);/,
+    "the notice effect must re-run when save_dir changes",
+  );
 });
 
 test("the startup toast is kept alongside the persistent hint", () => {
