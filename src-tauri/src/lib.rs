@@ -254,6 +254,12 @@ mod startup_silence_guard {
             cookie_body.contains("app: Cookie 文件准备失败"),
             "the cookie warn line must stay in startup_cookie_notice"
         );
+        assert_eq!(
+            cookie_body.matches("tracing::").count(),
+            1,
+            "the helper may carry exactly the one anomaly-gated warning; \
+             routine logging inside it would slip past the state-body count"
+        );
         assert!(
             state_body.contains("let cookie_notice = startup_cookie_notice(&auth)"),
             "startup must collect the cookie materialization notice into AppState"

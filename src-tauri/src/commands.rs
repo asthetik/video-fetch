@@ -331,7 +331,7 @@ pub(crate) const SAVE_DIR_UNAVAILABLE_NOTICE: &str = "保存目录不可用";
 /// missing so this session's downloads cannot carry the login until a rewrite
 /// succeeds (resume/retry rematerialize and refuse rather than silently run
 /// logged-out).
-pub(crate) const COOKIE_MATERIALIZE_NOTICE: &str = "登录 Cookie 准备失败，下载可能以未登录状态运行";
+pub(crate) const COOKIE_MATERIALIZE_NOTICE: &str = "登录 Cookie 准备失败，下载将无法启动";
 
 /// Where this session's downloads write, and any startup notice about it.
 pub(crate) struct SaveDirPlan {
