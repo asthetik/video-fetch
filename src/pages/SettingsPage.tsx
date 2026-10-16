@@ -245,14 +245,24 @@ export function SettingsPage() {
               value={settings.save_dir}
               // A mounted settings page always runs under a backend session
               // that has an effective save dir; an empty setting means that
-              // dir cannot cross IPC as a String, not "not configured".
-              placeholder={saveDirPlaceholder(settings.save_dir)}
+              // dir cannot cross IPC as a String, not "not configured". With
+              // the unavailability hint shown the session fell back to the
+              // app-data dir, so the placeholder stands down and lets the
+              // hint below speak (see saveDirDisplay.ts).
+              placeholder={saveDirPlaceholder(settings.save_dir, saveDirHint !== null)}
               readOnly
             />
             <button type="button" className="btn" onClick={() => void handlePickDir()}>
               更改…
             </button>
-            <button type="button" className="btn" onClick={() => void handleOpenSaveDir()}>
+            <button
+              type="button"
+              className="btn"
+              // Nothing to open while an unprintable path stands in: the
+              // action would be an enabled no-op.
+              disabled={!settings.save_dir}
+              onClick={() => void handleOpenSaveDir()}
+            >
               <FolderOpen size={14} strokeWidth={2} />
               打开
             </button>

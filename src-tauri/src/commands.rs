@@ -2811,10 +2811,17 @@ mod save_dir_tests {
             plan.effective, melted,
             "save path must not be melted into U+FFFD"
         );
+        // The empty-save_dir state the settings placeholder stands in for
+        // has exactly two shapes, and the notice distinguishes them: no
+        // notice means the session downloads to the unprintable default,
+        // a notice means it fell back to the app-data dir — the fact the
+        // frontend's placeholder suppression keys on (saveDirDisplay.ts).
         if raw_usable {
             assert_eq!(plan.effective, raw);
+            assert_eq!(plan.notice, None);
         } else {
             assert_eq!(plan.effective, app_dir.join("downloads"));
+            assert!(plan.notice.is_some());
         }
     }
 

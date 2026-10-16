@@ -9,33 +9,39 @@ import { saveDirPlaceholder } from "./saveDirDisplay.ts";
 // settings instead of melting it into U+FFFD — and the settings save-dir
 // input then rendered an empty path, which reads as "not configured" while
 // the session really downloads to the system default directory. The input
-// shows a clear stand-in placeholder instead.
+// shows a clear stand-in placeholder instead — except when the
+// unavailability hint is shown (the session fell back to the app-data dir,
+// which the stand-in's wording would contradict).
 
-test("empty save_dir with a session effective dir shows the stand-in placeholder", () => {
-  assert.equal(saveDirPlaceholder(""), "（本次会话使用系统默认下载目录）");
+test("empty save_dir with no session notice shows the stand-in placeholder", () => {
+  assert.equal(
+    saveDirPlaceholder("", false),
+    "（本次会话使用系统默认下载目录）",
+  );
 });
 
-test("a configured save_dir is the input value and gets no placeholder", () => {
-  assert.equal(saveDirPlaceholder("/Users/me/Downloads"), "");
+test("empty save_dir with the unavailability notice shown gets no placeholder", () => {
+  // The hint below the field reports the app-data fallback; a "system
+  // default" stand-in above it would claim the opposite.
+  assert.equal(saveDirPlaceholder("", true), "");
 });
 
-test("the placeholder is a stand-in label, never a melted path", () => {
-  const text = saveDirPlaceholder("");
-  assert.ok(text.length > 0);
-  // U+FFFD is what to_string_lossy melts a raw OS path into; the whole point
-  // of the placeholder is to avoid surfacing such a melt as a path.
-  assert.ok(!text.includes("\u{FFFD}"));
-  // Parenthetical prose, not something a user could mistake for a path.
-  assert.ok(!text.includes("/"));
+test("a non-empty save_dir gets no placeholder", () => {
+  assert.equal(saveDirPlaceholder("/Users/me/Downloads", false), "");
+  assert.equal(saveDirPlaceholder("/Users/me/Downloads", true), "");
 });
 
 test("settings save-dir input renders the placeholder through the helper", () => {
   // A pure-helper test cannot see the input: deleting the placeholder wiring
   // while leaving saveDirPlaceholder() on disk would stay green. Read
-  // SettingsPage so removing the wiring turns this red.
+  // SettingsPage so removing the wiring — or reverting it to the
+  // notice-blind call — turns this red.
   const settings = readFileSync(
     join(import.meta.dirname, "..", "pages", "SettingsPage.tsx"),
     "utf8",
   );
-  assert.match(settings, /placeholder=\{saveDirPlaceholder\(/);
+  assert.match(
+    settings,
+    /placeholder=\{saveDirPlaceholder\(settings\.save_dir, saveDirHint !== null\)\}/,
+  );
 });

@@ -413,6 +413,14 @@
   font-size: 0.9rem;
 }
 
+/* The save-dir field can hold the placeholder as its only content (empty
+   save_dir, no notice), so it is hint text that must carry a token rather
+   than the UA default — muted ink per the ink-grade rule for 10-16px
+   hint text. Other inputs keep the UA default for now. */
+.settings-input::placeholder {
+  color: var(--muted-ink);
+}
+
 .settings-hint {
   margin: 0.15rem 0 0;
   font-size: 0.78rem;
