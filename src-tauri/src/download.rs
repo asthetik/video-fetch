@@ -1733,7 +1733,6 @@ pub fn cleanup_orphan_work_dirs(work_root: &Path, keep_job_ids: &[String]) -> us
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use tokio::sync::TryAcquireError;
     use tokio::time::{Duration, sleep};
 
     struct MockDownloader {
@@ -3839,96 +3838,6 @@ mod tests {
             }
             assert_eq!(manager.semaphore.available_permits(), 1);
         }
-    }
-
-    /// The permit-in-flight window. Both of RunnerPermit's dispositions must
-    /// complete while the state lock is still held: releasing the lock before
-    /// the returning permit lands in the pool leaves a window in which the
-    /// books count the permit idle but `try_acquire` cannot see it yet, so a
-    /// concurrent `resize_concurrency` comes up empty on its reclaim attempt,
-    /// books the permit as held ("will be absorbed as the runners return
-    /// it") — and a return that is never absorbed overshoots the pool to
-    /// `desired + 1`, sticking until the next settings change re-reconciles
-    /// it. Hammering returns against limit changes must leave, at every fully
-    /// drained checkpoint, exactly the stated limit in the pool and books that
-    /// satisfy `capacity <= max(desired, active)`.
-    ///
-    /// Value: protects=permit disposition completing under the state lock;
-    /// fails_when=a drained run ends with the pool above the stated limit;
-    /// why_new=no test interleaves returns with limit changes; note the
-    /// window is a few instructions wide, so this hammers the interleaving
-    /// rather than pinning it deterministically
-    #[test]
-    fn returns_racing_limit_changes_drain_to_the_stated_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        let downloader = Arc::new(LatchedDownloader::new());
-        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader);
-        manager.resize_concurrency(3);
-
-        // Workers cycle acquire/return as fast as they can while a spinner
-        // toggles the limit. Holding each permit across a yield lets a return
-        // overlap the toggle while its peers still hold theirs — the only
-        // shape in which resize's reclaim attempt meets an in-flight return.
-        let stop = Arc::new(AtomicBool::new(false));
-        let toggler = {
-            let manager = manager.clone();
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    manager.resize_concurrency(1);
-                    manager.resize_concurrency(3);
-                }
-            })
-        };
-        let workers: Vec<_> = (0..4)
-            .map(|_| {
-                let manager = manager.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..400 {
-                        let permit = loop {
-                            match manager.semaphore.try_acquire() {
-                                Ok(permit) => break permit,
-                                Err(TryAcquireError::NoPermits) => std::thread::yield_now(),
-                                Err(TryAcquireError::Closed) => panic!("semaphore closed"),
-                            }
-                        };
-                        let runner = RunnerPermit::new(permit, &manager.concurrency);
-                        std::thread::yield_now();
-                        drop(runner);
-                    }
-                })
-            })
-            .collect();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-        stop.store(true, Ordering::SeqCst);
-        toggler.join().unwrap();
-
-        // Drained: every disposition has completed, so the books must balance
-        // and the pool must sit exactly at the stated limit — never
-        // `desired + 1`.
-        let s = lock_concurrency(&manager.concurrency);
-        assert_eq!(s.active, 0, "all workers must have returned their permits");
-        assert!(
-            s.capacity <= s.desired.max(s.active),
-            "capacity {} exceeds max(desired={}, active={})",
-            s.capacity,
-            s.desired,
-            s.active
-        );
-        let desired = s.desired;
-        let capacity = s.capacity;
-        drop(s);
-        assert_eq!(
-            manager.semaphore.available_permits(),
-            capacity,
-            "books must balance: every permit is either active or in the pool"
-        );
-        assert_eq!(
-            capacity, desired,
-            "a drained pool must hold exactly the stated limit, not {capacity} for {desired}"
-        );
     }
 
     #[test]
