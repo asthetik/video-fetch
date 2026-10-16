@@ -13,9 +13,10 @@ function loading(): ResolveStatus {
 }
 
 describe("reduceResolveStatus", () => {
-  it("resolve_rejected (cache-write failure, no formats_failed event) ends formatsLoading and sets formatsError", () => {
+  it("resolve_rejected without a terminal event ends formatsLoading and sets formatsError", () => {
     // The cache-write `?` in resolve_url returns Err with no follow-up
-    // formats_failed event. The command rejection is the only terminal the UI
+    // formats_failed event (unchanged since the cache-write fix: the rejection
+      // is still the only terminal for this Err shape). The command rejection is the only terminal the UI
     // sees, so it must end the spinner and surface the message in-card.
     const afterPartial = reduceResolveStatus(loading(), { type: "partial" });
     const next = reduceResolveStatus(afterPartial, {
@@ -80,12 +81,115 @@ describe("reduceResolveStatus", () => {
     assert.equal(next.formatsError, "清晰度获取失败");
   });
 
+  it("cache-write dual-fire with a card converges to one terminal state in either order", () => {
+    // The cache-write failure path emits resolve://formats_failed AND rejects
+    // the resolve promise with the same message. Both signals must fold into
+    // the same terminal state regardless of arrival order: spinner off, the
+    // message rendered once in the in-card formatsError, and the page error
+    // left clear (a card is on screen, so the message must not leak into it).
+    const message = "写入缓存失败";
+    const afterPartial = reduceResolveStatus(loading(), { type: "partial" });
+
+    const failFirst = reduceResolveStatus(
+      reduceResolveStatus(afterPartial, {
+        type: "formats_failed",
+        message,
+      }),
+      { type: "resolve_rejected", message, hasCard: true },
+    );
+    const rejectFirst = reduceResolveStatus(
+      reduceResolveStatus(afterPartial, {
+        type: "resolve_rejected",
+        message,
+        hasCard: true,
+      }),
+      { type: "formats_failed", message },
+    );
+
+    assert.deepEqual(failFirst, rejectFirst);
+    assert.deepEqual(failFirst, {
+      error: null,
+      formatsLoading: false,
+      formatsError: message,
+    });
+
+    // Replaying either signal must not restart the spinner or duplicate the
+    // message: the terminal state is stable under double-fire.
+    assert.deepEqual(
+      reduceResolveStatus(failFirst, { type: "formats_failed", message }),
+      failFirst,
+    );
+    assert.deepEqual(
+      reduceResolveStatus(failFirst, {
+        type: "resolve_rejected",
+        message,
+        hasCard: true,
+      }),
+      failFirst,
+    );
+  });
+
+  it("cache-write dual-fire without a card converges to one terminal state in either order", () => {
+    // Same double signal before any partial: no card is rendered, so the
+    // message is also the page error. Either order must land on the same
+    // state — the second signal neither restarts the spinner, duplicates the
+    // message, nor clears what the first one set.
+    const message = "写入缓存失败";
+
+    const failFirst = reduceResolveStatus(
+      reduceResolveStatus(loading(), { type: "formats_failed", message }),
+      { type: "resolve_rejected", message, hasCard: false },
+    );
+    const rejectFirst = reduceResolveStatus(
+      reduceResolveStatus(loading(), {
+        type: "resolve_rejected",
+        message,
+        hasCard: false,
+      }),
+      { type: "formats_failed", message },
+    );
+
+    assert.deepEqual(failFirst, rejectFirst);
+    assert.deepEqual(failFirst, {
+      error: message,
+      formatsLoading: false,
+      formatsError: message,
+    });
+
+    assert.deepEqual(
+      reduceResolveStatus(failFirst, { type: "formats_failed", message }),
+      failFirst,
+    );
+    assert.deepEqual(
+      reduceResolveStatus(failFirst, {
+        type: "resolve_rejected",
+        message,
+        hasCard: false,
+      }),
+      failFirst,
+    );
+  });
+
   it("complete ends formatsLoading and clears formatsError", () => {
     const failed = reduceResolveStatus(loading(), {
       type: "formats_failed",
       message: "old",
     });
     const next = reduceResolveStatus(failed, { type: "complete" });
+    assert.equal(next.formatsLoading, false);
+    assert.equal(next.formatsError, null);
+  });
+
+  it("complete leaves a pre-existing page error untouched", () => {
+    // Contract pin: `complete` only settles the formats row. The page-level
+    // error is owned by the no-card branch and must survive a complete
+    // dispatch instead of being silently cleared.
+    const withPageError = reduceResolveStatus(loading(), {
+      type: "settled_page_error",
+      message: "无效的空间链接",
+    });
+    const next = reduceResolveStatus(withPageError, { type: "complete" });
+    assert.equal(next.error, "无效的空间链接");
     assert.equal(next.formatsLoading, false);
     assert.equal(next.formatsError, null);
   });

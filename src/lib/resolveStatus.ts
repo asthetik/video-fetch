@@ -36,11 +36,12 @@ export type ResolveStatusEvent =
   /** `resolve://formats_failed`: this request ended in failure. */
   | { type: "formats_failed"; message: string }
   /**
-   * The resolve command was rejected (catch path) with no terminal event —
-   * e.g. the cache-write failure that returns Err without `formats_failed`.
-   * `hasCard` only decides where the message is surfaced; the formats spinner
-   * reset is unconditional, so a card already rendered (partial arrived
-   * earlier, or a force refresh kept old meta) never spins forever.
+   * The resolve command was rejected (catch path). Some Err exits emit no
+   * terminal event (the cache-write failure emits `formats_failed` before
+   * returning Err; others do not), so the rejection itself must settle the
+   * state. `hasCard` only decides where the message is surfaced; the formats
+   * spinner reset is unconditional, so a card already rendered (partial
+   * arrived earlier, or a force refresh kept old meta) never spins forever.
    */
   | { type: "resolve_rejected"; message: string; hasCard: boolean };
 

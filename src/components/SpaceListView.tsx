@@ -145,7 +145,9 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
         format_id: formatId,
         audio_format: audioFormat,
         // Space owner name; the backend expands %(uploader)s in the
-        // skip-existing prediction with it, matching the single-video path.
+        // skip-existing prediction with it, matching the single-video path's
+        // caliber (the space's display name can still differ from yt-dlp's
+        // %(uploader)s for joint submissions or renamed accounts).
         uploader,
       });
       const failedNote =
