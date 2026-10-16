@@ -387,8 +387,11 @@ mod tests {
 
     /// A write that cannot even start staging must leave the jar that is
     /// already there untouched: yt-dlp keeps reading the previous whole file
-    /// instead of inheriting a truncated one. The staging path is blocked with
-    /// a directory so the failure happens before the jar is opened at all.
+    /// instead of inheriting a truncated one. `#[cfg(unix)]`: the failure is
+    /// staged by making the cache dir read-only, which has no portable
+    /// Windows equivalent; on Windows the failure-path cleanup stays covered
+    /// by `a_failed_publish_leaves_no_temporary_behind`.
+    #[cfg(unix)]
     #[test]
     fn a_failed_write_leaves_the_previous_jar_intact() {
         let dir = tempfile::tempdir().unwrap();
@@ -399,12 +402,9 @@ mod tests {
         // A read-only directory: creating the staging file fails before the
         // jar is opened. (With a per-call unique staging name there is no
         // fixed path to pre-block, and blocking the cache dir is the exact
-        // Unix shape of the failure this test needs.)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
-        }
+        // shape of the failure this test needs.)
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
 
         assert!(
             write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "new")]).is_err(),
@@ -415,11 +415,7 @@ mod tests {
             before,
             "a failed write must leave the previous whole jar in place"
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
