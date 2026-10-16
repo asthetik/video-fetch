@@ -3726,15 +3726,18 @@ mod tests {
 
         // Drain everything. The pool must settle at the final stated limit of
         // 3 — not the inflated leftover the repeated toggles would leave.
+        // Retry-until, not a one-shot read: Done is committed before the
+        // runner's permit is returned, so a direct read can catch the gap.
         for id in &ids {
             downloader.release(id);
             wait_for_status(&manager, id, JobStatus::Done).await;
         }
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "after repeated round trips the pool must settle at the final limit of 3"
-        );
+            "after repeated round trips the pool must settle at the final limit of 3",
+        )
+        .await;
     }
 
     /// A downgrade must take effect even while every slot is busy: the surplus
