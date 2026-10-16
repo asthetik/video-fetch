@@ -26,6 +26,7 @@ function job(id: string, createdAt: string | null): DownloadJob {
     page_index: 1,
     format_id: "f",
     title: id,
+    uploader: "",
     output_template: "t",
     status: "done",
     progress: 1,

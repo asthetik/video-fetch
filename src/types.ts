@@ -46,6 +46,8 @@ export interface DownloadJob {
   format_id: string;
   audio_format?: string | null;
   title: string;
+  /** Uploader name captured at enqueue time; empty for legacy rows. */
+  uploader: string;
   output_template: string;
   status: JobStatus;
   progress: number;
@@ -65,6 +67,12 @@ export interface DownloadJob {
   downloaded_bytes?: number | null;
   total_bytes?: number | null;
 }
+
+/**
+ * Wire-shape pin for `DownloadJob.uploader`: the indexed access fails `tsc`
+ * if the field is dropped, keeping the TS shape mirroring the Rust struct.
+ */
+export type DownloadJobUploader = DownloadJob["uploader"];
 
 export interface AppSettings {
   save_dir: string;
