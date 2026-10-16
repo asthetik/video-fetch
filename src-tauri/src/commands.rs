@@ -69,6 +69,10 @@ pub struct AppState {
     /// Startup notice for the UI: set when this session's downloads were
     /// redirected because the configured save dir was unusable.
     pub save_dir_notice: Option<String>,
+    /// Startup notice for the UI: set when this session's login cookies could
+    /// not be materialized at launch (the cookie store still reads logged in,
+    /// but `cookies.txt` is missing so downloads cannot carry the session).
+    pub cookie_notice: Option<String>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
     /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
@@ -323,6 +327,13 @@ pub fn default_save_dir(app: &AppHandle, app_dir: &Path) -> PathBuf {
 /// configured save directory could not be used.
 pub(crate) const SAVE_DIR_UNAVAILABLE_NOTICE: &str = "保存目录不可用";
 
+/// Surfaced in the UI when startup cookie materialization failed: the login
+/// chip keeps reading "logged in" from the cookie store, but `cookies.txt` is
+/// missing so this session's downloads cannot carry the login until a rewrite
+/// succeeds (resume/retry rematerialize and refuse rather than silently run
+/// logged-out).
+pub(crate) const COOKIE_MATERIALIZE_NOTICE: &str = "登录 Cookie 准备失败，下载将无法启动";
+
 /// Where this session's downloads write, and any startup notice about it.
 pub(crate) struct SaveDirPlan {
     /// Directory downloads use this session (may differ from
@@ -377,6 +388,19 @@ fn rematerialize_cookies(state: &AppState) -> AppResult<Option<PathBuf>> {
         // user's toast as-is with no mention of what actually failed.
         AppError::Message(format!("Cookie 文件准备失败，请稍后重试: {e}"))
     })
+}
+
+/// Materialize `cookies.txt` for this session and report the UI notice when
+/// the rewrite fails. A locked/ACL'd file must not block launch: the failure
+/// is logged and a notice is recorded instead — and every resume/retry
+/// re-materializes the file and refuses to restart while the rewrite still
+/// fails, rather than silently running logged-out.
+fn startup_cookie_notice(auth: &AuthManager) -> Option<String> {
+    if let Err(e) = auth.materialize_cookies_file() {
+        tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
+        return Some(COOKIE_MATERIALIZE_NOTICE.to_string());
+    }
+    None
 }
 
 /// Build a Bilibili page URL using 1-based `?p=` (page 1 omits the query).
@@ -1245,6 +1269,14 @@ pub fn get_save_dir_notice(state: State<'_, AppState>) -> Option<String> {
     state.save_dir_notice.clone()
 }
 
+/// Startup notice about login cookies: set when `cookies.txt` could not be
+/// materialized at launch while the cookie store still holds a login. `None`
+/// when nothing needs saying. Shown once by the UI at startup.
+#[tauri::command]
+pub fn get_cookie_notice(state: State<'_, AppState>) -> Option<String> {
+    state.cookie_notice.clone()
+}
+
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<()> {
     naming::validate_output_template(&settings.filename_template)
@@ -1853,10 +1885,12 @@ pub async fn pick_cookies_file(app: AppHandle) -> AppResult<String> {
 }
 
 // Log-shape invariant (see the comment on `run` in lib.rs): a healthy
-// startup produces ZERO log lines. The two tracing sites in this function are
-// anomaly-gated (they fire only when a previous session left orphans or
-// interrupted rows behind); do not add routine lifecycle logging here.
-// `startup_silence_guard` in lib.rs pins the call sites and their guards.
+// startup produces ZERO log lines. The three tracing sites in this function
+// are anomaly-gated (they fire only when a previous session left orphans or
+// interrupted rows behind, or the save-dir fallback is active); do not add
+// routine lifecycle logging here. The cookie materialization warn lives in
+// `startup_cookie_notice` (also anomaly-gated). `startup_silence_guard` in
+// lib.rs pins the call sites and their guards.
 pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let app_dir = app
         .path()
@@ -1890,11 +1924,10 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
     // A locked/ACL'd cookies.txt must not block launch, but the failure is not
-    // swallowed either: it is logged here, and every resume/retry re-materializes
-    // the file and refuses to restart when the rewrite still fails.
-    if let Err(e) = auth.materialize_cookies_file() {
-        tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
-    }
+    // swallowed either: the UI notice is recorded here (and the failure logged),
+    // and every resume/retry re-materializes the file and refuses to restart
+    // when the rewrite still fails.
+    let cookie_notice = startup_cookie_notice(&auth);
 
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
@@ -1945,6 +1978,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         downloads,
         settings: std::sync::Mutex::new(settings),
         save_dir_notice: save_dir_plan.notice,
+        cookie_notice,
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
         http_client,
@@ -2834,6 +2868,7 @@ mod restart_cookie_tests {
         let state = AppState {
             openable_roots_cache: Default::default(),
             save_dir_notice: None,
+            cookie_notice: None,
             app_dir: root.path().to_path_buf(),
             auth: AuthManager::new(cache_dir),
             downloads,
@@ -3077,6 +3112,68 @@ mod restart_cookie_tests {
         assert_eq!(job_status(&app.state, "job-a3"), JobStatus::Paused);
         assert_eq!(job_status(&app.state, "job-a4"), JobStatus::Paused);
         assert_eq!(app.seen.lock().unwrap().len(), 2);
+    }
+}
+
+/// Startup cookie materialization must leave a user-visible notice when it
+/// fails: the login chip keeps reading "logged in" from the cookie store while
+/// `cookies.txt` is missing, and the user would otherwise only discover the
+/// problem when a download attempt errors out. The notice text is the pin —
+/// dropping the set in `startup_cookie_notice` must turn these red.
+#[cfg(test)]
+mod startup_cookie_notice_tests {
+    use super::*;
+
+    fn logged_in_auth(root: &Path) -> AuthManager {
+        let cache_dir = root.join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let auth = AuthManager::new(cache_dir);
+        auth.save_cookies_from_webview(vec![Cookie {
+            domain: ".bilibili.com".into(),
+            include_subdomains: true,
+            path: "/".into(),
+            secure: true,
+            expiration: 0,
+            name: "SESSDATA".into(),
+            value: "abc123".into(),
+        }])
+        .unwrap();
+        auth
+    }
+
+    #[test]
+    fn materialize_failure_sets_the_startup_notice() {
+        let root = tempfile::tempdir().unwrap();
+        let auth = logged_in_auth(root.path());
+        // A directory where cookies.txt belongs makes the rewrite fail the
+        // same way an AV lock does: launch must set the notice, not swallow it.
+        std::fs::create_dir_all(root.path().join("cache").join("cookies.txt")).unwrap();
+        let notice =
+            startup_cookie_notice(&auth).expect("materialize failure must set the startup notice");
+        assert_eq!(
+            notice, COOKIE_MATERIALIZE_NOTICE,
+            "the notice must carry the agreed UI copy"
+        );
+    }
+
+    #[test]
+    fn materialize_success_sets_no_notice() {
+        let root = tempfile::tempdir().unwrap();
+        let auth = logged_in_auth(root.path());
+        assert_eq!(startup_cookie_notice(&auth), None);
+        assert!(
+            root.path().join("cache").join("cookies.txt").exists(),
+            "precondition: the rewrite succeeded"
+        );
+    }
+
+    #[test]
+    fn logged_out_sets_no_notice() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_dir = root.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let auth = AuthManager::new(cache_dir);
+        assert_eq!(startup_cookie_notice(&auth), None);
     }
 }
 
