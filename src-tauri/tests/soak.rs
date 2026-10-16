@@ -30,16 +30,16 @@ const QUIESCE_TICKS: usize = 12;
 #[tokio::test]
 #[ignore = "soak: run locally, never in CI"]
 async fn soak_churns_downloads_and_asserts_invariants() {
-    let minutes: u64 = parse_env_or("SOAK_MINUTES", std::env::var("SOAK_MINUTES").ok(), 5);
+    let minutes: u64 = parse_env_or("SOAK_MINUTES", std::env::var("SOAK_MINUTES"), 5);
     let seed: u64 = parse_env_or(
         "SOAK_SEED",
-        std::env::var("SOAK_SEED").ok(),
+        std::env::var("SOAK_SEED"),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
     );
-    let max_jobs: usize = parse_env_or("SOAK_JOBS", std::env::var("SOAK_JOBS").ok(), 6);
+    let max_jobs: usize = parse_env_or("SOAK_JOBS", std::env::var("SOAK_JOBS"), 6);
 
     let mut rng = XorShift64::new(seed);
     let mut ledger: Vec<(Op, String)> = Vec::new();
@@ -487,14 +487,26 @@ async fn list_retry(h: &Harness) -> Vec<DownloadJob> {
     panic!("list() kept failing (sqlite contention) after 2s");
 }
 
-/// Parse one `SOAK_*` override; `raw` is the variable as read from the
-/// environment (`None` when unset). A value that is set but unparseable must
-/// panic and name the original text: `SOAK_MINUTES=1O` (letter O) used to
-/// fall through `parse().ok()` to the default and quietly run a 5-minute
-/// soak that looked deliberate. An unset variable keeps `default`.
-fn parse_env_or<T: std::str::FromStr>(name: &str, raw: Option<String>, default: T) -> T {
-    let Some(raw) = raw else {
-        return default;
+/// Parse one `SOAK_*` override; `raw` is the result of reading the variable
+/// from the environment (`Err(VarError::NotPresent)` when unset). A value that
+/// is set but unusable must panic and name the original value: wrong syntax
+/// (`SOAK_MINUTES=1O`, letter O) used to fall through `parse().ok()` to the
+/// default and quietly run a 5-minute soak that looked deliberate, and
+/// `env::var(..).ok()` did the same for a non-UTF-8 value. An unset variable
+/// keeps `default`.
+fn parse_env_or<T: std::str::FromStr>(
+    name: &str,
+    raw: Result<String, std::env::VarError>,
+    default: T,
+) -> T {
+    let raw = match raw {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return default,
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            panic!(
+                "{name}={raw:?} is not valid UTF-8; fix the override instead of silently defaulting"
+            )
+        }
     };
     raw.parse().unwrap_or_else(|_| {
         panic!("{name}={raw:?} is not parseable; fix the override instead of silently defaulting")
@@ -503,14 +515,20 @@ fn parse_env_or<T: std::str::FromStr>(name: &str, raw: Option<String>, default: 
 
 #[test]
 fn soak_env_defaults_when_unset() {
-    assert_eq!(parse_env_or("SOAK_MINUTES", None, 5u64), 5);
-    assert_eq!(parse_env_or("SOAK_JOBS", None, 6usize), 6);
+    assert_eq!(
+        parse_env_or("SOAK_MINUTES", Err(std::env::VarError::NotPresent), 5u64),
+        5
+    );
+    assert_eq!(
+        parse_env_or("SOAK_JOBS", Err(std::env::VarError::NotPresent), 6usize),
+        6
+    );
 }
 
 #[test]
 fn soak_env_parses_a_valid_override() {
-    assert_eq!(parse_env_or("SOAK_MINUTES", Some("11".into()), 5u64), 11);
-    assert_eq!(parse_env_or("SOAK_SEED", Some("42".into()), 0u64), 42);
+    assert_eq!(parse_env_or("SOAK_MINUTES", Ok("11".into()), 5u64), 11);
+    assert_eq!(parse_env_or("SOAK_SEED", Ok("42".into()), 0u64), 42);
 }
 
 /// Value: protects=soak knob parsing; fails_when=`SOAK_MINUTES=1O` (letter
@@ -519,17 +537,33 @@ fn soak_env_parses_a_valid_override() {
 #[test]
 #[should_panic(expected = "SOAK_MINUTES=\"1O\"")]
 fn unparseable_soak_override_panics_naming_the_original_value() {
-    let _ = parse_env_or("SOAK_MINUTES", Some("1O".into()), 5u64);
+    let _ = parse_env_or("SOAK_MINUTES", Ok("1O".into()), 5u64);
 }
 
 #[test]
 #[should_panic(expected = "SOAK_SEED=\"0x10\"")]
 fn unparseable_soak_seed_panics_naming_the_original_value() {
-    let _ = parse_env_or("SOAK_SEED", Some("0x10".into()), 0u64);
+    let _ = parse_env_or("SOAK_SEED", Ok("0x10".into()), 0u64);
 }
 
 #[test]
 #[should_panic(expected = "SOAK_JOBS=\"many\"")]
 fn unparseable_soak_jobs_panics_naming_the_original_value() {
-    let _ = parse_env_or("SOAK_JOBS", Some("many".into()), 6usize);
+    let _ = parse_env_or("SOAK_JOBS", Ok("many".into()), 6usize);
+}
+
+/// Value: protects=soak knob parsing; fails_when=a non-UTF-8 `SOAK_MINUTES`
+/// value silently falls back to the default (the old `env::var(..).ok()`
+/// lookup) instead of panicking with the raw value in the message;
+/// why_new=review finding A15; seam=lookup result passed to `parse_env_or`
+/// (no process-global env mutation, parallel-safe)
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "SOAK_MINUTES=\"foo\\xFF\" is not valid UTF-8")]
+fn nonunicode_soak_override_panics_naming_the_raw_value() {
+    use std::os::unix::ffi::OsStringExt;
+    let raw = Err(std::env::VarError::NotUnicode(
+        std::ffi::OsString::from_vec(vec![0x66, 0x6f, 0x6f, 0xff]),
+    ));
+    let _ = parse_env_or("SOAK_MINUTES", raw, 5u64);
 }

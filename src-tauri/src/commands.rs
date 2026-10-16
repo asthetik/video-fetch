@@ -69,6 +69,10 @@ pub struct AppState {
     /// Startup notice for the UI: set when this session's downloads were
     /// redirected because the configured save dir was unusable.
     pub save_dir_notice: Option<String>,
+    /// Startup notice for the UI: set when this session's login cookies could
+    /// not be materialized at launch (the cookie store still reads logged in,
+    /// but `cookies.txt` is missing so downloads cannot carry the session).
+    pub cookie_notice: Option<String>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
     /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
@@ -83,7 +87,8 @@ pub struct AppState {
     /// later (the Bilibili login window) read it at creation so they do not
     /// lag one switch behind.
     pub window_theme: std::sync::Mutex<WindowTheme>,
-    /// Cached openable roots for `open_path`; invalidated on settings save.
+    /// Cached openable roots for `open_path`; invalidated on settings save
+    /// and history deletes.
     pub openable_roots_cache: OpenableRootsCache,
 }
 
@@ -322,6 +327,13 @@ pub fn default_save_dir(app: &AppHandle, app_dir: &Path) -> PathBuf {
 /// configured save directory could not be used.
 pub(crate) const SAVE_DIR_UNAVAILABLE_NOTICE: &str = "保存目录不可用";
 
+/// Surfaced in the UI when startup cookie materialization failed: the login
+/// chip keeps reading "logged in" from the cookie store, but `cookies.txt` is
+/// missing so this session's downloads cannot carry the login until a rewrite
+/// succeeds (resume/retry rematerialize and refuse rather than silently run
+/// logged-out).
+pub(crate) const COOKIE_MATERIALIZE_NOTICE: &str = "登录 Cookie 准备失败，下载将无法启动";
+
 /// Where this session's downloads write, and any startup notice about it.
 pub(crate) struct SaveDirPlan {
     /// Directory downloads use this session (may differ from
@@ -376,6 +388,19 @@ fn rematerialize_cookies(state: &AppState) -> AppResult<Option<PathBuf>> {
         // user's toast as-is with no mention of what actually failed.
         AppError::Message(format!("Cookie 文件准备失败，请稍后重试: {e}"))
     })
+}
+
+/// Materialize `cookies.txt` for this session and report the UI notice when
+/// the rewrite fails. A locked/ACL'd file must not block launch: the failure
+/// is logged and a notice is recorded instead — and every resume/retry
+/// re-materializes the file and refuses to restart while the rewrite still
+/// fails, rather than silently running logged-out.
+fn startup_cookie_notice(auth: &AuthManager) -> Option<String> {
+    if let Err(e) = auth.materialize_cookies_file() {
+        tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
+        return Some(COOKIE_MATERIALIZE_NOTICE.to_string());
+    }
+    None
 }
 
 /// Build a Bilibili page URL using 1-based `?p=` (page 1 omits the query).
@@ -1098,10 +1123,20 @@ pub async fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllR
 
 #[tauri::command]
 pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishedResult> {
+    clear_finished_jobs_impl(&state)
+}
+
+/// [`clear_finished_jobs`] body, split out so tests can drive the clear path
+/// without a Tauri `State`.
+fn clear_finished_jobs_impl(state: &AppState) -> AppResult<ClearFinishedResult> {
     let result = state
         .downloads
         .clear_finished()
         .inspect_err(|e| warn_cmd("history: 清空失败", e))?;
+    // The rows are gone: their output directories must stop being openable
+    // roots. Drop the cache so the next `open_path` recomputes from the
+    // surviving history (same invalidate-on-write as `save_settings`).
+    state.openable_roots_cache.invalidate();
     tracing::info!(target: "core", "history: 清空已完成（{} 条）", result.cleared);
     Ok(result)
 }
@@ -1197,12 +1232,23 @@ pub struct DeleteJobArgs {
 
 #[tauri::command]
 pub async fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
-    tracing::info!(target: "core", "download: 删除 {}（含文件={}）", args.id, args.delete_file);
+    delete_job_impl(&state, &args.id, args.delete_file).await
+}
+
+/// [`delete_job`] body, split out so tests can drive the delete path without
+/// a Tauri `State`.
+async fn delete_job_impl(state: &AppState, id: &str, delete_file: bool) -> AppResult<()> {
+    tracing::info!(target: "core", "download: 删除 {}（含文件={}）", id, delete_file);
     state
         .downloads
-        .delete(&args.id, args.delete_file)
+        .delete(id, delete_file)
         .await
-        .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {}", args.id), e))
+        .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {id}"), e))?;
+    // The row is gone: its output directory must stop being an openable root.
+    // Drop the cache so the next `open_path` recomputes from the surviving
+    // history (same invalidate-on-write as `save_settings`).
+    state.openable_roots_cache.invalidate();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1221,6 +1267,14 @@ pub fn get_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
 #[tauri::command]
 pub fn get_save_dir_notice(state: State<'_, AppState>) -> Option<String> {
     state.save_dir_notice.clone()
+}
+
+/// Startup notice about login cookies: set when `cookies.txt` could not be
+/// materialized at launch while the cookie store still holds a login. `None`
+/// when nothing needs saying. Shown once by the UI at startup.
+#[tauri::command]
+pub fn get_cookie_notice(state: State<'_, AppState>) -> Option<String> {
+    state.cookie_notice.clone()
 }
 
 #[tauri::command]
@@ -1341,7 +1395,13 @@ fn try_persist_webview_cookies(app: &AppHandle, win: &tauri::WebviewWindow) -> O
     let state = app.try_state::<AppState>()?;
     match state.auth.save_cookies_from_webview(converted) {
         Ok(status) => {
-            let _ = state.auth.materialize_cookies_file();
+            // Best-effort here (unlike resume/retry, which raise): the login is
+            // already stored, so a cookies.txt write failure must not flip the
+            // result — but it is logged, not swallowed (same message family as
+            // the startup path in build_app_state).
+            if let Err(e) = state.auth.materialize_cookies_file() {
+                tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
+            }
             Some(status)
         }
         Err(_) => None,
@@ -1562,8 +1622,10 @@ fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
 /// Cached `openable_roots`. Computing the roots canonicalizes every history
 /// output's parent — O(history) disk probes — which is far too heavy to redo
 /// on every `open_path` (it froze the window on large histories). Recomputed
-/// on first use and invalidated on settings save: the save folder is the root
-/// that moves, and a save-folder change re-reads the whole history anyway.
+/// on first use and invalidated on writes that move the roots: a settings
+/// save (the save folder is the root that moves, and a save-folder change
+/// re-reads the whole history anyway) and a history delete (the deleted row's
+/// output directory must drop out of the openable set).
 #[derive(Default)]
 pub struct OpenableRootsCache {
     roots: std::sync::Mutex<Option<Vec<PathBuf>>>,
@@ -1587,7 +1649,8 @@ impl OpenableRootsCache {
     }
 
     /// Drop the cache so the next open recomputes (a settings save may have
-    /// moved the save folder out of the old root set).
+    /// moved the save folder out of the old root set, or a history delete may
+    /// have removed the row that made a directory openable).
     pub fn invalidate(&self) {
         let mut slot = match self.roots.lock() {
             Ok(guard) => guard,
@@ -1791,6 +1854,17 @@ fn apply_window_theme(window: &tauri::WebviewWindow, theme: WindowTheme) -> Resu
     window.set_theme(theme).map_err(|e| e.to_string())
 }
 
+/// Convert a user-picked directory into the String settings.json stores.
+/// The config holds a String, so a non-UTF-8 pick cannot round-trip: melting it
+/// with `to_string` would persist a U+FFFD path the real directory can never
+/// match (the same class `apply_save_dir` guards for the default dir). Reject
+/// instead so the user picks another folder.
+fn picked_dir_to_string(dir: PathBuf) -> Result<String, AppError> {
+    dir.into_os_string()
+        .into_string()
+        .map_err(|_| AppError::Message("该路径包含无法保存的字符，请另选目录".into()))
+}
+
 #[tauri::command]
 pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
     let folder =
@@ -1799,7 +1873,12 @@ pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
             .map_err(|e| AppError::Message(format!("对话框任务失败: {e}")))?;
 
     match folder {
-        Some(path) => Ok(path.to_string()),
+        Some(path) => {
+            let dir = path
+                .into_path()
+                .map_err(|e| AppError::Message(format!("对话框路径无效: {e}")))?;
+            picked_dir_to_string(dir)
+        }
         None => Err(AppError::Message("已取消选择目录".into())),
     }
 }
@@ -1822,10 +1901,12 @@ pub async fn pick_cookies_file(app: AppHandle) -> AppResult<String> {
 }
 
 // Log-shape invariant (see the comment on `run` in lib.rs): a healthy
-// startup produces ZERO log lines. The two tracing sites in this function are
-// anomaly-gated (they fire only when a previous session left orphans or
-// interrupted rows behind); do not add routine lifecycle logging here.
-// `startup_silence_guard` in lib.rs pins the call sites and their guards.
+// startup produces ZERO log lines. The three tracing sites in this function
+// are anomaly-gated (they fire only when a previous session left orphans or
+// interrupted rows behind, or the save-dir fallback is active); do not add
+// routine lifecycle logging here. The cookie materialization warn lives in
+// `startup_cookie_notice` (also anomaly-gated). `startup_silence_guard` in
+// lib.rs pins the call sites and their guards.
 pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let app_dir = app
         .path()
@@ -1859,11 +1940,10 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
     let auth = AuthManager::new(cache_dir);
     // A locked/ACL'd cookies.txt must not block launch, but the failure is not
-    // swallowed either: it is logged here, and every resume/retry re-materializes
-    // the file and refuses to restart when the rewrite still fails.
-    if let Err(e) = auth.materialize_cookies_file() {
-        tracing::warn!(target: "core", "app: Cookie 文件准备失败: {e}");
-    }
+    // swallowed either: the UI notice is recorded here (and the failure logged),
+    // and every resume/retry re-materializes the file and refuses to restart
+    // when the rewrite still fails.
+    let cookie_notice = startup_cookie_notice(&auth);
 
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
@@ -1914,6 +1994,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         downloads,
         settings: std::sync::Mutex::new(settings),
         save_dir_notice: save_dir_plan.notice,
+        cookie_notice,
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
         http_client,
@@ -2142,8 +2223,9 @@ mod tests {
 
     /// A9: `openable_roots` canonicalizes every history output's parent — O(history)
     /// disk probes per call, which froze the window on every `open_path` in large
-    /// histories. The cache must compute once and recompute only when the settings
-    /// change (the save folder is the root that moves).
+    /// histories. The cache must compute once and recompute only when invalidated
+    /// (a settings save — the save folder is the root that moves — or a history
+    /// delete; the delete paths are pinned in `openable_roots_delete_tests`).
     #[test]
     fn openable_roots_cache_computes_once_until_invalidated() {
         let cache = OpenableRootsCache::default();
@@ -2284,6 +2366,175 @@ mod tests {
         );
         let already = "%(title)s [P%(playlist_index)s].%(ext)s";
         assert_eq!(ensure_playlist_index_template(already, true), already);
+    }
+}
+
+/// A9 follow-up: history deletes are writes that shrink the openable set. A
+/// deleted job's output directory is a root only because its row named it, so
+/// once the row is gone the cached roots must drop it — the same
+/// invalidate-on-write `save_settings` does, pinned here for both delete
+/// command paths.
+#[cfg(test)]
+mod openable_roots_delete_tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::download::{ChannelProgressEmitter, Downloader};
+    use crate::ytdlp::ProgressUpdate;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// Never invoked: these tests insert terminal rows and delete them, so no
+    /// runner ever starts.
+    struct UnusedDownloader;
+
+    #[async_trait]
+    impl Downloader for UnusedDownloader {
+        async fn run(
+            &self,
+            _job: &DownloadJob,
+            _token: u64,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            panic!("no download may start in these tests");
+        }
+    }
+
+    /// A finished history row: the kind whose output directory enters the
+    /// openable roots through the history scan.
+    fn finished_job(id: &str, output_path: &Path) -> DownloadJob {
+        DownloadJob {
+            uploader: String::new(),
+            id: id.into(),
+            url: format!("https://www.bilibili.com/video/{id}"),
+            video_id: id.into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status: JobStatus::Done,
+            progress: 1.0,
+            error: None,
+            output_path: Some(output_path.to_string_lossy().into()),
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        }
+    }
+
+    /// App state whose history holds the rows `make_jobs` builds from the
+    /// temp root. The rows land in the DB before any runner could see them.
+    fn state_with_history(
+        make_jobs: impl FnOnce(&Path) -> Vec<DownloadJob>,
+    ) -> (tempfile::TempDir, AppState) {
+        let root = tempfile::tempdir().unwrap();
+        let db = Db::open(&root.path().join("jobs.db")).unwrap();
+        for job in make_jobs(root.path()) {
+            db.insert_job(&job).unwrap();
+        }
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let settings = AppSettings {
+            save_dir: root.path().join("save").to_string_lossy().into(),
+            ..AppSettings::default()
+        };
+        let downloads = DownloadManager::new(
+            db,
+            settings.clone(),
+            Arc::new(UnusedDownloader),
+            Arc::new(emitter),
+            Arc::new(Mutex::new(HashMap::new())),
+            root.path().join("work"),
+        )
+        .unwrap();
+        let state = AppState {
+            app_dir: root.path().to_path_buf(),
+            auth: AuthManager::new(root.path().join("cache")),
+            downloads,
+            settings: Mutex::new(settings),
+            save_dir_notice: None,
+            cookie_notice: None,
+            ytdlp: YtDlpConfig {
+                yt_dlp_path: root.path().join("yt-dlp"),
+                ffmpeg_path: None,
+            },
+            wbi_keys: wbi::WbiKeyCache::new(),
+            http_client: reqwest::Client::new(),
+            space_info_cache: Mutex::new(HashMap::new()),
+            active_resolve_id: AtomicU64::new(0),
+            activity_log: crate::activity_log::ActivityLog::disabled(root.path().join("logs")),
+            window_theme: Mutex::new(WindowTheme::System),
+            openable_roots_cache: OpenableRootsCache::default(),
+        };
+        (root, state)
+    }
+
+    /// One job whose output lands outside every other root: `elsewhere` is
+    /// openable only while its history row exists.
+    fn stray_output_job() -> (tempfile::TempDir, AppState) {
+        state_with_history(|root| {
+            let stray = root.join("elsewhere");
+            std::fs::create_dir_all(&stray).unwrap();
+            vec![finished_job("job-1", &stray.join("clip.mp4"))]
+        })
+    }
+
+    #[tokio::test]
+    async fn delete_job_invalidates_openable_roots_cache() {
+        let (_root, state) = stray_output_job();
+        let computes = std::cell::Cell::new(0usize);
+        let compute = || {
+            computes.set(computes.get() + 1);
+            openable_roots(&state)
+        };
+        let before = state.openable_roots_cache.get_or_compute(compute);
+        assert!(
+            before.iter().any(|r| r.ends_with("elsewhere")),
+            "precondition: the history row's directory is an openable root"
+        );
+        assert_eq!(computes.get(), 1);
+
+        delete_job_impl(&state, "job-1", false).await.unwrap();
+
+        let after = state.openable_roots_cache.get_or_compute(compute);
+        assert_eq!(
+            computes.get(),
+            2,
+            "delete_job must drop the cached roots so they recompute"
+        );
+        assert!(
+            !after.iter().any(|r| r.ends_with("elsewhere")),
+            "the deleted job's directory must leave the openable set"
+        );
+    }
+
+    #[test]
+    fn clear_finished_jobs_invalidates_openable_roots_cache() {
+        let (_root, state) = stray_output_job();
+        let computes = std::cell::Cell::new(0usize);
+        let compute = || {
+            computes.set(computes.get() + 1);
+            openable_roots(&state)
+        };
+        let before = state.openable_roots_cache.get_or_compute(compute);
+        assert!(
+            before.iter().any(|r| r.ends_with("elsewhere")),
+            "precondition: the history row's directory is an openable root"
+        );
+        assert_eq!(computes.get(), 1);
+
+        clear_finished_jobs_impl(&state).unwrap();
+
+        let after = state.openable_roots_cache.get_or_compute(compute);
+        assert_eq!(
+            computes.get(),
+            2,
+            "clear_finished_jobs must drop the cached roots so they recompute"
+        );
+        assert!(
+            !after.iter().any(|r| r.ends_with("elsewhere")),
+            "the cleared job's directory must leave the openable set"
+        );
     }
 }
 
@@ -2536,6 +2787,31 @@ mod save_dir_tests {
             assert_eq!(plan.effective, app_dir.join("downloads"));
         }
     }
+
+    /// A UTF-8 pick must survive the conversion unchanged: this exact string
+    /// is what the frontend persists as `save_dir`.
+    #[test]
+    fn picked_dir_to_string_keeps_utf8_path() {
+        let dir = PathBuf::from("/tmp/下载目录");
+        assert_eq!(
+            picked_dir_to_string(dir).expect("utf-8 path must convert"),
+            "/tmp/下载目录"
+        );
+    }
+
+    /// Melting a non-UTF-8 pick with `to_string` would hand the frontend a
+    /// U+FFFD path to persist as `save_dir`; the picker must reject instead so
+    /// the user chooses another folder.
+    #[test]
+    fn picked_dir_to_string_rejects_non_utf8_path_without_melting() {
+        let raw = PathBuf::from(non_utf8_name());
+        let err = picked_dir_to_string(raw)
+            .expect_err("non-UTF-8 pick must not be converted via lossy melt");
+        let msg = err.to_string();
+        assert_eq!(msg, "该路径包含无法保存的字符，请另选目录");
+        // The error text must not carry a melted path either.
+        assert!(!msg.contains('\u{FFFD}'));
+    }
 }
 
 /// Restart entry points (resume/retry) must rematerialize `cookies.txt` before
@@ -2634,6 +2910,7 @@ mod restart_cookie_tests {
         let state = AppState {
             openable_roots_cache: Default::default(),
             save_dir_notice: None,
+            cookie_notice: None,
             app_dir: root.path().to_path_buf(),
             auth: AuthManager::new(cache_dir),
             downloads,
@@ -2877,5 +3154,143 @@ mod restart_cookie_tests {
         assert_eq!(job_status(&app.state, "job-a3"), JobStatus::Paused);
         assert_eq!(job_status(&app.state, "job-a4"), JobStatus::Paused);
         assert_eq!(app.seen.lock().unwrap().len(), 2);
+    }
+}
+
+/// Startup cookie materialization must leave a user-visible notice when it
+/// fails: the login chip keeps reading "logged in" from the cookie store while
+/// `cookies.txt` is missing, and the user would otherwise only discover the
+/// problem when a download attempt errors out. The notice text is the pin —
+/// dropping the set in `startup_cookie_notice` must turn these red.
+#[cfg(test)]
+mod startup_cookie_notice_tests {
+    use super::*;
+
+    fn logged_in_auth(root: &Path) -> AuthManager {
+        let cache_dir = root.join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let auth = AuthManager::new(cache_dir);
+        auth.save_cookies_from_webview(vec![Cookie {
+            domain: ".bilibili.com".into(),
+            include_subdomains: true,
+            path: "/".into(),
+            secure: true,
+            expiration: 0,
+            name: "SESSDATA".into(),
+            value: "abc123".into(),
+        }])
+        .unwrap();
+        auth
+    }
+
+    #[test]
+    fn materialize_failure_sets_the_startup_notice() {
+        let root = tempfile::tempdir().unwrap();
+        let auth = logged_in_auth(root.path());
+        // A directory where cookies.txt belongs makes the rewrite fail the
+        // same way an AV lock does: launch must set the notice, not swallow it.
+        std::fs::create_dir_all(root.path().join("cache").join("cookies.txt")).unwrap();
+        let notice =
+            startup_cookie_notice(&auth).expect("materialize failure must set the startup notice");
+        assert_eq!(
+            notice, COOKIE_MATERIALIZE_NOTICE,
+            "the notice must carry the agreed UI copy"
+        );
+    }
+
+    #[test]
+    fn materialize_success_sets_no_notice() {
+        let root = tempfile::tempdir().unwrap();
+        let auth = logged_in_auth(root.path());
+        assert_eq!(startup_cookie_notice(&auth), None);
+        assert!(
+            root.path().join("cache").join("cookies.txt").exists(),
+            "precondition: the rewrite succeeded"
+        );
+    }
+
+    #[test]
+    fn logged_out_sets_no_notice() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_dir = root.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let auth = AuthManager::new(cache_dir);
+        assert_eq!(startup_cookie_notice(&auth), None);
+    }
+}
+
+/// Tripwire for the cookie-materialize handling in `try_persist_webview_cookies`.
+/// The login-window persist path is best-effort (unlike resume/retry, which
+/// raise explicit errors): a cookies.txt write failure must not flip a login
+/// that already succeeded, but it must not be swallowed silently either — the
+/// startup path logs the same "app: Cookie 文件准备失败" family, and this
+/// path has to match. A capture-based test cannot pin this (the function needs
+/// a real Wry `AppHandle`/`WebviewWindow`), so this asserts the call sites in
+/// the function body, same style as `startup_silence_guard` in lib.rs.
+#[cfg(test)]
+mod webview_cookie_persist_guard {
+    /// Brace-counted body of the function declared at `signature` (a string
+    /// that must appear exactly at a line start, leading `\n` included).
+    /// Same helper as `startup_silence_guard` in lib.rs.
+    fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("signature not found: {signature}"));
+        let open = source[start..]
+            .find('{')
+            .map(|i| start + i)
+            .unwrap_or_else(|| panic!("no body after: {signature}"));
+        let mut depth = 0usize;
+        for (i, c) in source[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..open + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after: {signature}");
+    }
+
+    #[test]
+    fn materialize_failure_is_logged_not_swallowed() {
+        let commands = include_str!("commands.rs");
+        let body = fn_body(commands, "\nfn try_persist_webview_cookies");
+
+        assert!(
+            !body.contains("let _ = state.auth.materialize_cookies_file()"),
+            "a materialize_cookies_file failure must not be swallowed with `let _ =` \
+             (external review #162 Minor 3): log it like the startup path does."
+        );
+        assert!(
+            body.contains("if let Err(e) = state.auth.materialize_cookies_file()"),
+            "materialize_cookies_file failure must be handled on its Err arm \
+             (external review #162 Minor 3)."
+        );
+        assert!(
+            body.contains("tracing::warn!") && body.contains("app: Cookie 文件准备失败"),
+            "the failure must log a tracing::warn! in the same message family as the \
+             startup path (\"app: Cookie 文件准备失败\"); keep it consistent with the \
+             startup warn in build_app_state and the explicit errors in resume/retry."
+        );
+        // Control flow stays best-effort: the Ok arm still reports login success
+        // even when the cookies file cannot be written after the store save.
+        // Whitespace-collapsed so rustfmt line breaks do not matter: the gated
+        // warn must sit in front of an unconditional `Some(status)` tail.
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(
+                "if let Err(e) = state.auth.materialize_cookies_file() { \
+                 tracing::warn!(target: \"core\", \"app: Cookie 文件准备失败: {e}\"); \
+                 } Some(status)"
+            ),
+            "materialize stays best-effort here: the saved login must still be \
+             reported via Some(status) when the file write fails, with the warn \
+             gated on the Err arm in between."
+        );
     }
 }
