@@ -17,8 +17,11 @@ jobs:
   build:
     # Full release builds with bundling; generous against the cold-cache
     # case, but finite: a hung step must not sit on the runner for the
-    # platform default of 360 minutes.
-    timeout-minutes: 60
+    # platform default of 360 minutes. Cells without a build_timeout of
+    # their own get 60; the two ARM cells override it because a cold-cache
+    # release build plus bundling there routinely outgrows 60 (ci.yml
+    # budgets the same targets at 40 on a warm cache).
+    timeout-minutes: ${{ matrix.build_timeout || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -33,9 +36,11 @@ jobs:
           - platform: windows-latest
             release_os: Windows
             release_arch: x64
+          # Cold-cache ARM release builds outgrow the 60-minute default.
           - platform: windows-11-arm
             release_os: Windows
             release_arch: arm64
+            build_timeout: 90
           # Pinned to 22.04 on purpose: the older glibc keeps the floor at 2.34
           # so Ubuntu 22.04 / Debian 12 / RHEL 9 can run the bundles. This image
           # retires 2027-04-17 (brownouts from 2027-03-23); migrate before then.
@@ -45,6 +50,7 @@ jobs:
           - platform: ubuntu-22.04-arm
             release_os: Linux
             release_arch: arm64
+            build_timeout: 90
 
     runs-on: ${{ matrix.platform }}
     steps:
