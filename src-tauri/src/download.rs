@@ -275,6 +275,22 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
+/// Downcast a caught panic payload into the log-ready message the panic
+/// path's internal-error line appends. `panic!` and friends box a `&'static
+/// str` (literal) or a `String` (formatted); anything else still yields a
+/// placeholder, so the line says what happened. The text is cleaned like
+/// every other log-bound message (URL redaction, newline escaping).
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    };
+    crate::activity_log::clean_log_message(&text)
+}
+
 /// Concurrency accounting for the download runners. The desired limit and the
 /// number of runners holding a permit are the single source of truth: the
 /// semaphore's real capacity is reconciled to `max(desired, active)` at every
@@ -1115,12 +1131,11 @@ impl DownloadManager {
         let handle = async_runtime::spawn(async move {
             // A panic must not silently kill the runner and freeze the row at
             // Running; poll the job under catch_unwind and treat the unwind
-            // like a downloader error — minus the fragment cleanup, since the
-            // panic says nothing about whether the partial files are usable.
-            let panicked = CatchUnwind(Box::pin(this.run_job(job_id.clone(), token)))
-                .await
-                .is_err();
-            if panicked {
+            // like a downloader error — minus the fragment cleanup, a
+            // deliberate asymmetry: a downloader error means the run was
+            // declared unresumable, while a panic is this code's own bug and
+            // says nothing about the partial files, so a retry keeps them.
+            if let Err(payload) = CatchUnwind(Box::pin(this.run_job(job_id.clone(), token))).await {
                 // The registered yt-dlp tree is owned by `children`, not by
                 // this future: dropping the panicked future would leave the
                 // process tree alive and writing the work dir a retry then
@@ -1137,9 +1152,23 @@ impl DownloadManager {
                 // a superseding command's marker wins over the Failed write
                 // (fail_job re-checks under the db lock).
                 match this.stop_disposition_for(&job_id, token) {
+                    // The payload is deliberately not logged on this arm: the
+                    // disposition (pause/cancel/superseded) is the outcome's
+                    // explanation and apply_stop_disposition traces it at
+                    // debug. The error line below exists for the arm where
+                    // nothing else says why the run ended.
                     Some(disposition) => this.apply_stop_disposition(&job_id, disposition).await,
                     None => {
-                        tracing::error!(target: "core", "download: runner 崩溃，标记失败 {job_id}");
+                        // What the core line previously lacked: the panic hook
+                        // logs every panic globally, but the line naming the
+                        // job said only "崩溃 {job_id}" — nothing tying a
+                        // message to the run. Recover it here, the one arm
+                        // with no other explanation to log.
+                        let panic_message = panic_payload_message(&*payload);
+                        tracing::error!(
+                            target: "core",
+                            "download: runner 崩溃，标记失败 {job_id}: {panic_message}"
+                        );
                         this.try_fail_job(&job_id, token, "下载任务异常中止（内部错误），请重试");
                     }
                 }
@@ -1148,6 +1177,11 @@ impl DownloadManager {
         });
 
         if let Ok(mut tasks) = self.running_tasks.lock() {
+            // A runner that finishes before this insert re-registers a dead
+            // handle here (its unregister ran first); the stale entry then
+            // only clears on the job's next stop. The window is inherent to
+            // spawn-then-insert — closing it needs the handle at spawn time,
+            // which async_runtime::spawn does not give.
             tasks.insert(task_id, (token, handle));
         }
     }
@@ -2247,12 +2281,148 @@ mod tests {
     /// catch_unwind so any panic (the stderr tail trim's char-boundary cut,
     /// for one) writes a Failed row like any downloader error.
     ///
-    /// Value: protects=the catch_unwind wrapper around the runner future;
+    /// Two side contracts ride the same path and are pinned here next to the
+    /// Failed row: the failed run's fragments survive — the panic says
+    /// nothing about whether the partial files are usable, so try_fail_job
+    /// (unlike a downloader error's try_fail_download) never drops the work
+    /// dir — and the runner unregisters from `running_tasks`, so the next
+    /// pause's immediate abort cannot chase a dead handle — the cost is the
+    /// leak of a finished run's handle (aborting a finished task is a no-op),
+    /// not a chase.
+    ///
+    /// Value: protects=the catch_unwind wrapper around the runner future plus
+    /// the panic path's fragment-keep and task-unregister side contracts;
     /// fails_when=the wrapper or the panic-path Failed write is removed (the
-    /// row stays Running and the test times out); why_new=a panicking runner
-    /// task vanished without a trace; seam=none
+    /// row stays Running and the test times out), the fragments are dropped
+    /// with the Failed row, or the panicked runner is left registered;
+    /// why_new=a panicking runner task vanished without a trace; seam=none
     #[tokio::test]
     async fn a_runner_panic_marks_the_job_failed() {
+        struct PanicDownloader {
+            work_root: PathBuf,
+        }
+
+        #[async_trait]
+        impl Downloader for PanicDownloader {
+            async fn run(
+                &self,
+                job: &DownloadJob,
+                _token: u64,
+                _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+            ) -> Result<PathBuf, String> {
+                // A partial transfer on disk: the exact state the panic path
+                // must leave untouched (fragment-keep pin below).
+                let work = fsutil::work_dir_for(&self.work_root, &job.id);
+                std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+                std::fs::write(work.join("demo.part"), b"partial").map_err(|e| e.to_string())?;
+                panic!("simulated runner panic");
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work_root = dir.path().join("work");
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work_root,
+            Arc::new(PanicDownloader {
+                work_root: work_root.clone(),
+            }) as Arc<dyn Downloader>,
+        );
+        let job = manager.enqueue(sample_job("job-panic"), false).unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Failed).await;
+
+        let failed = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == job.id)
+            .unwrap();
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("下载任务异常中止（内部错误），请重试")
+        );
+        assert!(
+            fsutil::work_dir_for(&work_root, &job.id)
+                .join("demo.part")
+                .is_file(),
+            "the panic path must keep the failed run's fragments"
+        );
+        assert!(
+            runner_unregistered_within(&manager, &job.id, Duration::from_secs(3)).await,
+            "the panicked runner must unregister from running_tasks"
+        );
+    }
+
+    /// Poll until the runner is no longer registered under `id`. The panic
+    /// path unregisters after writing the row, so a test that has just
+    /// observed the terminal status must still give the cleanup a bounded
+    /// moment before it may conclude the handle leaked.
+    async fn runner_unregistered_within(
+        manager: &DownloadManager,
+        id: &str,
+        limit: Duration,
+    ) -> bool {
+        let mut waited = Duration::ZERO;
+        while waited < limit {
+            if !manager.running_tasks.lock().unwrap().contains_key(id) {
+                return true;
+            }
+            sleep(Duration::from_millis(20)).await;
+            waited += Duration::from_millis(20);
+        }
+        false
+    }
+
+    /// `panic_payload_message` downcasts the payload catch_unwind hands back
+    /// (a boxed `&'static str` or `String`) into the log-ready text the
+    /// panic path's internal-error line appends. The wiring into the line
+    /// itself is pinned end-to-end by
+    /// `a_runner_panic_payload_reaches_the_error_log`; this test holds the
+    /// helper's own shapes.
+    ///
+    /// Value: protects=the payload downcast (str/String/other) and the
+    /// log-bound cleaning of the recovered text; fails_when=the downcast is
+    /// dropped or the cleaning skipped (the recovered message or its
+    /// escaping goes missing); why_new=the caught payload was discarded and
+    /// the shapes it can arrive in (formatted panics, panic_any, embedded
+    /// newlines) were never pinned; seam=none
+    #[test]
+    fn panic_payload_message_recovers_the_boxed_message() {
+        // `panic!("literal")` boxes a `&'static str`; a formatted panic boxes
+        // a `String` — both shapes must come back as the original message.
+        let caught = std::panic::catch_unwind(|| panic!("simulated runner panic")).unwrap_err();
+        assert_eq!(panic_payload_message(&*caught), "simulated runner panic");
+
+        let caught =
+            std::panic::catch_unwind(|| panic!("{}", String::from("formatted boom"))).unwrap_err();
+        assert_eq!(panic_payload_message(&*caught), "formatted boom");
+
+        // A non-string payload must still yield a log-ready placeholder.
+        let caught = std::panic::catch_unwind(|| std::panic::panic_any(42_u8)).unwrap_err();
+        assert_eq!(
+            panic_payload_message(&*caught),
+            "<non-string panic payload>"
+        );
+
+        // Log-bound text is newline-escaped like every other call site's.
+        let caught = std::panic::catch_unwind(|| panic!("line1\nline2")).unwrap_err();
+        assert_eq!(panic_payload_message(&*caught), "line1\\nline2");
+    }
+
+    /// The recovered payload must actually reach the internal-error line: the
+    /// core line naming the job carried only "崩溃 {job_id}", and the panic
+    /// hook's global line carries no job id, so the payload text on this line
+    /// is the one artifact tying a panic's message to its run.
+    ///
+    /// Value: protects=the panic path's internal-error line wiring (the
+    /// captured payload interpolated into the log record); fails_when=the
+    /// line drops `{panic_message}` — the buffer then holds 崩溃 for the job
+    /// with no panic text; why_new=only the downcast helper was covered, so
+    /// dropping the payload from the format string stayed green;
+    /// seam=the global log-capture helper (the line is emitted on Tauri's
+    /// runtime thread, out of thread-local capture's reach)
+    #[test]
+    fn a_runner_panic_payload_reaches_the_error_log() {
         struct PanicDownloader;
 
         #[async_trait]
@@ -2273,18 +2443,26 @@ mod tests {
             &dir.path().join("work"),
             Arc::new(PanicDownloader) as Arc<dyn Downloader>,
         );
-        let job = manager.enqueue(sample_job("job-panic"), false).unwrap();
-        wait_for_status(&manager, &job.id, JobStatus::Failed).await;
-
-        let failed = manager
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|j| j.id == job.id)
+        // Sync test driving the async wait on a throwaway runtime, so the
+        // capture helper can wrap the whole run-to-terminal span.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        assert_eq!(
-            failed.error.as_deref(),
-            Some("下载任务异常中止（内部错误），请重试")
+        let text = capture_logs_across_threads(|| {
+            rt.block_on(async {
+                let job = manager
+                    .enqueue(sample_job("job-log-panic-payload"), false)
+                    .unwrap();
+                wait_for_status(&manager, &job.id, JobStatus::Failed).await;
+            });
+        });
+        assert!(
+            text.lines().any(|l| l.starts_with("ERROR")
+                && l.contains("runner 崩溃，标记失败")
+                && l.contains("job-log-panic-payload")
+                && l.contains("simulated runner panic")),
+            "the internal-error line must carry the panic payload:\n{text}"
         );
     }
 
@@ -2483,12 +2661,17 @@ mod tests {
     /// runner's registration (the stop marker is visible before the child
     /// exists) leaves the run's own process alive under a Pause marker. The
     /// panic path must still kill it — that is the half of the cascade the
-    /// None branch never sees.
+    /// None branch never sees. The runner must also unregister on this
+    /// branch: unregister_task sits after the stop dispatch, so a paused-into-
+    /// panic run leaves no dead handle behind either.
     ///
     /// Value: protects=the kill covering the stop-marker branch of the panic
-    /// path; fails_when=the kill is moved into the plain Failed branch only
-    /// (the stand-in survives and the death poll times out); why_new=the
-    /// Some(disposition) branch had no process-cleanup test; seam=none
+    /// path, plus the unregister that covers that branch too; fails_when=the
+    /// kill is moved into the plain Failed branch only (the stand-in survives
+    /// and the death poll times out) or unregister only covers that branch
+    /// (the handle stays registered and the unregistered poll times out);
+    /// why_new=the Some(disposition) branch had no process-cleanup test;
+    /// seam=none
     #[cfg(unix)]
     #[tokio::test]
     async fn a_runner_panic_kills_the_child_under_a_stop_marker() {
@@ -2571,6 +2754,10 @@ mod tests {
         assert!(
             !children.lock().unwrap().contains_key(&job.id),
             "the panic path must unregister the child it killed"
+        );
+        assert!(
+            runner_unregistered_within(&manager, &job.id, Duration::from_secs(3)).await,
+            "the panicked runner must unregister from running_tasks on the stop branch"
         );
     }
 
@@ -6107,6 +6294,54 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, f);
         String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// Like `capture_logs`, but for events emitted on other threads: installs
+    /// (once per process) a global subscriber appending every event to a
+    /// shared buffer, clears it, drives `f`, and returns what the buffer
+    /// collected. Runner tasks log on Tauri's runtime worker threads, where
+    /// `capture_logs`' thread-local subscriber cannot see them — the global
+    /// slot is the only way to pin their log lines. Assertions must filter by
+    /// a marker unique to the driving test: parallel tests in this process
+    /// write into the same buffer.
+    fn capture_logs_across_threads(f: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        static BUF: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+        let buf = BUF
+            .get_or_init(|| {
+                let buf = Arc::new(Mutex::new(Vec::new()));
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(Buf(buf.clone()))
+                    .with_ansi(false)
+                    .without_time()
+                    .with_max_level(tracing::Level::TRACE)
+                    .finish();
+                // The slot is claimed once; a failure here (a second claimer)
+                // leaves the buffer empty and the caller's assertions red.
+                let _ = tracing::subscriber::set_global_default(subscriber);
+                buf
+            })
+            .clone();
+        buf.lock().unwrap().clear();
+        f();
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
     }
 
     /// A pause that fails after raising its marker must retract it: the leaked
