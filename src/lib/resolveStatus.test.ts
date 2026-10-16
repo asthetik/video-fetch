@@ -13,9 +13,10 @@ function loading(): ResolveStatus {
 }
 
 describe("reduceResolveStatus", () => {
-  it("resolve_rejected (cache-write failure, no formats_failed event) ends formatsLoading and sets formatsError", () => {
+  it("resolve_rejected without a terminal event ends formatsLoading and sets formatsError", () => {
     // The cache-write `?` in resolve_url returns Err with no follow-up
-    // formats_failed event. The command rejection is the only terminal the UI
+    // formats_failed event (unchanged since the cache-write fix: the rejection
+      // is still the only terminal for this Err shape). The command rejection is the only terminal the UI
     // sees, so it must end the spinner and surface the message in-card.
     const afterPartial = reduceResolveStatus(loading(), { type: "partial" });
     const next = reduceResolveStatus(afterPartial, {
