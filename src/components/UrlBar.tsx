@@ -6,6 +6,7 @@ import {
   gateResolveOutcome,
   type ResolveGate,
 } from "../lib/resolveGate";
+import { isRetryVisible } from "../lib/retryButton";
 
 interface UrlBarProps {
   url: string;
@@ -106,14 +107,17 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
       {error && !loading && (
         <p className="url-hint error">
           {error}
-          <button
-            type="button"
-            className="btn btn-sm"
-            style={{ marginLeft: "0.5rem" }}
-            onClick={handleRetry}
-          >
-            重试
-          </button>
+          {/* The error stays readable after the input empties, but retry only
+              offers itself while there is a URL to retry — see isRetryVisible. */}
+          {isRetryVisible(error, url) && (
+            <button
+              type="button"
+              className="btn btn-sm hint-action"
+              onClick={handleRetry}
+            >
+              重试
+            </button>
+          )}
         </p>
       )}
       {!loading && !error && url.trim() && (

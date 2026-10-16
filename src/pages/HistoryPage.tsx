@@ -32,6 +32,7 @@ import {
   type HistoryStatusFilter,
 } from "../lib/historyFilter";
 import { groupHistoryByDate } from "../lib/historyGroup";
+import { pendingCancelStillCancelable } from "../lib/pendingCancel";
 import { isActiveStatus } from "../lib/queueJobs";
 import { api } from "../lib/tauri";
 import type { DownloadJob, JobStatus } from "../types";
@@ -114,6 +115,19 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       unlisten?.();
     };
   }, [loadJobs]);
+
+  // Live progress patches merge into `allJobs` while the cancel-confirm
+  // dialog is open. Once the tracked job reaches a terminal state (or leaves
+  // the list) its cancel is a no-op, so drop it instead of keeping stale copy.
+  useEffect(() => {
+    if (!pendingCancel) {
+      return;
+    }
+    const live = allJobs.find((j) => j.id === pendingCancel.id);
+    if (!pendingCancelStillCancelable(live)) {
+      setPendingCancel(null);
+    }
+  }, [allJobs, pendingCancel]);
 
   const doneCount = allJobs.filter((j) => j.status === "done").length;
   const failedCount = allJobs.filter((j) => j.status === "failed").length;

@@ -62,6 +62,13 @@
   color: var(--danger-ink);
 }
 
+/* Inline follow-up action appended to a hint line (e.g. the retry button on
+   an error row). The 0.5rem gap is DESIGN.md spacing.sm, hoisted verbatim
+   from the inline style it replaces. */
+.hint-action {
+  margin-left: 0.5rem;
+}
+
 .auth-status {
   display: flex;
   align-items: center;
