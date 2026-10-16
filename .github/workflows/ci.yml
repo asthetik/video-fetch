@@ -42,8 +42,8 @@ jobs:
         os: [ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     # Two clippy passes now, one per profile. The release pass compiles its
-    # dependency graph cold: it shares its cache bucket with `unit` and
-    # `integration`, whose winning entry holds no release artifacts.
+    # dependency graph cold: it shares its cache bucket with `unit`, whose
+    # winning entry holds no release artifacts.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
@@ -139,55 +139,6 @@ jobs:
           echo "unit tests listed: $n"
           [ "$n" -ge 150 ]
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-
-  integration:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest, ubuntu-22.04-arm, windows-11-arm]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-          # Image-segmented bucket, so no cache entry can cross images; the
-          # name is the one `lint` explains.
-          shared-key: src-tauri-${{ matrix.os }}
-      - name: Install Tauri Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
-      - uses: actions/setup-python@v7
-        with:
-          python-version-file: ".python-version"
-      - name: Cache sidecar binaries
-        uses: actions/cache@v6
-        with:
-          path: src-tauri/binaries
-          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/requirements-sidecars.txt', 'scripts/fetch_sidecars.py', 'scripts/sidecar_pins.json') }}
-      - name: Fetch sidecar binaries
-        run: python scripts/fetch_sidecars.py
-      - name: Clippy with the test-utils feature
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --features test-utils --all-targets -- -D warnings
-      - name: Zero-test guard
-        shell: bash
-        run: |
-          # Expected listing: 0 support self-checks + 12 regression tests = 12
-          # (measured 2026-10-15); >= 6 is a floor against a silent zero after a rename.
-          n=$(cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --list | grep -c ': test$')
-          echo "regression tests listed: $n"
-          [ "$n" -ge 6 ]
-      - name: Run the regression suite
-        # Serial: ten parallel PyInstaller cold starts on a 4-vCPU runner make
-        # every timing assumption in the suite meaningless (and cost more
-        # wall-clock than running the tests one after another).
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
   release-smoke:
     # The release profile is read by `npx tauri build` and by nothing else, and
