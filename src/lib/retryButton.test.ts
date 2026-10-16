@@ -6,9 +6,10 @@ import { isRetryVisible } from "./retryButton.ts";
 
 // The URL-bar retry button is only meaningful when there is something to
 // retry. After the input is cleared the previous error may stay on screen as
-// context, but offering 重试 there is a zero-feedback no-op: it re-runs
-// resolve for an empty URL — the A6 dead-end in miniature. Visibility is
-// therefore: an error is showing AND the input holds a non-empty URL.
+// context, but offering 重试 there is a dead affordance: the click ran
+// nothing (handleRetry early-returns on empty) and gave no feedback — the
+// A6 dead-end in miniature. Visibility is therefore: an error is showing
+// AND the input holds a non-empty URL.
 
 test("retry is visible while an error shows and the input has a URL", () => {
   assert.equal(
@@ -48,10 +49,13 @@ const URL_BAR = join(import.meta.dirname, "..", "components", "UrlBar.tsx");
 
 test("UrlBar renders the retry button only through isRetryVisible", () => {
   const src = readFileSync(URL_BAR, "utf8");
+  // The button must sit directly inside the gated span — a gate that opens
+  // and closes around nothing while the button renders unconditionally
+  // elsewhere must not satisfy this pin.
   assert.match(
     src,
-    /\{\s*isRetryVisible\(\s*error\s*,\s*url\s*\)\s*&&\s*\(/,
-    "the 重试 button must be conditioned on isRetryVisible(error, url)",
+    /\{\s*isRetryVisible\(\s*error\s*,\s*url\s*\)\s*&&\s*\(\s*<button/,
+    "the 重试 button must render inside the isRetryVisible(error, url) gate",
   );
   assert.ok(
     src.includes("重试"),

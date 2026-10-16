@@ -3,10 +3,11 @@
  *
  * The error message stays on screen after the input is cleared so the user
  * can still read why the last attempt failed, but the retry action itself
- * must disappear with its target: clicking 重试 on an empty input re-runs
- * resolve for "" — a zero-feedback no-op of the same dead-end kind A6 fixed.
- * Gating the button on a non-empty URL removes the dead click while keeping
- * the error text as context. When the input has content, retry stays a
+ * must disappear with its target: on an empty input the click is a dead
+ * affordance (handleRetry early-returns on empty, so it ran nothing, and it
+ * gave no feedback either) — the same dead-end kind A6 fixed. Gating the
+ * button on a non-empty URL removes the dead click while keeping the error
+ * text as context. When the input has content, retry stays a
  * deliberate bypass of the resolve dedup gate (see resolveGate.ts).
  */
 
