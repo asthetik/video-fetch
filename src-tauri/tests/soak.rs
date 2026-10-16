@@ -559,7 +559,7 @@ fn unparseable_soak_jobs_panics_naming_the_original_value() {
 /// (no process-global env mutation, parallel-safe)
 #[cfg(unix)]
 #[test]
-#[should_panic(expected = "SOAK_MINUTES=\"foo\\xFF\"")]
+#[should_panic(expected = "SOAK_MINUTES=\"foo\\xFF\" is not valid UTF-8")]
 fn nonunicode_soak_override_panics_naming_the_raw_value() {
     use std::os::unix::ffi::OsStringExt;
     let raw = Err(std::env::VarError::NotUnicode(
