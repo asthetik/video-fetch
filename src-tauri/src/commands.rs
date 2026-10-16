@@ -2839,7 +2839,6 @@ mod save_dir_tests {
     }
 }
 
-
 /// Restart entry points (resume/retry) must rematerialize `cookies.txt` before
 /// a runner spawns yt-dlp: a session whose startup materialization failed (AV
 /// lock / ACL) would otherwise run the whole download logged-out while the UI
