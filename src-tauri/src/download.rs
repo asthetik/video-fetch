@@ -630,7 +630,10 @@ impl DownloadManager {
             handle.abort();
         }
 
-        let db = self.db.lock().map_err(lock_err)?;
+        // Terminal write with poison recovery (lock_db), same as fail_job and
+        // complete_relocation: a panic elsewhere must not freeze the cancel
+        // write behind "lock poisoned" and strand the row at its old status.
+        let db = lock_db(&self.db);
         let mut job = db.get_job(id)?;
         let _ = fsutil::remove_job_work_dir(&self.work_root, &job.id);
         if job.status == JobStatus::Done {
@@ -643,6 +646,9 @@ impl DownloadManager {
 
         job.status = JobStatus::Failed;
         job.error = Some(stop_message(StopKind::Cancel).into());
+        // Test seam: drops the row so the write misses (see terminal_write_hook).
+        #[cfg(test)]
+        terminal_write_hook::fire(&db, id);
         db.update_job(&job)?;
         drop(db);
 
@@ -745,12 +751,11 @@ impl DownloadManager {
     /// Async like `cancel`: the kill must not run on Tauri's main thread.
     pub async fn pause(&self, id: &str) -> AppResult<DownloadJob> {
         // Preliminary guard for a friendly error; the locked re-read below is
-        // the authority (races resolve there).
+        // the authority (races resolve there). Poison recovery here too —
+        // a poisoned lock must not fail pause before the authoritative write
+        // even gets its chance (the arbitration #181 landed for cancel).
         {
-            let job = self
-                .db
-                .lock()
-                .map_err(lock_err)?
+            let job = lock_db(&self.db)
                 .find_job(id)?
                 .ok_or_else(missing_job_err)?;
             match job.status {
@@ -795,12 +800,18 @@ impl DownloadManager {
         // have reached a terminal state between the kill and this read — that
         // state wins, a finished or failed job must not become Paused. A row
         // that vanished (concurrent delete) is left to pause()'s retract.
+        // Terminal write with poison recovery (lock_db), same as cancel_marked
+        // and fail_job: a panic elsewhere must not freeze the pause write
+        // behind "lock poisoned" and strand the row at Running.
         let job = {
-            let db = self.db.lock().map_err(lock_err)?;
+            let db = lock_db(&self.db);
             let mut job = db.find_job(id)?.ok_or_else(missing_job_err)?;
             if matches!(job.status, JobStatus::Pending | JobStatus::Running) {
                 job.status = JobStatus::Paused;
                 job.error = None;
+                // Test seam: drops the row so the write misses (see terminal_write_hook).
+                #[cfg(test)]
+                terminal_write_hook::fire(&db, id);
                 db.update_job(&job)?;
             }
             job
@@ -1650,6 +1661,54 @@ mod enqueue_race_hook {
             if timeout.timed_out() {
                 break;
             }
+        }
+    }
+}
+
+/// Test-only fault injection for the cancel/pause terminal-write failure
+/// regression tests. When armed for a job id, the hook drops that row in the
+/// gap between `cancel_marked`/`pause_marked`'s row read and the terminal
+/// write, so the UPDATE misses (`updated == 0`) and the write fails the way a
+/// vanished row does. Poisoning can no longer fail these writes now that
+/// `lock_db` recovers the guard, so the write itself must be broken to pin
+/// the failure paths. Unarmed — and in production builds — the hook is never
+/// called.
+#[cfg(test)]
+mod terminal_write_hook {
+    use std::sync::Mutex;
+
+    use crate::db::Db;
+
+    /// A set, not a single slot: the cancel and pause failure tests arm
+    /// different ids in parallel, and one slot would let either test
+    /// disarm the other.
+    static ARMED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// Disarms its own id when dropped (also on test panic).
+    pub struct Guard {
+        job_id: String,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ARMED.lock().unwrap().retain(|id| id != &self.job_id);
+        }
+    }
+
+    /// Arm the hook for calls whose job id matches.
+    pub fn arm(job_id: &str) -> Guard {
+        ARMED.lock().unwrap().push(job_id.to_owned());
+        Guard {
+            job_id: job_id.to_owned(),
+        }
+    }
+
+    /// Called between the row read and the terminal write. See module docs.
+    pub fn fire(db: &Db, job_id: &str) {
+        let armed = ARMED.lock().unwrap();
+        if armed.iter().any(|id| id == job_id) {
+            drop(armed);
+            let _ = db.delete_job(job_id);
         }
     }
 }
@@ -5895,8 +5954,11 @@ mod tests {
         job.status = JobStatus::Running;
         manager.db.lock().unwrap().insert_job(&job).unwrap();
 
+        let _hook = terminal_write_hook::arm("job-pause-fail");
+
         // Park pause() between its marker insert and the row write — the
-        // children lock is what it takes next — then break the db under it.
+        // children lock is what it takes next — then let the armed hook drop
+        // the row so the write misses (poisoning can no longer fail it).
         let children_guard = manager.children.lock().unwrap();
         let pausing = manager.clone();
         let rt = tokio::runtime::Handle::current();
@@ -5911,11 +5973,13 @@ mod tests {
             stop_kind_of(&flags, "job-pause-fail"),
             Some(StopKind::Pause)
         );
-        poison_db(&manager);
         drop(children_guard);
 
         let err = handle.join().unwrap().unwrap_err().to_string();
-        assert!(err.contains("lock poisoned"), "unexpected: {err}");
+        assert!(
+            err.contains(crate::db::MISSING_JOB_MESSAGE),
+            "unexpected: {err}"
+        );
         assert!(
             stop_kind_of(&flags, "job-pause-fail").is_none(),
             "a failed pause must not leave its marker behind"
@@ -5924,11 +5988,15 @@ mod tests {
 
     /// Cancel raises its marker before the id is even validated, so the same
     /// rule holds: a cancel that cannot write the row must retract it, or the
-    /// marker outlives the job as a poison pill for whatever runs next.
+    /// marker outlives the job as a poison pill for whatever runs next. The
+    /// injected failure is the terminal write missing its row (the hook drops
+    /// it between the read and the update): poisoning can no longer fail this
+    /// write now that cancel recovers the guard via `lock_db`.
     ///
     /// Value: protects=cancel()'s retract-on-any-failure wrapper; fails_when=the
     /// marker survives a failed cancel; why_new=only the unknown-id and Done-row
-    /// paths were covered, and both removed the marker by hand; seam=none
+    /// paths were covered, and both removed the marker by hand;
+    /// seam=terminal_write_hook (drops the row so the terminal write misses)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_cancel_leaves_no_stop_marker() {
         let dir = tempfile::tempdir().unwrap();
@@ -5942,6 +6010,8 @@ mod tests {
         job.video_id = "BV1cf".into();
         job.status = JobStatus::Running;
         manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        let _hook = terminal_write_hook::arm("job-cancel-fail");
 
         let children_guard = manager.children.lock().unwrap();
         let cancelling = manager.clone();
@@ -5957,11 +6027,13 @@ mod tests {
             stop_kind_of(&flags, "job-cancel-fail"),
             Some(StopKind::Cancel)
         );
-        poison_db(&manager);
         drop(children_guard);
 
         let err = handle.join().unwrap().unwrap_err().to_string();
-        assert!(err.contains("lock poisoned"), "unexpected: {err}");
+        assert!(
+            err.contains(crate::db::MISSING_JOB_MESSAGE),
+            "unexpected: {err}"
+        );
         assert!(
             stop_kind_of(&flags, "job-cancel-fail").is_none(),
             "a failed cancel must not leave its marker behind"
@@ -6009,6 +6081,41 @@ mod tests {
         assert_eq!(row.error.as_deref(), Some("boom"));
     }
 
+    /// The cancel arbitration extended to pause: a poisoned db lock must not
+    /// freeze pause's row write either — the preliminary guard in `pause()`
+    /// and the authoritative re-read in `pause_marked` both recover via
+    /// `lock_db`, so the row still lands Paused (a live Paused row
+    /// legitimately keeps its marker until resume).
+    #[tokio::test]
+    async fn a_poisoned_db_lock_still_lands_the_pause_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let mut job = sample_job("job-poison-pause");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        poison_db(&manager);
+        let paused = manager.pause("job-poison-pause").await.unwrap();
+
+        assert_eq!(paused.status, JobStatus::Paused);
+        let row = manager
+            .db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_job("job-poison-pause")
+            .unwrap();
+        assert_eq!(
+            row.status,
+            JobStatus::Paused,
+            "the pause write must land through the poisoned lock"
+        );
+        assert_eq!(row.error, None);
+    }
+
     /// Same rule for the terminal Done write in complete_relocation: its
     /// `if let Ok(db) = self.db.lock()` swallowed a poisoned lock silently and
     /// returned Ok, delivering the file while the row stayed Running forever.
@@ -6054,6 +6161,47 @@ mod tests {
             "the Done write must land through the poisoned lock"
         );
         assert!(save_dir.join("demo.mp4").is_file());
+    }
+
+    /// Same rule for cancel's terminal write: cancel_marked acquired the db
+    /// with `map_err(lock_err)`, so a poisoned lock failed the very write that
+    /// was supposed to retire the row after a panic — the cancel errored out
+    /// and the row stayed active.
+    ///
+    /// Value: protects=poison recovery (lock_db) on cancel_marked's terminal
+    /// write; fails_when=a poisoned db lock freezes the cancel write too — the
+    /// command fails with "lock poisoned" and the row never leaves its active
+    /// status; why_new=fail_job and complete_relocation recovered the guard,
+    /// but cancel's Failed write stayed on `map_err(lock_err)` behind the
+    /// poisoned-lock fault injection of the marker test; seam=none
+    #[tokio::test]
+    async fn a_poisoned_db_lock_still_lands_the_cancel_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let mut job = sample_job("job-poison-cancel");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        poison_db(&manager);
+        let cancelled = manager.cancel("job-poison-cancel").await.unwrap();
+
+        assert_eq!(cancelled.status, JobStatus::Failed);
+        let row = manager
+            .db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_job("job-poison-cancel")
+            .unwrap();
+        assert_eq!(
+            row.status,
+            JobStatus::Failed,
+            "the cancel write must land through the poisoned lock"
+        );
+        assert_eq!(row.error.as_deref(), Some(stop_message(StopKind::Cancel)));
     }
 
     /// The try_* wrappers swallow a failed status write to keep the caller
