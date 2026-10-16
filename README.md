@@ -68,7 +68,7 @@ chmod +x Video-Fetch-*-Linux-*.AppImage
 
 ### 校验安装包（可选）
 
-每个 Release 都附带一份 `SHA256SUMS`，列着全部安装包的 SHA-256 摘要。安装前可以先核对（示例文件名换成你下载的那一份）：
+自 v0.4.3 起，每个 Release 都附带一份 `SHA256SUMS`，列着全部安装包的 SHA-256 摘要。安装前可以先核对（示例文件名换成你下载的那一份）：
 
 ```bash
 # macOS
@@ -152,7 +152,7 @@ npm run tauri dev
 ### 集成 / 压力测试（需要先拉 sidecar）
 
 ```bash
-# 确定性回归套件（CI 同款，串行执行；改动下载引擎时推送前跑一遍）
+# 确定性回归套件（串行执行；改动下载引擎时推送前跑一遍）
 cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
 # 长压测（本地，默认 5 分钟；SOAK_SEED 可复现操作序列）
@@ -161,7 +161,7 @@ SOAK_MINUTES=10 cargo test --manifest-path src-tauri/Cargo.toml --features test-
 
 ### 推送前门禁
 
-改动下载引擎后推送前，本地跑一遍 CI 同款门禁：fmt + clippy（默认与 `--features test-utils` 两种配置）+ 单测 + 回归套件（串行执行）。
+改动下载引擎后推送前，本地跑一遍以下门禁：fmt + clippy（默认与 `--features test-utils` 两种配置）+ 单测 + 回归套件（串行执行）。
 
 ```bash
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
