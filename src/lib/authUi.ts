@@ -7,7 +7,7 @@ import type { LoadState } from "./asyncAction";
  * that actually returned logged_out, never as a stand-in for a failure.
  */
 
-export type AuthLabelTone = "ok" | "warn" | "muted" | "error" | "loading";
+export type AuthLabelTone = "ok" | "warn" | "muted" | "error";
 
 /** Settings-row label for the current auth read. */
 export function authStatusLabel(state: LoadState<AuthStatus>): string {
@@ -26,9 +26,7 @@ export function authStatusLabel(state: LoadState<AuthStatus>): string {
 /** Tone class (auth-label <tone>) for the settings-row label. */
 export function authLabelTone(state: LoadState<AuthStatus>): AuthLabelTone {
   if (state.status === "error") return "error";
-  // "loading", not "muted": the in-flight read is its own state, and reusing
-  // the logged-out tone makes the row momentarily read as "未登录".
-  if (state.status === "loading") return "loading";
+  if (state.status === "loading") return "muted";
   switch (state.data) {
     case "logged_in":
       return "ok";
@@ -59,7 +57,8 @@ export function authChipView(state: LoadState<AuthStatus>): AuthChipView {
       label: "读取中…",
       title: "正在读取登录状态…",
       // Own class so .auth-chip.loading can style the in-flight read as its
-      // own state instead of the muted "未登录" dot.
+      // own state; the old "unknown" had no CSS rule, so the chip rendered
+      // exactly like the muted logged-out dot.
       stateClass: "loading",
       disabled: true,
     };

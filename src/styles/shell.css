@@ -168,6 +168,14 @@
   border: 1px dashed var(--muted);
 }
 
+/* The in-flight chip is disabled as a mechanic (there is no action to take
+   while the read runs), not as a dimmed control: the 0.5 fade would halve
+   the ring and the dashed border into near-invisibility, landing back at
+   the muted "未登录" look this class exists to end. */
+.auth-chip.loading:disabled {
+  opacity: 1;
+}
+
 .app-main {
   flex: 1;
   max-width: 640px;

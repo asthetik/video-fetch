@@ -151,8 +151,9 @@ const CHECKS: Array<[string, string, string, number]> = [
   // Icon buttons keep the mid-tone: as a 14px icon it only owes the 3:1
   // indicator bar, not the 4.5:1 text bar.
   ["danger icon on surface", "--danger", "--surface", INDICATOR_MIN],
-  // The loading chip's hollow dot ring is a 7px indicator, so it owes the
-  // 3:1 bar like any other dot, not the 4.5:1 text bar.
+  // The loading chip's hollow dot ring is a 7px indicator and renders at
+  // full opacity -- .auth-chip.loading:disabled resets the disabled fade --
+  // so it owes the 3:1 bar like any other dot, not the 4.5:1 text bar.
   ["muted loading-dot ring on ctl-bg", "--muted", "--ctl-bg", INDICATOR_MIN],
 ];
 
@@ -221,13 +222,16 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   [componentsCss, ".auth-label.ok", ["color: var(--success-ink)"]],
   [componentsCss, ".auth-label.warn", ["color: var(--warn-ink)"]],
   [componentsCss, ".auth-label.error", ["color: var(--danger-ink)"]],
-  // Loading is its own state, not the logged-out "muted": the label keeps the
-  // AA-safe muted ink, and the chip trades the filled dot for a hollow dashed
-  // ring plus a dashed border, so "in flight" never reads as "未登录" by shape
-  // alone. The dashed declarations are the non-colour half of that split.
-  [componentsCss, ".auth-label.loading", ["color: var(--muted-ink)"]],
+  // Loading is its own chip state, not the logged-out "muted": the chip
+  // trades the filled dot for a hollow dashed ring plus a dashed border, so
+  // "in flight" never reads as "未登录" by shape alone. The dashed
+  // declarations are the non-colour half of that split.
   [shellCss, ".auth-chip.loading", ["border-style: dashed"]],
   [shellCss, ".auth-chip.loading .auth-chip-dot", ["background: transparent", "border: 1px dashed var(--muted)"]],
+  // The ring's CHECKS row above is only honest while the disabled fade is
+  // off: `.auth-chip:disabled` composites at 0.5 (1.97:1), which is the
+  // ratio no test could catch and every pixel shows.
+  [shellCss, ".auth-chip.loading:disabled", ["opacity: 1"]],
   [shellCss, ".auth-chip.error", ["color: var(--danger-ink)"]],
   [shellCss, ".auth-chip.error .auth-chip-dot", ["background: var(--danger-ink)"]],
   [pagesCss, ".history-row-err", ["color: var(--danger-ink)"]],
