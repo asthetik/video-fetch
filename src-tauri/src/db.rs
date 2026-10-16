@@ -914,18 +914,24 @@ mod tests {
     fn legacy_null_uploader_reads_back_as_empty_string() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
-        // Legacy rows predate the uploader column, so the migration leaves the
-        // cell NULL. Insert via raw SQL (bypassing insert_job) to reproduce
-        // that state.
+        // Rows written before the uploader column existed carry NULL in it
+        // (a fresh DB builds the column via CREATE TABLE; only upgrades run
+        // the ALTER, both leave the cell nullable). Insert via raw SQL
+        // (bypassing insert_job, which binds a String and writes '') to
+        // reproduce that state. The sibling optional columns carry
+        // distinctive NON-null values so a mapper index swap between them and
+        // `uploader` — exactly what NULL-masking would hide — fails loudly.
         db.conn
             .execute(
                 "INSERT INTO jobs (
                     id, url, video_id, page_index, format_id, title, uploader,
+                    thumbnail_url, audio_format,
                     output_template, status, progress,
                     created_at, updated_at
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, NULL,
-                    ?7, ?8, ?9,
+                    ?7, ?8,
+                    ?9, ?10, ?11,
                     datetime('now'), datetime('now')
                 )",
                 params![
@@ -935,6 +941,8 @@ mod tests {
                     1_i64,
                     "80",
                     "demo",
+                    "https://i0.hdslb.com/thumb.jpg",
+                    "30280",
                     "%(title)s [%(id)s].%(ext)s",
                     "pending",
                     0.0_f64,
@@ -959,5 +967,17 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "legacy-null-up");
         assert_eq!(listed[0].uploader, "");
+        assert_eq!(
+            listed[0].thumbnail_url.as_deref(),
+            Some("https://i0.hdslb.com/thumb.jpg"),
+            "list_jobs' mapper must not swap uploader with its neighbour column"
+        );
+        assert_eq!(listed[0].audio_format.as_deref(), Some("30280"));
+
+        assert_eq!(
+            found.thumbnail_url.as_deref(),
+            Some("https://i0.hdslb.com/thumb.jpg")
+        );
+        assert_eq!(found.audio_format.as_deref(), Some("30280"));
     }
 }
