@@ -165,8 +165,11 @@ impl<S: AuthStore> AuthManager<S> {
         self.store.delete()?;
         let path = self.cookies_file_path();
         if path.exists() {
-            fs::remove_file(path)?;
+            fs::remove_file(&path)?;
         }
+        // A kill between staging and rename can strand a staging sibling
+        // with SESSDATA inside; logout must not leave it behind.
+        cookies::remove_stranded_staging_files(&path);
         Ok(())
     }
 
@@ -197,11 +200,13 @@ impl<S: AuthStore> AuthManager<S> {
             }
             _ => {
                 // Keep resolve/download cookie usage aligned: non-LoggedIn must not
-                // leave a stale Netscape file for yt-dlp to pick up.
+                // leave a stale Netscape file for yt-dlp to pick up — nor a
+                // stranded staging sibling holding SESSDATA.
                 let path = self.cookies_file_path();
                 if path.exists() {
                     fs::remove_file(&path)?;
                 }
+                cookies::remove_stranded_staging_files(&path);
                 Ok(None)
             }
         }
@@ -305,6 +310,47 @@ mod tests {
         let mgr = AuthManager::with_store(MemoryStore::new(), dir.path().to_path_buf());
         let status = mgr.import_cookies_file(&path).unwrap();
         assert_eq!(status, AuthStatus::LoggedIn);
+    }
+
+    /// A staging name a killed writer could have left behind.
+    fn stranded_staging_path(jar: &std::path::Path) -> std::path::PathBuf {
+        let mut name = cookies::staging_prefix(jar);
+        name.push("999");
+        name.push(".tmp");
+        jar.with_file_name(name)
+    }
+
+    #[test]
+    fn clear_auth_removes_a_stranded_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = AuthManager::with_store(MemoryStore::new(), dir.path().to_path_buf());
+        mgr.import_cookies_text(SAMPLE).unwrap();
+        let jar = dir.path().join("cookies.txt");
+        let tmp = stranded_staging_path(&jar);
+        fs::write(&tmp, SAMPLE).unwrap();
+
+        mgr.clear_auth().unwrap();
+
+        assert!(!jar.exists());
+        assert!(
+            !tmp.exists(),
+            "a staging file stranded by a kill must not survive logout: it holds SESSDATA"
+        );
+    }
+
+    #[test]
+    fn logged_out_materialize_removes_a_stranded_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = AuthManager::with_store(MemoryStore::new(), dir.path().to_path_buf());
+        let jar = dir.path().join("cookies.txt");
+        let tmp = stranded_staging_path(&jar);
+        fs::write(&tmp, SAMPLE).unwrap();
+
+        assert!(mgr.materialize_cookies_file().unwrap().is_none());
+        assert!(
+            !tmp.exists(),
+            "logged-out materialize must clean the stranded staging file too"
+        );
     }
 
     #[test]

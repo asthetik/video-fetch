@@ -1,6 +1,8 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -117,7 +119,10 @@ pub fn cookie_header_for_bilibili(cookies: &[Cookie]) -> String {
 /// covers.
 fn create_private_jar(path: &Path) -> std::io::Result<fs::File> {
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    // `create_new` refuses to open anything already at the staging name: a
+    // planted 0644 file or symlink must fail the write, never be followed and
+    // published. Callers retry under a fresh name on `AlreadyExists`.
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -126,12 +131,81 @@ fn create_private_jar(path: &Path) -> std::io::Result<fs::File> {
     opts.open(path)
 }
 
+/// Per-call sequence for staging names. Writers are not serialized (the
+/// commands went async, so a resume and the login-persist path can overlap),
+/// and two writers sharing one staging inode would let a later `truncate`
+/// punch NUL holes into bytes the earlier writer already synced — or turn one
+/// writer's error cleanup into the deletion of the other's file. A unique
+/// name per call removes the sharing entirely; the counter only has to be
+/// unique within the process (the app is single-instance), and it advances
+/// past names already on disk instead of deleting what this call did not
+/// create.
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Prefix of this jar's staging names. `.videofetch-` is the same hidden,
+/// app-owned prefix `fsutil::copy_temp_for` uses, so a leftover staging file
+/// never reads as the product to a prefix scan — and a scan BY this prefix is
+/// how the removal paths (logout, logged-out materialize) clean up a staging
+/// file stranded by a kill between staging and rename.
+pub(crate) fn staging_prefix(path: &Path) -> OsString {
+    let mut prefix = OsString::from(".videofetch-");
+    prefix.push(path.file_name().unwrap_or_default());
+    prefix.push(".");
+    prefix
+}
+
 /// Where the jar is staged before the rename that publishes it: a sibling of
-/// the target, so the rename stays on one volume and stays atomic.
+/// the target (the rename stays on one volume and stays atomic), hidden and
+/// prefixed like `fsutil::copy_temp_for`, with a per-call suffix.
 fn jar_temp_for(path: &Path) -> PathBuf {
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    PathBuf::from(temp)
+    let mut name = staging_prefix(path);
+    name.push(STAGING_SEQ.fetch_add(1, Ordering::Relaxed).to_string());
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+/// Create the staging file for one write, advancing past names that are
+/// already taken (a leftover from a killed run, or a planted file) rather
+/// than reusing or deleting them. Failure to find a free name after a bounded
+/// number of attempts is returned as-is; the caller must not clean up a path
+/// this call never created.
+fn open_staging(path: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    for _ in 0..16 {
+        let tmp = jar_temp_for(path);
+        match create_private_jar(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no free staging name after 16 attempts",
+    ))
+}
+
+/// Remove every staged-but-never-published sibling of `path`. Best-effort:
+/// the removal paths must not fail because the cache dir has surprises in it,
+/// and the prefix (hidden, app-owned, exact) is what keeps a user file from
+/// ever matching.
+pub(crate) fn remove_stranded_staging_files(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let prefix = staging_prefix(path);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .as_os_str()
+            .as_encoded_bytes()
+            .starts_with(prefix.as_encoded_bytes())
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
@@ -139,9 +213,10 @@ pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
     // the jar first, so a death mid-write left a half cookies.txt where the
     // whole one belongs — and yt-dlp reads whatever is there. The rename
     // installs the whole file or nothing.
-    let tmp = jar_temp_for(path);
+    let mut tmp = None;
     let write = (|| -> AppResult<()> {
-        let mut file = create_private_jar(&tmp)?;
+        let (staging, mut file) = open_staging(path)?;
+        tmp = Some(staging);
         writeln!(file, "# Netscape HTTP Cookie File")?;
         writeln!(file, "# https://curl.haxx.se/docs/http-cookies.html")?;
         writeln!(
@@ -171,13 +246,18 @@ pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
         // delayed-allocation filesystem the rename can otherwise reach the
         // disk first and leave a zero-length jar.
         file.sync_all()?;
-        fs::rename(&tmp, path)?;
+        fs::rename(tmp.as_deref().expect("staging path set above"), path)?;
         Ok(())
     })();
     if write.is_err() {
+        // Only ever this call's own staging file: `open_staging` either
+        // created it or returned an error with `tmp` still `None` (a taken or
+        // planted name advances the sequence rather than being deleted).
         // Nothing else tidies this directory, so a scratch file left by a
-        // failed write would sit there for the life of the install.
-        let _ = fs::remove_file(&tmp);
+        // failed write would otherwise sit there for the life of the install.
+        if let Some(tmp) = tmp {
+            let _ = fs::remove_file(&tmp);
+        }
     }
     write
 }
@@ -316,8 +396,15 @@ mod tests {
         write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "old")]).unwrap();
         let before = fs::read(&path).unwrap();
 
-        // A directory where the staging file belongs: creating the temp fails.
-        fs::create_dir(jar_temp_for(&path)).unwrap();
+        // A read-only directory: creating the staging file fails before the
+        // jar is opened. (With a per-call unique staging name there is no
+        // fixed path to pre-block, and blocking the cache dir is the exact
+        // Unix shape of the failure this test needs.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        }
 
         assert!(
             write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "new")]).is_err(),
@@ -328,6 +415,11 @@ mod tests {
             before,
             "a failed write must leave the previous whole jar in place"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]
@@ -357,9 +449,86 @@ mod tests {
 
         assert!(write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "s")]).is_err());
         assert!(
-            !jar_temp_for(&path).exists(),
+            staging_leftovers(dir.path(), &path).is_empty(),
             "the staging file must not outlive the attempt that used it"
         );
+    }
+
+    /// All staging files for `jar` currently on disk (there should be none
+    /// outside a write in flight).
+    fn staging_leftovers(dir: &Path, jar: &Path) -> Vec<String> {
+        let prefix = staging_prefix(jar);
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| {
+                n.as_os_str()
+                    .as_encoded_bytes()
+                    .starts_with(prefix.as_encoded_bytes())
+            })
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The staging name is per-call unique (concurrent writers — a resume
+    /// and the login-persist path can overlap since the commands went async —
+    /// must never share one inode) and hidden behind an app prefix (a
+    /// leftover must not read as the jar to a prefix scan), mirroring
+    /// `fsutil::copy_temp_for`'s collision discipline.
+    #[test]
+    fn staging_names_are_unique_and_prefixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.txt");
+        let a = jar_temp_for(&path);
+        let b = jar_temp_for(&path);
+        assert_ne!(a, b, "two writers must not share a staging path");
+        assert_ne!(a, path.with_file_name("cookies.txt.tmp"));
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(".videofetch-cookies.txt.") && name.ends_with(".tmp"),
+            "staging name must carry the app prefix: {name}"
+        );
+    }
+
+    /// `create_new` refuses to follow a file planted at the staging name:
+    /// publishing an attacker-planted 0644 (or symlinked) temp must be
+    /// impossible, not merely unlikely.
+    #[test]
+    fn a_planted_staging_file_is_refused_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.txt");
+        // Plant at the exact next staging name.
+        let planted = jar_temp_for(&path);
+        fs::write(&planted, b"planted").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&planted, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        // The write must not publish the planted bytes. Either it refuses the
+        // staging name (create_new) or it opens a different one; both leave
+        // the planted file un-published at `path`.
+        let result = write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "new")]);
+        if result.is_ok() {
+            let bytes = fs::read(&path).unwrap();
+            assert_ne!(
+                bytes, b"planted",
+                "the planted bytes must never be published"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    mode, 0o600,
+                    "the published jar must be freshly created 0600, not the planted file's mode"
+                );
+            }
+        } else {
+            assert!(!path.exists(), "a refused write must not publish anything");
+        }
     }
 
     #[test]
