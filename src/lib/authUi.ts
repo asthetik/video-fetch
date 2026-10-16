@@ -56,7 +56,10 @@ export function authChipView(state: LoadState<AuthStatus>): AuthChipView {
       action: "retry",
       label: "读取中…",
       title: "正在读取登录状态…",
-      stateClass: "unknown",
+      // Own class so .auth-chip.loading can style the in-flight read as its
+      // own state; the old "unknown" had no CSS rule, so the chip rendered
+      // exactly like the muted logged-out dot.
+      stateClass: "loading",
       disabled: true,
     };
   }

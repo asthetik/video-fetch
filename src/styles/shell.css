@@ -155,6 +155,27 @@
   background: var(--danger-ink);
 }
 
+/* Loading is its own chip state, not a muted "logged out" look: a dashed
+   border and a hollow dashed ring replace the filled dot, so an in-flight
+   read is distinguishable by shape as well as by colour. Static treatment
+   only -- no decorative animation (DESIGN.md: functional motion only). */
+.auth-chip.loading {
+  border-style: dashed;
+}
+
+.auth-chip.loading .auth-chip-dot {
+  background: transparent;
+  border: 1px dashed var(--muted);
+}
+
+/* The in-flight chip is disabled as a mechanic (there is no action to take
+   while the read runs), not as a dimmed control: the 0.5 fade would halve
+   the ring and the dashed border into near-invisibility, landing back at
+   the muted "未登录" look this class exists to end. */
+.auth-chip.loading:disabled {
+  opacity: 1;
+}
+
 .app-main {
   flex: 1;
   max-width: 640px;

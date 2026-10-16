@@ -63,6 +63,13 @@ test("authChipView disables the chip while the read is in flight", () => {
   assert.notEqual(view.label, "登录");
 });
 
+// The in-flight chip gets its own stateClass: the old "unknown" had no CSS
+// rule, so the chip rendered pixel-identical to the muted logged-out state
+// while the read was still in flight.
+test("authChipView marks the in-flight read with a loading class", () => {
+  assert.equal(authChipView({ status: "loading" }).stateClass, "loading");
+});
+
 test("authChipView maps known statuses to login/logout actions", () => {
   const out = authChipView({ status: "ready", data: "logged_out" });
   assert.equal(out.action, "login");
