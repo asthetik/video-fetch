@@ -419,6 +419,12 @@
   color: var(--muted);
 }
 
+/* Ink tone for hint text that carries a warning state (DESIGN.md: 10-16px
+   hint text uses the *-ink step). */
+.settings-hint.warn {
+  color: var(--warn-ink);
+}
+
 .preset-buttons {
   display: flex;
   flex-wrap: wrap;
