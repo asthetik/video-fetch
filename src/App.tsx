@@ -72,7 +72,7 @@ function App() {
       .then((notice) => {
         if (!cancelled && notice) {
           toast.warning(notice, {
-            description: "继续、重试会直接报错，不会静默以未登录状态下载",
+            description: "所有下载入口都会被拒绝并直接报错，不会静默以未登录状态下载",
           });
         }
       })

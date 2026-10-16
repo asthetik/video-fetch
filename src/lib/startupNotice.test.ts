@@ -34,7 +34,7 @@ test("App toasts the cookie notice at startup", () => {
   );
   assert.match(
     app,
-    /toast\.warning\(notice,\s*\{\s*description:\s*"继续、重试会直接报错，不会静默以未登录状态下载"/,
+    /toast\.warning\(notice,\s*\{\s*description:\s*"所有下载入口都会被拒绝并直接报错，不会静默以未登录状态下载"/,
     "the cookie toast must keep the description explaining that resume/retry refuse instead of degrading",
   );
 });
