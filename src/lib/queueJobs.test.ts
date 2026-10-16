@@ -15,6 +15,7 @@ function job(
     page_index,
     format_id: "80",
     title: id,
+    uploader: "",
     output_template: "%(title)s.%(ext)s",
     status,
     progress: status === "done" ? 1 : 0,
