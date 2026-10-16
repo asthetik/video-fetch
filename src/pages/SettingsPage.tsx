@@ -140,8 +140,13 @@ export function SettingsPage() {
     try {
       const dir = await api.pickSaveDir();
       patch({ save_dir: dir });
-    } catch {
-      // User cancelled the dialog.
+    } catch (err) {
+      // Cancel stays silent; anything else (e.g. a path we cannot persist)
+      // must surface so the user can pick another folder.
+      const msg = toErrorMessage(err);
+      if (!msg.includes("取消")) {
+        toast.error(msg);
+      }
     }
   }
 
