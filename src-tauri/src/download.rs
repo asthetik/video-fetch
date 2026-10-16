@@ -1761,7 +1761,8 @@ fn recorded_output_exists(recorded_paths: &[String], audio_format: Option<&str>)
 /// True when the predicted output name already exists on disk for this media kind.
 /// One prediction for both the enqueue dedup and check_conflict — same template,
 /// title, uploader and page inputs, so the pre-check and the enqueue check can
-/// never disagree about where the product will land.
+/// never disagree with each other (the predicted name may still differ from
+/// yt-dlp's final name, e.g. after title sanitization).
 fn local_output_exists(
     save_dir: &Path,
     template: &str,
