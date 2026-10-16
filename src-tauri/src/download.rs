@@ -1931,6 +1931,22 @@ mod tests {
         panic!("timed out waiting for status {status:?}");
     }
 
+    /// Retry-until for a semaphore permit count, same shape as
+    /// `wait_for_status`. A runner's row can read Done a few instructions
+    /// before its permit is returned, so a one-shot `available_permits` read
+    /// right after a Done wait can catch the pre-return count; poll instead.
+    /// The trailing assert doubles as the timeout failure, so the caller's
+    /// regression message is what surfaces when the count never settles.
+    async fn wait_for_available_permits(manager: &DownloadManager, expected: usize, msg: &str) {
+        for _ in 0..100 {
+            if manager.semaphore.available_permits() == expected {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(manager.semaphore.available_permits(), expected, "{msg}");
+    }
+
     #[test]
     fn cleanup_orphan_work_dirs_removes_orphans_keeps_active() {
         let dir = tempfile::tempdir().unwrap();
@@ -3586,7 +3602,7 @@ mod tests {
             3,
             "expected three downloads running under concurrency 3"
         );
-        assert_eq!(manager.semaphore.available_permits(), 0);
+        wait_for_available_permits(&manager, 0, "all three permits must be held under load").await;
 
         // The round-trip under load: nothing is reclaimable on the way down,
         // and the way up must reconcile against the true capacity rather than
@@ -3632,11 +3648,96 @@ mod tests {
 
         // The drained semaphore must be back at exactly the stated limit, not
         // the inflated leftover of the toggle.
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "the semaphore must drain back to the stated limit of 3"
+            "the semaphore must drain back to the stated limit of 3",
+        )
+        .await;
+    }
+
+    /// Repeated limit round-trips under load must not grow the pool. A4's
+    /// original bug was exactly this shape: every downgrade reclaims nothing
+    /// while the slots are busy, and every upgrade then adds `new - old` on
+    /// top of a capacity the downgrade never shrank, so toggling the limit
+    /// under load made effective concurrency grow monotonically round after
+    /// round. The accounting is convergent for any number of round trips;
+    /// this test pins several of them.
+    ///
+    /// Value: protects=concurrency resize accounting across repeated limit
+    /// toggles; fails_when=each upgrade adds `new - old` while each downgrade
+    /// gives up on the held permits, so repeated round trips inflate the pool
+    /// monotonically; why_new=the existing tests drive a single round trip,
+    /// which proves one toggle but not convergence
+    #[tokio::test]
+    async fn repeated_concurrency_toggles_stay_convergent_under_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloader = Arc::new(LatchedDownloader::new());
+        let (manager, _rx) = test_manager(dir.path(), &dir.path().join("work"), downloader.clone());
+        let mut settings = test_settings(dir.path());
+        settings.concurrency = 3;
+        manager.update_settings(settings).unwrap();
+        let ids = enqueue_distinct_jobs(&manager, "job-rt", 6);
+
+        // Saturate: three permits held by runs that never finish on their own,
+        // three runners parked on the semaphore.
+        for _ in 0..200 {
+            if downloader.running_ids().len() == 3 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            downloader.running_ids().len(),
+            3,
+            "expected three downloads running under concurrency 3"
         );
+        assert_eq!(manager.semaphore.available_permits(), 0);
+
+        // 3 -> 1 -> 3 -> 1 -> 3 under load. Every hop must leave effective
+        // concurrency at the stated limit of 3: the pool must not grow a
+        // single permit, however many times the limit is toggled.
+        for round in 0..2 {
+            for limit in [1u32, 3] {
+                let mut settings = test_settings(dir.path());
+                settings.concurrency = limit;
+                manager.update_settings(settings).unwrap();
+                // Give any wrongly-woken runner time to enter `run`.
+                let mut inflated: Option<Vec<String>> = None;
+                for _ in 0..10 {
+                    let running = downloader.running_ids();
+                    if running.len() > 3 {
+                        inflated = Some(running);
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+                assert_eq!(
+                    inflated, None,
+                    "round {round} hop to {limit}: effective concurrency exceeded the stated limit of 3: {inflated:?}"
+                );
+            }
+        }
+        assert_eq!(
+            downloader.peak.load(Ordering::SeqCst),
+            3,
+            "peak concurrent downloads must never exceed the stated limit"
+        );
+
+        // Drain everything. The pool must settle at the final stated limit of
+        // 3 — not the inflated leftover the repeated toggles would leave.
+        // Retry-until, not a one-shot read: Done is committed before the
+        // runner's permit is returned, so a direct read can catch the gap.
+        for id in &ids {
+            downloader.release(id);
+            wait_for_status(&manager, id, JobStatus::Done).await;
+        }
+        wait_for_available_permits(
+            &manager,
+            3,
+            "after repeated round trips the pool must settle at the final limit of 3",
+        )
+        .await;
     }
 
     /// A downgrade must take effect even while every slot is busy: the surplus
@@ -3669,7 +3770,7 @@ mod tests {
         }
         let held = downloader.running_ids();
         assert_eq!(held.len(), 3, "expected three downloads running: {held:?}");
-        assert_eq!(manager.semaphore.available_permits(), 0);
+        wait_for_available_permits(&manager, 0, "all three permits must be held under load").await;
 
         // Lower to 1 while all three slots are busy.
         let mut lowered = test_settings(dir.path());
@@ -3739,27 +3840,25 @@ mod tests {
             wait_for_status(&manager, id, JobStatus::Done).await;
         }
 
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             1,
-            "after draining under concurrency 1 the pool must hold exactly one permit"
-        );
+            "after draining under concurrency 1 the pool must hold exactly one permit",
+        )
+        .await;
         let mut raised = test_settings(dir.path());
         raised.concurrency = 3;
         manager.update_settings(raised).unwrap();
-        assert_eq!(
-            manager.semaphore.available_permits(),
+        wait_for_available_permits(
+            &manager,
             3,
-            "a raise must add permits relative to the true capacity, not a stale leftover"
-        );
+            "a raise must add permits relative to the true capacity, not a stale leftover",
+        )
+        .await;
         let mut idle_lower = test_settings(dir.path());
         idle_lower.concurrency = 2;
         manager.update_settings(idle_lower).unwrap();
-        assert_eq!(
-            manager.semaphore.available_permits(),
-            2,
-            "a lower limit must withdraw idle permits"
-        );
+        wait_for_available_permits(&manager, 2, "a lower limit must withdraw idle permits").await;
     }
 
     #[test]
