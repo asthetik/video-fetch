@@ -545,8 +545,6 @@ impl DownloadManager {
             job.output_path = None;
 
             prepared = job.clone();
-            #[cfg(test)]
-            enqueue_race_hook::before_insert(&job.video_id);
             db.insert_job(job)?;
         }
         self.emit(&prepared);
@@ -1649,73 +1647,6 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
 /// and a row stuck at Running.
 fn lock_db(db: &Mutex<Db>) -> std::sync::MutexGuard<'_, Db> {
     db.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Test-only rendezvous for the enqueue check/insert race regression test.
-/// When armed for a marker (a video id), the first enqueue to reach the gap
-/// between the active check and the insert waits briefly for a second one, so
-/// both are guaranteed to have passed the check before either inserts. That
-/// makes the double-insert interleaving deterministic instead of probabilistic.
-/// Unarmed — and in production builds — the hook is a no-op.
-#[cfg(test)]
-mod enqueue_race_hook {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, Mutex, MutexGuard};
-    use std::time::Duration;
-
-    /// Upper bound on the first arriver's wait for its peer. Must be long
-    /// enough for a freshly spawned thread to reach the hook, and finite so
-    /// that code holding a lock the peer still needs cannot deadlock on a
-    /// rendezvous that can never complete.
-    const PEER_WAIT: Duration = Duration::from_secs(2);
-
-    static ARMED: Mutex<Option<String>> = Mutex::new(None);
-    static ARRIVED: AtomicUsize = AtomicUsize::new(0);
-    static SIGNAL: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
-
-    /// Disarms the hook when dropped (also on test panic).
-    pub struct Guard;
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            disarm();
-        }
-    }
-
-    /// Arm the hook for calls whose marker matches, resetting the rendezvous.
-    pub fn arm(marker: &str) -> Guard {
-        *ARMED.lock().unwrap() = Some(marker.to_owned());
-        ARRIVED.store(0, Ordering::SeqCst);
-        Guard
-    }
-
-    fn disarm() {
-        *ARMED.lock().unwrap() = None;
-    }
-
-    /// Called between the active check and the insert. See module docs.
-    pub fn before_insert(marker: &str) {
-        {
-            let armed = ARMED.lock().unwrap();
-            if armed.as_deref() != Some(marker) {
-                return;
-            }
-        }
-        let n = ARRIVED.fetch_add(1, Ordering::SeqCst) + 1;
-        let (lock, cv) = &SIGNAL;
-        let mut guard: MutexGuard<'_, ()> = lock.lock().unwrap();
-        if n >= 2 {
-            cv.notify_all();
-            return;
-        }
-        while ARRIVED.load(Ordering::SeqCst) < 2 {
-            let (g, timeout) = cv.wait_timeout(guard, PEER_WAIT).unwrap();
-            guard = g;
-            if timeout.timed_out() {
-                break;
-            }
-        }
-    }
 }
 
 /// Test-only fault injection for the cancel/pause terminal-write failure
@@ -4372,9 +4303,17 @@ mod tests {
     }
 
     /// Two concurrent enqueues for the same video page must not both pass the
-    /// active check and insert — two runners would write one output file. The
-    /// hook pins the interleaving (both checks before either insert) so the
-    /// regression reproduces deterministically instead of by luck.
+    /// active check and insert — two runners would write one output file. A
+    /// barrier releases every thread into `enqueue_classified` together, the
+    /// moment a split check/insert critical section lets several through; the
+    /// fixed code performs the check and the insert under one lock.
+    ///
+    /// Value: protects=the single db critical section around the active check
+    /// and the insert; fails_when=the check and insert take the db lock
+    /// separately (the barrier admits several threads past the check before
+    /// any insert); why_new=the old rendezvous hook waited inside the very
+    /// lock its peer needed, so it always timed out and pinned nothing;
+    /// seam=none
     #[test]
     fn concurrent_enqueue_classified_admits_a_single_active_job() {
         let dir = tempfile::tempdir().unwrap();
@@ -4386,40 +4325,44 @@ mod tests {
             Arc::new(ParkForeverDownloader),
         );
 
-        let _guard = enqueue_race_hook::arm("BV1race");
-        let spawn = |job_id: &str| {
-            let manager = manager.clone();
-            let mut job = sample_job(job_id);
-            job.video_id = "BV1race".into();
-            std::thread::spawn(move || manager.enqueue_classified(&mut job, false))
-        };
-        let first = spawn("job-race-a");
-        let second = spawn("job-race-b");
-        let results = [
-            first.join().unwrap().unwrap(),
-            second.join().unwrap().unwrap(),
-        ];
-
-        let enqueued = results
-            .iter()
-            .filter(|k| **k == EnqueueKind::Enqueued)
-            .count();
-        let duplicate = results
-            .iter()
-            .filter(|k| **k == EnqueueKind::DuplicateActive)
-            .count();
-        assert_eq!(
-            (enqueued, duplicate),
-            (1, 1),
-            "exactly one enqueue may win the active slot: {results:?}"
-        );
-        let rows = manager
-            .list()
-            .unwrap()
-            .into_iter()
-            .filter(|j| j.video_id == "BV1race")
-            .count();
-        assert_eq!(rows, 1, "check-then-insert must not insert two active rows");
+        for round in 0..16 {
+            let video_id = format!("BV1race{round}");
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let mut handles = Vec::new();
+            for n in 0..4 {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                let video_id = video_id.clone();
+                let mut job = sample_job(&format!("job-{round}-{n}"));
+                job.video_id = video_id;
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    manager.enqueue_classified(&mut job, false)
+                }));
+            }
+            let kinds: Vec<EnqueueKind> = handles
+                .into_iter()
+                .map(|h| h.join().unwrap().unwrap())
+                .collect();
+            let enqueued = kinds
+                .iter()
+                .filter(|k| **k == EnqueueKind::Enqueued)
+                .count();
+            assert_eq!(
+                enqueued, 1,
+                "round {round}: exactly one enqueue may win the active slot: {kinds:?}"
+            );
+            let rows = manager
+                .list()
+                .unwrap()
+                .into_iter()
+                .filter(|j| j.video_id == video_id)
+                .count();
+            assert_eq!(
+                rows, 1,
+                "round {round}: check-then-insert must not insert two active rows"
+            );
+        }
     }
 
     // ---- pause / resume ----
