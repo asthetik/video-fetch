@@ -52,3 +52,36 @@ export function gateResolveOutcome(
 ): ResolveGate {
   return succeeded ? { lastResolved: url.trim() } : gate;
 }
+
+/** What a skipped schedule must do about the screen. */
+export type GateSkipAction = "none" | "rerun" | "discard";
+
+/**
+ * `gateInputChange` refused to schedule: the input is now empty or back to the
+ * last successfully resolved URL. A resolve for another URL may still be in
+ * flight — its result must not land on the card, and its outcome must not
+ * overwrite the gate — and a failed or superseded attempt may have cleared
+ * the remembered URL's card, in which case skipping would leave the input
+ * with nothing displayed.
+ *
+ * - `none`: the display already matches (focus-churn skip), or the URL is the
+ *   one currently resolving.
+ * - `rerun`: resolve the remembered URL again; the parent bumps its request
+ *   id, which discards the other attempt.
+ * - `discard`: the input was cleared while a resolve is in flight; drop it
+ *   without starting a new one.
+ */
+export function gateSkipAction(
+  nextUrl: string,
+  pendingUrl: string | null,
+  resultShown: boolean,
+): GateSkipAction {
+  const trimmed = nextUrl.trim();
+  if (!trimmed) {
+    return pendingUrl === null ? "none" : "discard";
+  }
+  if (pendingUrl === trimmed) {
+    return "none";
+  }
+  return resultShown ? "none" : "rerun";
+}
