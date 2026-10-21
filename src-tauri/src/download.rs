@@ -3752,6 +3752,9 @@ mod tests {
         wake: Arc<tokio::sync::Notify>,
         running: Arc<Mutex<HashSet<String>>>,
         peak: Arc<AtomicUsize>,
+        /// Fires inside the check→wait window so a test can stage a release
+        /// exactly where a `notify_waiters` used to be lost.
+        after_check: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         scratch: tempfile::TempDir,
     }
 
@@ -3762,8 +3765,13 @@ mod tests {
                 wake: Arc::new(tokio::sync::Notify::new()),
                 running: Arc::new(Mutex::new(HashSet::new())),
                 peak: Arc::new(AtomicUsize::new(0)),
+                after_check: Mutex::new(None),
                 scratch: tempfile::tempdir().unwrap(),
             }
+        }
+
+        fn set_after_check(&self, hook: impl Fn() + Send + Sync + 'static) {
+            *self.after_check.lock().unwrap() = Some(Box::new(hook));
         }
 
         fn release(&self, id: &str) {
@@ -3800,14 +3808,25 @@ mod tests {
                 self.peak.fetch_max(running.len(), Ordering::SeqCst);
             }
             loop {
+                // Arm the wait before checking: `notify_waiters` stores no
+                // permit, so a release between an unarmed check and the wait
+                // would be lost and this runner would park forever.
+                let notified = self.wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let released = match self.released.lock() {
                     Ok(released) => released.contains(&job.id),
                     Err(_) => true,
                 };
+                if let Ok(hook) = self.after_check.lock()
+                    && let Some(hook) = hook.as_ref()
+                {
+                    hook();
+                }
                 if released {
                     break;
                 }
-                self.wake.notified().await;
+                notified.await;
             }
             if let Ok(mut running) = self.running.lock() {
                 running.remove(&job.id);
@@ -3816,6 +3835,39 @@ mod tests {
             std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
             Ok(path)
         }
+    }
+
+    /// Reproduces the wake-up window deterministically: the hook fires after
+    /// the release check and before the wait. A `notify_waiters` landing in
+    /// that window (it stores no permit) must not be lost.
+    ///
+    /// Value: protects=the enabled-before-check wait in `LatchedDownloader`;
+    /// fails_when=the wait is armed after the check, so the hook's wake-up is
+    /// dropped and the run parks until the timeout; why_new=the post-0.4.2
+    /// review found the lost-wakeup window; seam=the after-check hook.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_between_the_check_and_the_wait_is_not_lost() {
+        let d = Arc::new(LatchedDownloader::new());
+        let released = d.released.clone();
+        let wake = d.wake.clone();
+        d.set_after_check(move || {
+            if let Ok(mut released) = released.lock() {
+                released.insert("job-hook".into());
+            }
+            wake.notify_waiters();
+        });
+
+        let d2 = d.clone();
+        let waiter = tokio::spawn(async move {
+            let job = sample_job("job-hook");
+            d2.run(&job, 0, Box::new(|_| {})).await
+        });
+        let done = tokio::time::timeout(Duration::from_millis(500), waiter).await;
+        assert!(
+            done.is_ok(),
+            "a release inside the check→wait window was lost"
+        );
+        done.unwrap().unwrap().unwrap();
     }
 
     /// Enqueue `count` distinct jobs and return their ids in enqueue order.
