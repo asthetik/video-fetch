@@ -232,8 +232,12 @@ const CONSUMER_RULES: Array<[string, string, string[]]> = [
   // off: `.auth-chip:disabled` composites at 0.5 (1.97:1), which is the
   // ratio no test could catch and every pixel shows.
   [shellCss, ".auth-chip.loading:disabled", ["opacity: 1"]],
-  [shellCss, ".auth-chip.error", ["color: var(--danger-ink)"]],
-  [shellCss, ".auth-chip.error .auth-chip-dot", ["background: var(--danger-ink)"]],
+  // The login-status chip is a button: DESIGN.md's 2026-09-20 rule keeps
+  // button text and fills on the base semantic colours (no ink tokens), and
+  // names the top-bar login status button explicitly. The chip never carries
+  // its own tint, so the base colour also sits on the plain surface.
+  [shellCss, ".auth-chip.error", ["color: var(--danger)"]],
+  [shellCss, ".auth-chip.error .auth-chip-dot", ["background: var(--danger)"]],
   [pagesCss, ".history-row-err", ["color: var(--danger-ink)"]],
   [pagesCss, ".settings-input::placeholder", ["color: var(--muted-ink)"]],
   [pagesCss, ".about-card-hint", ["color: var(--muted-ink)"]],
