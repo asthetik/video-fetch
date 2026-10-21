@@ -1029,6 +1029,16 @@ impl DownloadManager {
             // choice: honor it and drop any startup fallback standing in.
             if current.save_dir != settings.save_dir {
                 *self.save_dir_override.lock().map_err(lock_err)? = None;
+            } else {
+                // Same path, but the startup fallback may still be active. If
+                // the configured dir became usable again (the drive came
+                // back), saving settings is the moment to drop the fallback:
+                // otherwise downloads keep landing in the stand-in until the
+                // next restart.
+                let mut override_dir = self.save_dir_override.lock().map_err(lock_err)?;
+                if override_dir.is_some() && save_dir_available(Path::new(&settings.save_dir)) {
+                    *override_dir = None;
+                }
             }
             *current = settings;
         }
@@ -1608,6 +1618,14 @@ impl DownloadManager {
         *self.save_dir_override.lock().map_err(lock_err)? = dir;
         Ok(())
     }
+}
+
+/// Usable without creating it: an absent configured save dir means the drive
+/// is still unmounted, and `create_dir_all` at its mountpoint would shadow the
+/// mount when it returns. `check_save_dir_writable` only creates what is
+/// missing, so an existing directory is probed without side effects.
+fn save_dir_available(dir: &Path) -> bool {
+    dir.is_dir() && check_save_dir_writable(dir).is_ok()
 }
 
 pub fn check_save_dir_writable(path: &Path) -> AppResult<()> {
@@ -4199,7 +4217,8 @@ mod tests {
 
     /// The override flag backs the startup notice's live derivation: set at
     /// startup alongside the fallback, dropped the moment the user picks a
-    /// different save dir, kept for unrelated settings changes.
+    /// different save dir. (The same-path recovery case is pinned by
+    /// `saving_settings_drops_the_override_once_the_configured_dir_returns`.)
     #[test]
     fn save_dir_override_active_tracks_update_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -4215,13 +4234,7 @@ mod tests {
             .unwrap();
         assert!(manager.save_dir_override_active().unwrap());
 
-        // An unrelated change keeps the fallback...
-        let mut settings = manager.settings.lock().unwrap().clone();
-        settings.concurrency = settings.concurrency.saturating_add(1);
-        manager.update_settings(settings).unwrap();
-        assert!(manager.save_dir_override_active().unwrap());
-
-        // ...but a changed save dir ends it, and with it the hint.
+        // A changed save dir ends it, and with it the hint.
         let mut settings = manager.settings.lock().unwrap().clone();
         settings.save_dir = dir.path().join("elsewhere").to_string_lossy().into();
         manager.update_settings(settings).unwrap();
@@ -4265,14 +4278,22 @@ mod tests {
         );
     }
 
-    /// Only a save_dir change may drop the stand-in: an unrelated settings
-    /// edit must leave the session fallback in place, or a mid-download
-    /// concurrency tweak would silently redirect the rest of the session.
+    /// Only a save_dir change may drop the stand-in while the configured dir
+    /// is unusable; once it becomes usable again (the drive was remounted),
+    /// saving settings must drop the fallback instead of writing into it until
+    /// the next restart.
+    ///
+    /// Value: protects=the recovery probe in `update_settings`; fails_when=the
+    /// same-path branch keeps the override unconditionally; why_new=the
+    /// post-0.4.2 review found the fallback sticking after a remount;
+    /// seam=none
     #[test]
-    fn unrelated_settings_change_keeps_the_session_override() {
+    fn saving_settings_drops_the_override_once_the_configured_dir_returns() {
         let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("save");
+        std::fs::create_dir_all(&save).unwrap();
         let (manager, _rx) = test_manager(
-            dir.path(),
+            &save,
             &dir.path().join("work"),
             Arc::new(MockDownloader::success(1.0)),
         );
@@ -4282,15 +4303,25 @@ mod tests {
             .set_save_dir_override(Some(fallback.clone()))
             .unwrap();
 
-        // Same save_dir, a different setting (concurrency).
-        let mut settings = test_settings(dir.path());
+        // The configured dir is gone (the drive is still unmounted): an
+        // unrelated settings edit must leave the fallback in place.
+        std::fs::remove_dir_all(&save).unwrap();
+        let mut settings = test_settings(&save);
         settings.concurrency = 2;
-        manager.update_settings(settings).unwrap();
-
+        manager.update_settings(settings.clone()).unwrap();
         assert_eq!(
             manager.effective_save_dir().unwrap(),
             fallback,
-            "an unrelated settings change must not drop the session fallback"
+            "an unrelated settings change must not drop a still-needed fallback"
+        );
+
+        // The drive is back: the same settings save now drops the fallback.
+        std::fs::create_dir_all(&save).unwrap();
+        manager.update_settings(settings).unwrap();
+        assert_eq!(
+            manager.effective_save_dir().unwrap(),
+            save,
+            "a recovered save dir must replace the session fallback"
         );
     }
 
