@@ -1674,6 +1674,25 @@ impl OpenableRootsCache {
     }
 }
 
+/// Validate `path` against the cached roots, recomputing them once on a
+/// refusal. The cache can predate a finished download: an `open_path` during
+/// the download caches roots that do not include the old save folder, and the
+/// completed row — the thing that makes that folder a root — is written only
+/// at delivery. Without the retry the freshly delivered file stays
+/// unopenable until a restart or a settings save.
+fn validate_openable(
+    path: &str,
+    cache: &OpenableRootsCache,
+    compute: impl Fn() -> Vec<PathBuf>,
+) -> AppResult<()> {
+    let roots = cache.get_or_compute(&compute);
+    if ensure_openable(path, &roots).is_ok() {
+        return Ok(());
+    }
+    cache.invalidate();
+    ensure_openable(path, &cache.get_or_compute(&compute)).map(|_| ())
+}
+
 /// The directories the app writes into: the log folder, the current save
 /// folder, and wherever earlier downloads landed — the save folder can have
 /// been changed since those rows were written.
@@ -1736,10 +1755,9 @@ pub async fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()
     // root check sound, but on Windows it also returns a `\\?\`-prefixed path,
     // and the opener hands that to ShellExecuteW, which does not understand the
     // form — it would fail to open, and report success while doing it.
-    let roots = state
-        .openable_roots_cache
-        .get_or_compute(|| openable_roots(&state));
-    ensure_openable(&path, &roots)?;
+    validate_openable(&path, &state.openable_roots_cache, || {
+        openable_roots(&state)
+    })?;
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|e| AppError::Message(format!("无法打开路径: {e}")))?;
     Ok(())
@@ -2259,6 +2277,51 @@ mod tests {
             computes.get(),
             2,
             "a settings change must force a recompute"
+        );
+    }
+
+    /// The cache can predate a finished download: an `open_path` during the
+    /// download caches roots without the old save folder, and the row that
+    /// makes that folder a root is written only when the job completes. A
+    /// refusal must recompute once instead of staying stale until restart.
+    ///
+    /// Value: protects=the invalidate-and-retry in `validate_openable`;
+    /// fails_when=the refusal path trusts the cached roots (the delivered
+    /// file stays unopenable after the save folder moved mid-download);
+    /// why_new=the post-0.4.2 review found the completion-time gap; seam=none
+    #[test]
+    fn openable_validation_recomputes_after_a_stale_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_root = dir.path().join("old-save");
+        let new_root = dir.path().join("new-save");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&new_root).unwrap();
+        let delivered = new_root.join("clip.mp4");
+        std::fs::write(&delivered, b"video").unwrap();
+        let old = old_root.canonicalize().unwrap();
+        let new = new_root.canonicalize().unwrap();
+
+        let cache = OpenableRootsCache::default();
+        // Primed while the download was still running: the old save folder only.
+        cache.get_or_compute(|| vec![old]);
+
+        let computes = std::cell::Cell::new(0usize);
+        let result = validate_openable(delivered.to_str().unwrap(), &cache, || {
+            computes.set(computes.get() + 1);
+            vec![new.clone()]
+        });
+        assert!(
+            result.is_ok(),
+            "stale roots must be recomputed once: {result:?}"
+        );
+        assert_eq!(computes.get(), 1, "exactly one recompute per refusal");
+
+        // A genuinely unresolvable path still refuses after the recompute.
+        let outside = dir.path().join("outside.mp4");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(
+            validate_openable(outside.to_str().unwrap(), &cache, || vec![new.clone()]).is_err(),
+            "a path outside every root must stay refused"
         );
     }
 
