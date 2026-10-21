@@ -238,13 +238,12 @@ export function HomePage({
         meta && (
           <VideoCard
             meta={meta}
-            url={url.trim()}
             active={active}
             refreshing={loading}
             formatsLoading={resolveStatus.formatsLoading}
             formatsError={resolveStatus.formatsError}
             onEnqueued={handleEnqueued}
-            onRefresh={() => void handleResolve(url.trim(), true)}
+            onRefresh={() => void handleResolve(meta.webpage_url, true)}
           />
         )
       )}
