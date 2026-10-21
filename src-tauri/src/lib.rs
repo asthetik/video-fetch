@@ -42,6 +42,7 @@ pub mod testing {
         cleanup_orphan_work_dirs, work_dir_keep_ids,
     };
     pub use crate::error::{AppError, AppResult};
+    pub use crate::fsutil::delivery_hooks::{ForceCopyGuard, force_copy_delivery};
     pub use crate::fsutil::work_dir_for;
     pub use crate::models::{AppSettings, DownloadJob, JobStatus, PauseAllResult, ResumeAllResult};
     pub use crate::ytdlp::YtDlpConfig;
