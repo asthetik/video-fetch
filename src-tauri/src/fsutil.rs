@@ -160,7 +160,10 @@ pub fn relocate_file(src: &Path, dest: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     match std::fs::rename(src, dest) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            sync_parent_dir(dest);
+            Ok(())
+        }
         Err(_) => copy_across_volumes(src, dest),
     }
 }
@@ -212,6 +215,10 @@ fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(rename_err);
     }
+    // Flush the published name before the source goes away: the caller
+    // removes the work dir right after this returns, and a crash that loses
+    // the rename but keeps the deletion would leave no copy at all.
+    sync_parent_dir(dest);
     // Same rule as the copy: a source that would not go away removes the
     // destination again, so a retry still sees one complete copy and not two.
     if let Err(remove_err) = std::fs::remove_file(src) {
@@ -219,6 +226,55 @@ fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
         return Err(remove_err);
     }
     Ok(())
+}
+
+/// Flush the directory that holds a just-published file. Some filesystems can
+/// persist a rename's new name later than the file's data; the source is
+/// removed immediately after publication (and the work dir right after that),
+/// so a crash in the window would leave neither the source nor the delivered
+/// name. Best effort: filesystems that cannot flush a directory reject it with
+/// ENOTSUP/EINVAL, and failing every delivery on such a mount would be worse
+/// than the durability the filesystem can offer.
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        match std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+            Ok(()) => {
+                #[cfg(test)]
+                sync_probe::record(parent);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+                ) => {}
+            Err(e) => tracing::warn!(
+                "could not flush {} after publishing a download: {e}",
+                parent.display()
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Records which directories the delivery path flushed, so a unit test can
+/// pin the call itself: directory durability cannot be observed without a
+/// power loss.
+#[cfg(all(test, unix))]
+mod sync_probe {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static SYNCED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(path: &Path) {
+        SYNCED.lock().unwrap().push(path.to_path_buf());
+    }
+
+    pub(super) fn synced(path: &Path) -> bool {
+        SYNCED.lock().unwrap().iter().any(|p| p == path)
+    }
 }
 
 pub fn remove_job_work_dir(work_root: &Path, job_id: &str) -> std::io::Result<()> {
@@ -608,5 +664,32 @@ mod tests {
             "a source that stayed must take the destination with it"
         );
         assert!(!copy_temp_for(&dest).unwrap().exists());
+    }
+
+    /// The delivered file must be durable before the caller drops the work
+    /// dir: the rename that published it needs its parent directory flushed,
+    /// or a crash can leave neither copy.
+    #[cfg(unix)]
+    #[test]
+    fn relocate_file_syncs_the_destination_parent_before_returning() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        relocate_file(&src, &dest).unwrap();
+        assert!(
+            sync_probe::synced(dest.parent().unwrap()),
+            "the destination parent must be flushed after a same-volume rename"
+        );
+    }
+
+    /// Same rule for the cross-volume fallback: the flush must happen before
+    /// the source is removed.
+    #[cfg(unix)]
+    #[test]
+    fn copy_across_volumes_syncs_the_destination_parent() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        copy_across_volumes(&src, &dest).unwrap();
+        assert!(
+            sync_probe::synced(dest.parent().unwrap()),
+            "the destination parent must be flushed after the fallback rename"
+        );
     }
 }
