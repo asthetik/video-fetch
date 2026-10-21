@@ -247,6 +247,7 @@ pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
         // disk first and leave a zero-length jar.
         file.sync_all()?;
         fs::rename(tmp.as_deref().expect("staging path set above"), path)?;
+        sync_parent_dir(path);
         Ok(())
     })();
     if write.is_err() {
@@ -260,6 +261,50 @@ pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
         }
     }
     write
+}
+
+/// Flush the directory that received a just-published jar. Some filesystems
+/// persist a rename's new name later than the file's bytes; the jar is the
+/// only copy yt-dlp reads, so a crash in that window would leave it stale or
+/// missing. Best effort: filesystems that cannot flush a directory reject it
+/// with ENOTSUP/EINVAL, and failing the write there gains nothing.
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        match fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+            Ok(()) => {
+                #[cfg(test)]
+                sync_probe::record(parent);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+                ) => {}
+            Err(e) => tracing::warn!(
+                "could not flush {} after publishing cookies: {e}",
+                parent.display()
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+#[cfg(all(test, unix))]
+mod sync_probe {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static SYNCED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(path: &Path) {
+        SYNCED.lock().unwrap().push(path.to_path_buf());
+    }
+
+    pub(super) fn synced(path: &Path) -> bool {
+        SYNCED.lock().unwrap().iter().any(|p| p == path)
+    }
 }
 
 #[cfg(test)]
@@ -600,5 +645,26 @@ mod tests {
         assert!(!is_bilibili_domain("bilibili.com.evil.com"));
         assert!(!is_bilibili_domain("notbilibili.com"));
         assert!(!is_bilibili_domain(""));
+    }
+
+    /// The rename that publishes the jar must be durable before the caller
+    /// relies on it: a crash that loses the rename would leave yt-dlp with
+    /// the stale jar (or none) even though the write reported success.
+    ///
+    /// Value: protects=the parent flush after the rename; fails_when=the
+    /// rename is published without flushing its directory; why_new=the
+    /// post-0.4.2 review found the missing parent fsync; seam=none (directory
+    /// durability cannot be observed without a power loss, so a probe records
+    /// the call).
+    #[cfg(unix)]
+    #[test]
+    fn writing_the_jar_flushes_its_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.txt");
+        write_netscape_file(&path, &[cookie(".bilibili.com", "SESSDATA", "abc")]).unwrap();
+        assert!(
+            sync_probe::synced(path.parent().unwrap()),
+            "the jar's parent must be flushed after the publishing rename"
+        );
     }
 }
