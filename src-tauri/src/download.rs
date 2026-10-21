@@ -4290,25 +4290,33 @@ mod tests {
     #[test]
     fn saving_settings_drops_the_override_once_the_configured_dir_returns() {
         let dir = tempfile::tempdir().unwrap();
-        let save = dir.path().join("save");
-        std::fs::create_dir_all(&save).unwrap();
-        let (manager, _rx) = test_manager(
-            &save,
-            &dir.path().join("work"),
+        // The configured dir does not exist yet (the drive is still
+        // unmounted). The db lives elsewhere so removing the directory is
+        // never needed — on Windows an open db file blocks that.
+        let missing = dir.path().join("not-mounted-yet");
+        let mut settings = test_settings(dir.path());
+        settings.save_dir = missing.to_string_lossy().into();
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let manager = DownloadManager::new(
+            Db::open(&dir.path().join("jobs.db")).unwrap(),
+            settings.clone(),
             Arc::new(MockDownloader::success(1.0)),
-        );
+            Arc::new(emitter),
+            Arc::new(Mutex::new(HashMap::new())),
+            dir.path().join("work"),
+        )
+        .unwrap();
         let fallback = dir.path().join("session-fallback");
         std::fs::create_dir_all(&fallback).unwrap();
         manager
             .set_save_dir_override(Some(fallback.clone()))
             .unwrap();
 
-        // The configured dir is gone (the drive is still unmounted): an
-        // unrelated settings edit must leave the fallback in place.
-        std::fs::remove_dir_all(&save).unwrap();
-        let mut settings = test_settings(&save);
-        settings.concurrency = 2;
-        manager.update_settings(settings.clone()).unwrap();
+        // Still unmounted: an unrelated settings edit must leave the fallback
+        // in place.
+        let mut edited = settings;
+        edited.concurrency = 2;
+        manager.update_settings(edited.clone()).unwrap();
         assert_eq!(
             manager.effective_save_dir().unwrap(),
             fallback,
@@ -4316,11 +4324,11 @@ mod tests {
         );
 
         // The drive is back: the same settings save now drops the fallback.
-        std::fs::create_dir_all(&save).unwrap();
-        manager.update_settings(settings).unwrap();
+        std::fs::create_dir_all(&missing).unwrap();
+        manager.update_settings(edited).unwrap();
         assert_eq!(
             manager.effective_save_dir().unwrap(),
-            save,
+            missing,
             "a recovered save dir must replace the session fallback"
         );
     }
