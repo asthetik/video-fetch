@@ -910,9 +910,11 @@ impl DownloadManager {
         // outside every snapshot taken below, so a registration that lands
         // afterwards must kill its own child.
         self.children.seal_for_exit();
+        // A poisoned lock still holds every live child; bailing here would
+        // leak each of them past the app, so the snapshot recovers the guard.
         let ids: Vec<String> = match self.children.lock() {
             Ok(guard) => guard.keys().cloned().collect(),
-            Err(_) => return,
+            Err(poisoned) => poisoned.into_inner().keys().cloned().collect(),
         };
         for id in ids {
             kill_download_blocking(&self.children, &id);
@@ -2147,6 +2149,63 @@ mod tests {
         assert!(
             manager.children.is_sealed(),
             "the registry must be sealed before the sweep takes its snapshot"
+        );
+    }
+
+    /// A panic while some code held the registry lock leaves it poisoned, and
+    /// the exit sweep must still reap the children the lock guards: bailing
+    /// on the poison skips every registered download process, which then
+    /// outlives the app. Both the snapshot and the per-child removal have to
+    /// recover the poisoned guard.
+    ///
+    /// Value: protects=kill_all_children's poisoned-lock paths; fails_when=
+    /// either Err arm bails, which leaves the registered child in the map;
+    /// why_new=the 0.4.3 review found the early return; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_all_children_sweeps_a_poisoned_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work,
+            Arc::new(MockDownloader::failure()) as Arc<dyn Downloader>,
+        );
+        // Poison the registry exactly as a panicking holder would.
+        let children = Arc::clone(&manager.children);
+        std::thread::spawn(move || {
+            let _guard = children.lock().unwrap();
+            panic!("poison the registry");
+        })
+        .join()
+        .unwrap_err();
+        // Seed one live registration through the poisoned guard.
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30");
+        cmd.process_group(0);
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().unwrap();
+        {
+            let mut guard = match manager.children.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.insert(
+                "job-poison".into(),
+                crate::ytdlp::RegisteredChild { token: 7, child },
+            );
+        }
+
+        manager.kill_all_children();
+
+        let remaining = match manager.children.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        };
+        assert_eq!(
+            remaining, 0,
+            "the exit sweep must drain even a poisoned registry"
         );
     }
 

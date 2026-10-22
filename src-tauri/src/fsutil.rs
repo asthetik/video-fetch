@@ -181,30 +181,60 @@ pub mod delivery_hooks {
     }
 }
 
+/// The one "already taken" error shape: the pre-check and the publish both
+/// speak it, so the caller sees the same failure whichever one refuses.
+fn destination_exists_error(dest: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("destination exists: {}", dest.display()),
+    )
+}
+
 pub fn relocate_file(src: &Path, dest: &Path) -> std::io::Result<()> {
     if dest.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("destination exists: {}", dest.display()),
-        ));
+        return Err(destination_exists_error(dest));
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    #[cfg(test)]
+    publish_probe::before_publish(dest);
+    // Publish without replacing: the check above and the publish below are
+    // two steps, and a file that appears between them must not be overwritten.
+    // A hard link refuses an existing destination atomically; a rename
+    // replaces one. The link is what closes that window.
     #[cfg(feature = "test-utils")]
-    let renamed = if delivery_hooks::forced() {
-        Err(std::io::Error::other("test: forced cross-volume delivery"))
-    } else {
-        std::fs::rename(src, dest)
-    };
-    #[cfg(not(feature = "test-utils"))]
-    let renamed = std::fs::rename(src, dest);
-    match renamed {
+    if delivery_hooks::forced() {
+        return copy_across_volumes(src, dest);
+    }
+    match std::fs::hard_link(src, dest) {
         Ok(()) => {
+            // Same rule as the copy fallback: a source that will not go away
+            // takes the destination with it, so a retry sees one complete
+            // copy rather than two names for one file.
+            if let Err(e) = std::fs::remove_file(src) {
+                let _ = std::fs::remove_file(dest);
+                return Err(e);
+            }
             sync_parent_dir(dest);
             Ok(())
         }
-        Err(_) => copy_across_volumes(src, dest),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(destination_exists_error(dest))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => copy_across_volumes(src, dest),
+        Err(_) => {
+            // Filesystems without hard links (FAT/exFAT save drives) keep the
+            // rename publish; only there does the check-then-publish window
+            // remain.
+            match std::fs::rename(src, dest) {
+                Ok(()) => {
+                    sync_parent_dir(dest);
+                    Ok(())
+                }
+                Err(_) => copy_across_volumes(src, dest),
+            }
+        }
     }
 }
 
@@ -214,30 +244,31 @@ pub fn relocate_file(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// would plausibly have in their own save dir, and it does not read as a
 /// delivered `<name>.*` to anything scanning for one.
 ///
-/// Every attempt gets its own name. Two downloads of the same title can
-/// deliver to the same destination at once; a shared staging name would let
-/// one attempt rename the other's still-growing copy into place (publishing a
-/// truncated product as finished) and truncate the other's in-flight bytes on
-/// open. The destination name is kept byte-for-byte: a lossy conversion would
-/// fold distinct non-UTF-8 names onto one staging name.
+/// The staging name is a fixed size on purpose. It shares the destination's
+/// 255-byte file-name limit, so embedding the destination name (as an earlier
+/// version did) made every product name within the staging overhead of that
+/// limit undeliverable with ENAMETOOLONG, identically on every retry. Every
+/// attempt still gets its own name: the unique suffix, not an embedded name,
+/// is what keeps two attempts (and two non-UTF-8 names) apart.
 fn copy_temp_for(dest: &Path) -> std::io::Result<PathBuf> {
-    let Some(name) = dest.file_name() else {
+    if dest.file_name().is_none() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("destination has no file name: {}", dest.display()),
         ));
-    };
+    }
     let mut tmp = OsString::from(".videofetch-");
-    tmp.push(name);
-    tmp.push(format!(".{}.tmp", staging_suffix()));
+    tmp.push(staging_suffix());
+    tmp.push(".tmp");
     Ok(dest.with_file_name(tmp))
 }
 
 /// Unique per attempt within and across processes: pid, nanoseconds and a
 /// per-process counter. Uniqueness is a correctness requirement, so creation
 /// still uses `create_new`; this suffix only keeps collisions (and retries)
-/// from happening at all.
-fn staging_suffix() -> String {
+/// from happening at all. Shared with the auth store's temp-and-rename write,
+/// whose sibling staging name must be just as unique.
+pub(crate) fn staging_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static ATTEMPT: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -293,9 +324,28 @@ fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(copy_err);
     }
-    if let Err(rename_err) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(rename_err);
+    #[cfg(test)]
+    publish_probe::before_publish(dest);
+    // Publish without replacing: the caller checked the destination, but a
+    // file that appeared since must not be overwritten. A hard link refuses
+    // an existing destination atomically; a rename replaces one. Filesystems
+    // without hard links keep the rename and with it that window.
+    match std::fs::hard_link(&tmp, dest) {
+        Ok(()) => {
+            // A leftover staging name costs disk, never delivery: the product
+            // is already published under its own name.
+            let _ = std::fs::remove_file(&tmp);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(destination_exists_error(dest));
+        }
+        Err(_) => {
+            if let Err(rename_err) = std::fs::rename(&tmp, dest) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(rename_err);
+            }
+        }
     }
     // Flush the published name before the source goes away: the caller
     // removes the work dir right after this returns, and a crash that loses
@@ -316,8 +366,9 @@ fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// so a crash in the window would leave neither the source nor the delivered
 /// name. Best effort: filesystems that cannot flush a directory reject it with
 /// ENOTSUP/EINVAL, and failing every delivery on such a mount would be worse
-/// than the durability the filesystem can offer.
-fn sync_parent_dir(path: &Path) {
+/// than the durability the filesystem can offer. Also used by the auth store,
+/// whose cookie file is published the same way.
+pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         match std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
@@ -344,18 +395,55 @@ fn sync_parent_dir(path: &Path) {
 /// pin the call itself: directory durability cannot be observed without a
 /// power loss.
 #[cfg(all(test, unix))]
-mod sync_probe {
+pub(crate) mod sync_probe {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     static SYNCED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-    pub(super) fn record(path: &Path) {
+    pub(crate) fn record(path: &Path) {
         SYNCED.lock().unwrap().push(path.to_path_buf());
     }
 
-    pub(super) fn synced(path: &Path) -> bool {
+    pub(crate) fn synced(path: &Path) -> bool {
         SYNCED.lock().unwrap().iter().any(|p| p == path)
+    }
+}
+
+/// Plants a destination file in the window between the exists check and the
+/// publish, the spot a racing writer occupies. Thread-local on purpose: unit
+/// tests run in parallel, and a global plant would corrupt unrelated
+/// deliveries on other threads.
+#[cfg(test)]
+mod publish_probe {
+    use std::cell::Cell;
+    use std::path::Path;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) struct PlantGuard;
+
+    impl Drop for PlantGuard {
+        fn drop(&mut self) {
+            ARMED.with(|armed| armed.set(false));
+        }
+    }
+
+    /// Plant `intruder` at the destination on the next publish of this thread.
+    pub(crate) fn plant_destination_on_publish() -> PlantGuard {
+        ARMED.with(|armed| armed.set(true));
+        PlantGuard
+    }
+
+    pub(crate) fn before_publish(dest: &Path) {
+        ARMED.with(|armed| {
+            if armed.get() {
+                armed.set(false);
+                let _ = std::fs::write(dest, b"intruder");
+            }
+        });
     }
 }
 
@@ -779,6 +867,38 @@ mod tests {
         assert_ne!(a, b, "two attempts must not share a staging file");
     }
 
+    /// The staging file sits beside the destination, so it shares the same
+    /// 255-byte file-name limit. Embedding the destination name in it pushed
+    /// every product name within the staging overhead of that limit over
+    /// ENAMETOOLONG, and each retry rebuilt the same over-long name.
+    #[test]
+    fn copy_temp_for_stays_within_the_file_name_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        // 254 bytes: the largest legal delivered name on the platforms the
+        // app ships to, and one a downloader can actually produce.
+        let dest = dir.path().join(format!("{}.mp4", "a".repeat(250)));
+        let tmp = copy_temp_for(&dest).unwrap();
+        let len = tmp.file_name().unwrap().as_encoded_bytes().len();
+        assert!(len <= 255, "staging name is {len} bytes");
+    }
+
+    /// End to end for the same limit: a near-limit destination name must
+    /// still deliver through the copy fallback, not only produce a short
+    /// staging name.
+    #[test]
+    fn copy_across_volumes_delivers_a_near_limit_destination_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("work-a.mp4");
+        fs::write(&src, b"video").unwrap();
+        let dest = dir
+            .path()
+            .join("save")
+            .join(format!("{}.mp4", "a".repeat(250)));
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        copy_across_volumes(&src, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"video");
+    }
+
     /// A staging file that belongs to someone else — a concurrent attempt in
     /// this or another process — must survive a delivery untouched: the
     /// attempt picks its own name instead of truncating the one it finds.
@@ -796,28 +916,28 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), b"video");
     }
 
-    /// A lossy conversion folds distinct non-UTF-8 destination names onto the
-    /// same staging name — the collision this staging scheme exists to avoid.
+    /// Two distinct non-UTF-8 destination names must never share a staging
+    /// name: a lossy or truncated derivation would fold them together, and
+    /// one delivery would then adopt or truncate the other's bytes.
     #[cfg(unix)]
     #[test]
-    fn copy_temp_for_preserves_a_non_utf8_destination_name() {
+    fn copy_temp_for_never_folds_distinct_destination_names() {
         use std::os::unix::ffi::OsStrExt;
         let dir = tempfile::tempdir().unwrap();
-        let raw = b"bad-\xff-name.mp4";
-        let dest = dir.path().join(std::ffi::OsStr::from_bytes(raw));
-        let tmp = copy_temp_for(&dest).unwrap();
-        let bytes = tmp.file_name().unwrap().as_bytes();
-        assert!(
-            bytes.windows(raw.len()).any(|w| w == raw),
-            "staging name must keep the destination's original bytes, got {:?}",
-            tmp.file_name()
-        );
+        let a = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"bad-\xff-name.mp4"));
+        let b = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"bad-\xfe-name.mp4"));
+        assert_ne!(copy_temp_for(&a).unwrap(), copy_temp_for(&b).unwrap());
     }
 
     /// Two deliveries that pass the destination-exists check together must
-    /// each publish their own complete copy; the destination ends as one
-    /// complete file, never a mixture or a truncated one, and no staging
-    /// files survive.
+    /// not clobber each other: publishing refuses an existing destination, so
+    /// exactly one attempt lands and the other reports the collision. The
+    /// destination ends as one complete file, never a mixture or a truncated
+    /// one, and no staging files survive.
     #[test]
     fn concurrent_deliveries_to_one_destination_leave_one_complete_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -842,8 +962,18 @@ mod tests {
         };
         let t1 = spawn(src_a, dest.clone());
         let t2 = spawn(src_b, dest.clone());
-        t1.join().unwrap().unwrap();
-        t2.join().unwrap().unwrap();
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert!(
+            matches!((&r1, &r2), (Ok(()), Err(_)) | (Err(_), Ok(()))),
+            "exactly one delivery must win: {r1:?} {r2:?}"
+        );
+        let lost = if r1.is_err() { r1 } else { r2 };
+        assert_eq!(
+            lost.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "the losing attempt must report the collision, not overwrite"
+        );
 
         let got = fs::read(&dest).unwrap();
         assert!(
@@ -856,6 +986,32 @@ mod tests {
             "staging files left behind: {:?}",
             staging_leftovers(dest.parent().unwrap())
         );
+    }
+
+    /// The exists check and the publish are two steps. A destination that
+    /// appears between them must be refused, not replaced: the pre-check
+    /// cannot see it, so the publish itself has to.
+    #[test]
+    fn relocate_file_refuses_a_destination_that_appears_before_publish() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        let _armed = publish_probe::plant_destination_on_publish();
+        let err = relocate_file(&src, &dest).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&dest).unwrap(), b"intruder");
+        assert!(src.exists(), "the source must survive a refused publish");
+    }
+
+    /// Same window on the copy fallback: its publish is the second place a
+    /// racing file can appear after the caller's check.
+    #[test]
+    fn copy_across_volumes_refuses_a_destination_that_appears_before_publish() {
+        let (_dir, src, dest) = cross_volume_fixture();
+        let _armed = publish_probe::plant_destination_on_publish();
+        let err = copy_across_volumes(&src, &dest).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&dest).unwrap(), b"intruder");
+        assert_eq!(fs::read(&src).unwrap(), b"video");
+        assert!(staging_leftovers(dest.parent().unwrap()).is_empty());
     }
 
     #[test]
