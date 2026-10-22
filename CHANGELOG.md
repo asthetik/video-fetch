@@ -31,7 +31,7 @@
 
 ### Changed
 
-- CI：移除五平台的 `integration`（e2e 回归）任务——单测矩阵、发布矩阵的 release profile 冒烟及其余检查不受影响；确定性回归套件保留为推送前本地门禁（见 README）。
+- CI：`integration`（e2e 回归）任务并入单测矩阵——不再五平台各自重复执行，改由 Linux 单元格串行运行 `--features test-utils` 的 regression 套件，并校验用例数量下限（防止目标因 required-features 缺失而静默跳过）；lint 任务补跑同 feature 的 clippy，回归套件与 `testing` 接口不再有无编译入口的盲区。本地推送前仍可按 README 跑一遍。
 
 ## [0.4.2] - 2026-10-14
 
