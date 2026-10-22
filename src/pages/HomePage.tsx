@@ -12,6 +12,7 @@ import {
   shouldDispatchComplete,
   type ResolveStatus,
 } from "../lib/resolveStatus";
+import { createListenerBag } from "../lib/listenerBag";
 import { DownloadQueue } from "../components/DownloadQueue";
 import { SpaceListView } from "../components/SpaceListView";
 import { UrlBar } from "../components/UrlBar";
@@ -151,7 +152,10 @@ export function HomePage({
   }, []);
 
   useEffect(() => {
-    const unlisteners: Array<() => void> = [];
+    // listen() resolves asynchronously. A late unlisten must be called, not
+    // stored: the cleanup below has already run by then, and a stored one
+    // would leave its global listener registered past this effect.
+    const listeners = createListenerBag();
 
     void listen<ResolveMetaEvent>("resolve://partial", (event) => {
       const { request_id, meta: partial } = event.payload;
@@ -161,7 +165,7 @@ export function HomePage({
       setMeta(partial);
       setResolveStatus((s) => reduceResolveStatus(s, { type: "partial" }));
       setLoading(false);
-    }).then((fn) => unlisteners.push(fn));
+    }).then(listeners.track);
 
     void listen<ResolveMetaEvent>("resolve://formats_progress", (event) => {
       const { request_id, meta: progress } = event.payload;
@@ -172,7 +176,7 @@ export function HomePage({
       setResolveStatus((s) =>
         reduceResolveStatus(s, { type: "formats_progress" }),
       );
-    }).then((fn) => unlisteners.push(fn));
+    }).then(listeners.track);
 
     void listen<ResolveMetaEvent>("resolve://complete", (event) => {
       const { request_id, meta: complete } = event.payload;
@@ -182,7 +186,7 @@ export function HomePage({
       setMeta(complete);
       setResolveStatus((s) => reduceResolveStatus(s, { type: "complete" }));
       setLoading(false);
-    }).then((fn) => unlisteners.push(fn));
+    }).then(listeners.track);
 
     void listen<ResolveFormatsFailedEvent>("resolve://formats_failed", (event) => {
       const { request_id, error: message } = event.payload;
@@ -193,7 +197,7 @@ export function HomePage({
         reduceResolveStatus(s, { type: "formats_failed", message }),
       );
       setLoading(false);
-    }).then((fn) => unlisteners.push(fn));
+    }).then(listeners.track);
 
     void listen<AuthStatusType>("auth://status", (event) => {
       const next = event.payload;
@@ -209,12 +213,10 @@ export function HomePage({
         // Prefer new-scope cache; do not clear card while loading.
         void handleResolve(urlRef.current.trim(), false, false);
       }
-    }).then((fn) => unlisteners.push(fn));
+    }).then(listeners.track);
 
     return () => {
-      for (const fn of unlisteners) {
-        fn();
-      }
+      listeners.dispose();
     };
   }, [handleResolve]);
 
