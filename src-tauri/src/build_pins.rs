@@ -5,8 +5,10 @@
 //! executing the build script.
 
 /// ffmpeg pin: find the `FFMPEG_VERSION` assignment in
-/// scripts/fetch_sidecars.py and take the first quoted value on that line;
-/// trailing content (e.g. a comment) is tolerated. Mentions without a quoted
+/// scripts/fetch_sidecars.py and take its quoted value; trailing content
+/// (e.g. a comment) is tolerated. The value must open with the quote — a
+/// computed right-hand side is rejected rather than allowing a version-shaped
+/// string in its trailing comment to be injected. Mentions without a quoted
 /// value (e.g. the module docstring) are skipped.
 pub(crate) fn extract_ffmpeg_version(source: &str) -> String {
     for line in source.lines() {
@@ -40,9 +42,11 @@ pub(crate) fn extract_ffmpeg_version(source: &str) -> String {
 }
 
 fn quoted_value(s: &str) -> Option<String> {
-    let start = s.find('"')? + 1;
-    let end = s[start..].find('"')? + start;
-    Some(s[start..end].to_string())
+    // The literal must open the value: taking the first quote anywhere on the
+    // line would read a version out of a comment attached to a computed RHS.
+    let rest = s.trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 fn is_x_y_z(value: &str) -> bool {
@@ -81,5 +85,34 @@ mod tests {
     fn plain_assignment_and_comment_handling_are_unchanged() {
         let source = "# see FFMPEG_VERSION = \"0.0.0\"\nFFMPEG_VERSION = \"9.0.2\"  # pin\n";
         assert_eq!(extract_ffmpeg_version(source), "9.0.2");
+    }
+
+    /// A computed right-hand side must not borrow a version-looking string
+    /// from its trailing comment: only the quoted literal that opens the
+    /// assignment is the value. Unreachable while the pin stays a literal —
+    /// this pins the parser's shape against the next edit, not today's file.
+    ///
+    /// Value: protects=the quote anchored at the start of the value;
+    /// fails_when=the first quote anywhere on the line is taken (a comment
+    /// like `# falls back to "9.0.1"` becomes the injected version);
+    /// why_new=the post-0.4.2 review flagged the unanchored quote scan;
+    /// seam=none
+    #[test]
+    fn a_computed_rhs_cannot_borrow_a_version_from_its_comment() {
+        let source = concat!(
+            "FFMPEG_VERSION = compute_version()  # falls back to \"9.0.1\"\n",
+            "FFMPEG_VERSION = \"9.0.2\"\n",
+        );
+        assert_eq!(
+            extract_ffmpeg_version(source),
+            "9.0.2",
+            "the comment's quote pair must not be read as the version"
+        );
+
+        let computed_only = "FFMPEG_VERSION = compute_version()  # see \"9.0.1\"\n";
+        assert!(
+            std::panic::catch_unwind(|| extract_ffmpeg_version(computed_only)).is_err(),
+            "a computed RHS must fail the build instead of injecting a comment's version"
+        );
     }
 }
