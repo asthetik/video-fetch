@@ -2054,14 +2054,15 @@ mod tests {
         wait_for_status(&manager, &job.id, JobStatus::Done).await;
 
         let raw_name = b"bad-\xff-name.mp4";
+        let expected = dir.path().join(std::ffi::OsStr::from_bytes(raw_name));
         let listed = manager.list().unwrap();
         let done = listed.iter().find(|j| j.id == job.id).unwrap();
         let display = done.output_path.as_deref().unwrap();
-        assert_eq!(display, String::from_utf8_lossy(raw_name));
+        let expected_display = expected.to_string_lossy().into_owned();
+        assert_eq!(display, expected_display.as_str());
 
         let db = Db::open(&dir.path().join("jobs.db")).unwrap();
         let exact = db.exact_output_path_for(display).unwrap();
-        let expected = dir.path().join(std::ffi::OsStr::from_bytes(raw_name));
         assert_eq!(
             exact.map(|bytes| fsutil::path_from_record_bytes(&bytes)),
             Some(expected.clone())
