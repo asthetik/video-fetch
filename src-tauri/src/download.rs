@@ -22,7 +22,8 @@ use crate::models::{
 };
 use crate::naming;
 use crate::ytdlp::{
-    self, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download, kill_download_blocking,
+    self, ChildRegistry, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download,
+    kill_download_blocking,
 };
 
 /// Type-erased per-job bulk-op future: `run_bulk` awaits each op in turn
@@ -463,7 +464,7 @@ impl DownloadManager {
         progress: Arc<dyn ProgressEmitter>,
         work_root: PathBuf,
     ) -> AppResult<Self> {
-        let children = Arc::new(Mutex::new(HashMap::new()));
+        let children = Arc::new(ChildRegistry::new());
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
         let downloader = Arc::new(YtDlpDownloader::new(
             cfg,
@@ -906,6 +907,10 @@ impl DownloadManager {
     /// same reason `abort_runners` is: either half on its own is a teardown
     /// that leaves the hazard the other half closes.
     fn kill_all_children(&self) {
+        // Seal before the snapshot: a runner between spawn and register is
+        // outside every snapshot taken below, so a registration that lands
+        // afterwards must kill its own child.
+        self.children.seal_for_exit();
         let ids: Vec<String> = match self.children.lock() {
             Ok(guard) => guard.keys().cloned().collect(),
             Err(_) => return,
@@ -2024,11 +2029,36 @@ mod tests {
             test_settings(save_dir),
             downloader,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.to_path_buf(),
         )
         .unwrap();
         (manager, rx)
+    }
+
+    /// The exit teardown must seal the registry before sweeping it: a runner
+    /// that spawns and registers in the window between the sweep's snapshot
+    /// and process end would leave a live yt-dlp behind.
+    ///
+    /// Value: protects=kill_all_children's seal call; fails_when=the registry
+    /// is not sealed first, so a registration landing after the snapshot stays
+    /// in the map and survives the exit; why_new=the post-0.4.2 review found
+    /// the spawn→register window; seam=none
+    #[tokio::test]
+    async fn shutdown_seals_the_child_registry_before_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work,
+            Arc::new(MockDownloader::failure()) as Arc<dyn Downloader>,
+        );
+        manager.shutdown_for_exit();
+        assert!(
+            manager.children.is_sealed(),
+            "the registry must be sealed before the sweep takes its snapshot"
+        );
     }
 
     async fn wait_for_status(manager: &DownloadManager, id: &str, status: JobStatus) {
@@ -2530,7 +2560,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let pid = Arc::new(Mutex::new(None));
         let downloader = Arc::new(OrphanPanicDownloader {
             children: Arc::clone(&children),
@@ -2617,7 +2647,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let pid = Arc::new(Mutex::new(None));
         let downloader = Arc::new(SuccessorRegPanicDownloader {
             children: Arc::clone(&children),
@@ -2710,7 +2740,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
         let pid = Arc::new(Mutex::new(None));
         let downloader = Arc::new(StopMarkedPanicDownloader {
@@ -3551,7 +3581,7 @@ mod tests {
                 called: Arc::clone(&called),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -3614,7 +3644,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -4326,7 +4356,7 @@ mod tests {
             test_settings(&save_dir),
             Arc::new(NeverDownloader) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             dir.path().join("work"),
         )
         .unwrap();
@@ -4436,7 +4466,7 @@ mod tests {
             test_settings(dir),
             downloader,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             dir.join("work"),
             stop_flags,
         )
@@ -5138,7 +5168,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -5222,7 +5252,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -5943,7 +5973,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
             Arc::new(Mutex::new(HashMap::new())),
         )
