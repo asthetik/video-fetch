@@ -139,11 +139,13 @@ jobs:
         shell: bash
         run: |
           # Floor against a silent zero after a rename; platform-gated tests
-          # make the per-OS count differ (measured 2026-10-16: 324 on macOS;
-          # Linux and Windows trail it slightly via their cfg gating).
+          # make the per-OS count differ (measured 2026-10-22: 354 on macOS;
+          # Linux and Windows trail it slightly via their cfg gating). 320 is
+          # still a module-sized drop from the real count — the old 150 would
+          # have waved an entire test module disappearing through.
           n=$(cargo test --manifest-path src-tauri/Cargo.toml -- --list | grep -c ': test$')
           echo "unit tests listed: $n"
-          [ "$n" -ge 150 ]
+          [ "$n" -ge 320 ]
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Regression e2e (Linux)
         # One cell, serial: the real-binary suite owns the sidecars and the
