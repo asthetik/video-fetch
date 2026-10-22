@@ -18,7 +18,7 @@ jobs:
     # Full release builds with bundling; generous against the cold-cache
     # case, but finite: a hung step must not sit on the runner for the
     # platform default of 360 minutes. Cells without a build_timeout of
-    # their own get 60; the two ARM cells override it because a cold-cache
+    # their own get 60; the ARM cells override it because a cold-cache
     # release build plus bundling there routinely outgrows 60 (ci.yml
     # budgets the same targets at 40 on a warm cache).
     timeout-minutes: ${{ matrix.build_timeout || 60 }}
@@ -33,6 +33,10 @@ jobs:
           - platform: macos-latest
             release_os: macOS
             release_arch: arm64
+            # macos-latest is arm64 too, and cold-cache macOS packaging is the
+            # slowest cell; the 60-minute default timed out and dropped the
+            # platform from the draft release.
+            build_timeout: 90
           - platform: windows-latest
             release_os: Windows
             release_arch: x64

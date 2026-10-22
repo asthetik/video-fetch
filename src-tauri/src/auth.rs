@@ -163,13 +163,10 @@ impl<S: AuthStore> AuthManager<S> {
 
     pub fn clear_auth(&self) -> AppResult<()> {
         self.store.delete()?;
-        let path = self.cookies_file_path();
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
         // A kill between staging and rename can strand a staging sibling
-        // with SESSDATA inside; logout must not leave it behind.
-        cookies::remove_stranded_staging_files(&path);
+        // with SESSDATA inside; logout must not leave it behind. Serialized
+        // with the writers so a concurrent materialize is not half deleted.
+        cookies::remove_jar_and_stranded(&self.cookies_file_path())?;
         Ok(())
     }
 
@@ -201,12 +198,9 @@ impl<S: AuthStore> AuthManager<S> {
             _ => {
                 // Keep resolve/download cookie usage aligned: non-LoggedIn must not
                 // leave a stale Netscape file for yt-dlp to pick up — nor a
-                // stranded staging sibling holding SESSDATA.
-                let path = self.cookies_file_path();
-                if path.exists() {
-                    fs::remove_file(&path)?;
-                }
-                cookies::remove_stranded_staging_files(&path);
+                // stranded staging sibling holding SESSDATA. Serialized with
+                // the writers, same as logout.
+                cookies::remove_jar_and_stranded(&self.cookies_file_path())?;
                 Ok(None)
             }
         }

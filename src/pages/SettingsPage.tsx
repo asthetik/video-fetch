@@ -99,8 +99,10 @@ export function SettingsPage() {
       const pending = pendingSettingsRef.current;
       if (pending) {
         pendingSettingsRef.current = null;
-        void api.saveSettings(pending).catch(() => {
-          // Unmount: best-effort flush; cannot setState.
+        void api.saveSettings(pending).catch((err) => {
+          // Unmount: cannot setState, but the toast is app-global and the
+          // user must know the last change did not persist.
+          toast.error(`无法保存设置：${toErrorMessage(err)}`);
         });
       }
     };

@@ -1,6 +1,7 @@
 import { Download as DownloadIcon, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { logUi } from "../lib/activityLog";
+import { videoFormatsHint } from "../lib/videoFormatsHint";
 import { api } from "../lib/tauri";
 import type { FormatOption, VideoMeta } from "../types";
 import { IconButton } from "./IconButton";
@@ -23,7 +24,6 @@ function pickDefaultFormat(formats: FormatOption[]): FormatOption | null {
 
 interface VideoCardProps {
   meta: VideoMeta;
-  url: string;
   onEnqueued: (count: number) => void;
   onRefresh: () => void;
   active?: boolean;
@@ -34,7 +34,6 @@ interface VideoCardProps {
 
 export function VideoCard({
   meta,
-  url,
   onEnqueued,
   onRefresh,
   active = true,
@@ -54,6 +53,10 @@ export function VideoCard({
   const prevActiveRef = useRef(true);
 
   const sortedFormats = useMemo(() => sortFormats(meta.formats), [meta.formats]);
+  const formatsHint = videoFormatsHint(
+    meta.formats.length,
+    meta.audio_formats.length,
+  );
   const sortedAudioFormats = useMemo(
     () => sortFormats(meta.audio_formats),
     [meta.audio_formats],
@@ -192,7 +195,10 @@ export function VideoCard({
       }
 
       await api.enqueue({
-        url,
+        // The card is the meta's; the URL bar may already hold something else.
+        // Downloading through the live input would pair that URL with this
+        // meta's video id and title.
+        url: meta.webpage_url,
         video_id: meta.id,
         title: meta.title,
         page_indexes: pageIndexes,
@@ -271,6 +277,9 @@ export function VideoCard({
                 </option>
               ))}
             </select>
+          )}
+          {!formatsLoading && !formatsError && formatsHint && (
+            <p className="url-hint">{formatsHint}</p>
           )}
           {formatsError && (
             <p className="url-hint error">
