@@ -5,6 +5,7 @@ import {
   EMPTY_RESOLVE_GATE,
   gateInputChange,
   gateResolveOutcome,
+  gateSkipAction,
 } from "./resolveGate.ts";
 
 const URL_A = "https://www.bilibili.com/video/BV1xx411c7mD";
@@ -73,4 +74,38 @@ test("pre-fix schedule-time marking drops a re-paste after failure", () => {
     false,
     "schedule-time marking is the root cause of the dead-end input",
   );
+});
+
+// What a skipped schedule must do about whatever is on screen. The gate skips
+// only when the input returned to the last successful URL or was cleared; a
+// resolve for another URL may still be in flight (its result must not land on
+// the card), and a failed attempt may have cleared that URL's card (the skip
+// would otherwise leave the input with nothing displayed).
+
+test("a skipped re-paste of the displayed result does nothing", () => {
+  // Focus churn: the card still shows URL_A and nothing is in flight.
+  assert.equal(gateSkipAction(URL_A, null, true), "none");
+});
+
+test("returning to the remembered URL while another resolve is in flight reruns it", () => {
+  // A resolved -> B resolving (card cleared) -> paste A back. Re-resolving A
+  // also bumps the parent request id, discarding B's late result.
+  assert.equal(gateSkipAction(URL_A, URL_B, false), "rerun");
+});
+
+test("returning to the remembered URL after another attempt cleared the card reruns it", () => {
+  // The failed attempt left nothing on screen; the gate still remembers A.
+  assert.equal(gateSkipAction(URL_A, null, false), "rerun");
+});
+
+test("the URL already resolving is not resolved twice", () => {
+  assert.equal(gateSkipAction(URL_A, URL_A, false), "none");
+});
+
+test("clearing the input while a resolve is in flight discards it", () => {
+  assert.equal(gateSkipAction("", URL_B, false), "discard");
+});
+
+test("clearing the input with nothing in flight does nothing", () => {
+  assert.equal(gateSkipAction("   ", null, false), "none");
 });
