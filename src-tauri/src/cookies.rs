@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +143,19 @@ fn create_private_jar(path: &Path) -> std::io::Result<fs::File> {
 /// create.
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Serializes jar writes against the cleanup that removes stranded staging
+/// siblings. Writers are concurrent (async commands, login persistence); an
+/// unlocked cleanup scan could delete another writer's staging file mid-write,
+/// failing its rename with ENOENT, and could race it into republishing a jar
+/// the cleanup just removed. The lock guards no data, so poison is ignored.
+static JAR_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_jar() -> MutexGuard<'static, ()> {
+    JAR_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Prefix of this jar's staging names. `.videofetch-` is the same hidden,
 /// app-owned prefix `fsutil::copy_temp_for` uses, so a leftover staging file
 /// never reads as the product to a prefix scan — and a scan BY this prefix is
@@ -208,7 +222,20 @@ pub(crate) fn remove_stranded_staging_files(path: &Path) {
     }
 }
 
+/// Remove the published jar and every staged sibling, serialized with the
+/// writers: logout and the logged-out materialize path must not delete a
+/// staging file a concurrent write is about to publish.
+pub(crate) fn remove_jar_and_stranded(path: &Path) -> AppResult<()> {
+    let _jar = lock_jar();
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    remove_stranded_staging_files(path);
+    Ok(())
+}
+
 pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
+    let _jar = lock_jar();
     // Staged beside the jar and renamed into place: truncate-then-write opened
     // the jar first, so a death mid-write left a half cookies.txt where the
     // whole one belongs — and yt-dlp reads whatever is there. The rename
@@ -217,6 +244,8 @@ pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
     let write = (|| -> AppResult<()> {
         let (staging, mut file) = open_staging(path)?;
         tmp = Some(staging);
+        #[cfg(test)]
+        staging_hook::fire(path);
         writeln!(file, "# Netscape HTTP Cookie File")?;
         writeln!(file, "# https://curl.haxx.se/docs/http-cookies.html")?;
         writeln!(
@@ -304,6 +333,39 @@ mod sync_probe {
 
     pub(super) fn synced(path: &Path) -> bool {
         SYNCED.lock().unwrap().iter().any(|p| p == path)
+    }
+}
+
+#[cfg(test)]
+mod staging_hook {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    type Hook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+    static HOOK: Mutex<Option<(PathBuf, Hook)>> = Mutex::new(None);
+
+    /// Watch one jar path: other tests write their own jars in parallel and
+    /// must not consume this hook.
+    pub(super) fn set(path: &Path, hook: impl Fn(&Path) + Send + Sync + 'static) {
+        *HOOK.lock().unwrap() = Some((path.to_path_buf(), Arc::new(hook)));
+    }
+
+    pub(super) fn clear() {
+        *HOOK.lock().unwrap() = None;
+    }
+
+    pub(super) fn fire(path: &Path) {
+        let hook = {
+            let guard = HOOK.lock().unwrap();
+            match guard.as_ref() {
+                Some((watched, hook)) if watched == path => Some(Arc::clone(hook)),
+                _ => None,
+            }
+        };
+        if let Some(hook) = hook {
+            hook(path);
+        }
     }
 }
 
@@ -666,5 +728,64 @@ mod tests {
             sync_probe::synced(path.parent().unwrap()),
             "the jar's parent must be flushed after the publishing rename"
         );
+    }
+
+    /// The logout/logged-out cleanup removes staged-but-unpublished jars; a
+    /// concurrent writer's staging must be invisible to it, or the writer's
+    /// rename fails ENOENT and cookie materialization reports a false error.
+    ///
+    /// Value: protects=the jar lock shared by `write_netscape_file` and the
+    /// cleanup; fails_when=either side runs unlocked (the cleanup deletes the
+    /// in-flight staging, or does not wait for it); why_new=the post-0.4.2
+    /// review found the unlocked cleanup scan; seam=the after-staging hook.
+    #[test]
+    fn cleanup_waits_for_an_in_flight_write_instead_of_deleting_its_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.txt");
+
+        let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let staged_tx = std::sync::Mutex::new(staged_tx);
+        let go_rx = std::sync::Mutex::new(go_rx);
+        staging_hook::set(&path, move |_| {
+            let _ = staged_tx.lock().unwrap().send(());
+            let _ = go_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(2));
+        });
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            write_netscape_file(&writer_path, &[cookie(".bilibili.com", "SESSDATA", "abc")])
+        });
+        staged_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the writer never staged its jar");
+
+        let cleanup_path = path.clone();
+        let cleanup = std::thread::spawn(move || remove_jar_and_stranded(&cleanup_path));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !cleanup.is_finished(),
+            "cleanup must wait for the in-flight write instead of deleting its staging"
+        );
+
+        go_tx.send(()).unwrap();
+        writer
+            .join()
+            .unwrap()
+            .expect("the write must keep its staging file");
+        cleanup.join().unwrap().expect("cleanup");
+        staging_hook::clear();
+
+        let prefix = staging_prefix(&path);
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .filter(|n| n.as_encoded_bytes().starts_with(prefix.as_encoded_bytes()))
+            .collect();
+        assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
     }
 }
