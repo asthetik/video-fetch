@@ -4,6 +4,7 @@ import {
   EMPTY_RESOLVE_GATE,
   gateInputChange,
   gateResolveOutcome,
+  gateSkipAction,
   type ResolveGate,
 } from "../lib/resolveGate";
 import { isRetryVisible } from "../lib/retryButton";
@@ -15,17 +16,42 @@ interface UrlBarProps {
   onUrlChange: (url: string) => void;
   /** Resolves the URL; resolves to whether the resolve succeeded. */
   onResolve: (url: string) => Promise<boolean> | boolean;
+  /** Drops any in-flight resolve without starting a new one. */
+  onDiscard: () => void;
 }
 
-export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarProps) {
+export function UrlBar({ url, loading, error, onUrlChange, onResolve, onDiscard }: UrlBarProps) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Dedup gate: remembers only URLs whose resolve succeeded, so re-pasting a
   // link after a failure schedules a fresh attempt instead of dead-ending.
   const gateRef = useRef<ResolveGate>(EMPTY_RESOLVE_GATE);
+  // URL of the resolve currently in flight, and an attempt counter that makes
+  // a superseded outcome inert (it must not rewrite the gate).
+  const pendingRef = useRef<string | null>(null);
+  const attemptRef = useRef(0);
+  // Whether the screen currently shows the remembered URL's result. Starting
+  // a resolve clears the card (HomePage clears it), and only a successful
+  // outcome puts one back.
+  const resultShownRef = useRef(false);
+  const urlRef = useRef(url);
+  urlRef.current = url;
 
   const runResolve = useCallback(
     (trimmed: string) => {
+      const attempt = ++attemptRef.current;
+      pendingRef.current = trimmed;
+      resultShownRef.current = false;
       void Promise.resolve(onResolve(trimmed)).then((succeeded) => {
+        if (attempt !== attemptRef.current) {
+          return;
+        }
+        pendingRef.current = null;
+        resultShownRef.current = succeeded;
+        // A late outcome for a URL the input moved away from must not rewrite
+        // the gate: the screen no longer shows what this attempt produced.
+        if (urlRef.current.trim() !== trimmed) {
+          return;
+        }
         gateRef.current = gateResolveOutcome(gateRef.current, trimmed, succeeded);
       });
     },
@@ -39,14 +65,32 @@ export function UrlBar({ url, loading, error, onUrlChange, onResolve }: UrlBarPr
       }
       const { schedule, gate } = gateInputChange(gateRef.current, nextUrl);
       gateRef.current = gate;
-      if (!schedule) {
+      if (schedule) {
+        debounceRef.current = setTimeout(() => {
+          runResolve(nextUrl.trim());
+        }, 300);
         return;
       }
-      debounceRef.current = setTimeout(() => {
-        runResolve(nextUrl.trim());
-      }, 300);
+      switch (gateSkipAction(nextUrl, pendingRef.current, resultShownRef.current)) {
+        case "rerun":
+          // The display moved away from the remembered URL (an in-flight or
+          // failed attempt cleared it). Resolving it again also bumps the
+          // parent's request id, discarding the other attempt's late result.
+          runResolve(nextUrl.trim());
+          break;
+        case "discard":
+          // The input cleared while another resolve is in flight. Make its
+          // outcome inert and let the parent retire the spinner.
+          attemptRef.current += 1;
+          pendingRef.current = null;
+          resultShownRef.current = false;
+          onDiscard();
+          break;
+        case "none":
+          break;
+      }
     },
-    [runResolve],
+    [onDiscard, runResolve],
   );
 
   useEffect(() => {
