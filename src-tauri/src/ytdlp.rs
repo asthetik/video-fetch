@@ -1389,8 +1389,11 @@ pub async fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
 /// process tree behind.
 pub fn kill_download_blocking(children: &DownloadChildren, job_id: &str) -> bool {
     let entry = {
-        let Ok(mut guard) = children.lock() else {
-            return false;
+        // Same recovery as the exit sweep's snapshot: a poisoned lock must
+        // not leave a live child registered and unreaped.
+        let mut guard = match children.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
         guard.remove(job_id)
     };
