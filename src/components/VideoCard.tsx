@@ -1,6 +1,7 @@
 import { Download as DownloadIcon, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { logUi } from "../lib/activityLog";
+import { videoFormatsHint } from "../lib/videoFormatsHint";
 import { api } from "../lib/tauri";
 import type { FormatOption, VideoMeta } from "../types";
 import { IconButton } from "./IconButton";
@@ -52,6 +53,10 @@ export function VideoCard({
   const prevActiveRef = useRef(true);
 
   const sortedFormats = useMemo(() => sortFormats(meta.formats), [meta.formats]);
+  const formatsHint = videoFormatsHint(
+    meta.formats.length,
+    meta.audio_formats.length,
+  );
   const sortedAudioFormats = useMemo(
     () => sortFormats(meta.audio_formats),
     [meta.audio_formats],
@@ -272,6 +277,9 @@ export function VideoCard({
                 </option>
               ))}
             </select>
+          )}
+          {!formatsLoading && !formatsError && formatsHint && (
+            <p className="url-hint">{formatsHint}</p>
           )}
           {formatsError && (
             <p className="url-hint error">
