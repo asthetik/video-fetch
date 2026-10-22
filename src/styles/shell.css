@@ -147,12 +147,15 @@
   background: var(--warn);
 }
 
+/* The login-status chip is a button, and DESIGN.md's 2026-09-20 rule keeps
+   button colours on the base semantic tones (the ink scale is for status and
+   hint text, not buttons; the top-bar login status button is named there). */
 .auth-chip.error {
-  color: var(--danger-ink);
+  color: var(--danger);
 }
 
 .auth-chip.error .auth-chip-dot {
-  background: var(--danger-ink);
+  background: var(--danger);
 }
 
 /* Loading is its own chip state, not a muted "logged out" look: a dashed
