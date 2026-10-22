@@ -1261,22 +1261,63 @@ pub struct RegisteredChild {
     pub(crate) child: tokio::process::Child,
 }
 
-pub type DownloadChildren = Arc<Mutex<HashMap<String, RegisteredChild>>>;
+pub struct ChildRegistry {
+    map: Mutex<HashMap<String, RegisteredChild>>,
+    sealed: std::sync::atomic::AtomicBool,
+}
+
+impl ChildRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+            sealed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Same shape as `Mutex::lock`, so every call site reads unchanged.
+    pub(crate) fn lock(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, HashMap<String, RegisteredChild>>> {
+        self.map.lock()
+    }
+
+    /// Sealed by the exit teardown before it sweeps. A child registered in
+    /// the window between the sweep's snapshot and process end is invisible
+    /// to the sweep, so registration itself has to kill it.
+    pub(crate) fn seal_for_exit(&self) {
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.sealed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+pub type DownloadChildren = Arc<ChildRegistry>;
 
 /// Register the child this run just spawned under the run's own token. The
 /// caller supplies the token (its runner token) so a cleanup that runs where
 /// this future cannot — the manager's panic path — can kill exactly this
 /// registration and nothing a successor registered under the same job id.
+///
+/// A sealed registry refuses the registration and kills the child on the
+/// spot: the exit sweep's snapshot cannot see a child spawned after it was
+/// taken, and nothing else would ever reap it.
 pub(crate) fn register_child(
     children: &DownloadChildren,
     job_id: &str,
     token: u64,
-    child: tokio::process::Child,
+    mut child: tokio::process::Child,
 ) -> AppResult<()> {
-    children
+    let mut guard = children
         .lock()
-        .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?
-        .insert(job_id.to_string(), RegisteredChild { token, child });
+        .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?;
+    if children.is_sealed() {
+        drop(guard);
+        kill_child_process_tree(&mut child);
+        return Err(AppError::Message("应用正在退出，下载已停止".into()));
+    }
+    guard.insert(job_id.to_string(), RegisteredChild { token, child });
     Ok(())
 }
 
@@ -2049,7 +2090,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let work_root = dir.path().join("work");
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
 
         const JOB_ID: &str = "job-tree-kill";
@@ -2153,7 +2194,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     #[cfg(unix)]
     #[tokio::test]
     async fn a_run_only_touches_the_child_it_registered() {
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         const JOB_ID: &str = "job-registry";
         // Two run tokens, one identity per run — the shape `mint_runner_token`
         // produces for real runners (a process-wide sequence, never reused).
@@ -2188,6 +2229,63 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(children.lock().unwrap().is_empty());
     }
 
+    /// A child spawned just as the exit teardown sweeps the registry must not
+    /// outlive it: the sweep's snapshot can miss a registration that lands
+    /// afterwards, so the registry is sealed first and a late registration
+    /// kills its own child.
+    ///
+    /// Value: protects=the sealed check in register_child; fails_when=a late
+    /// registration is inserted after the sweep (the child survives the exit,
+    /// or the map keeps an entry nothing will reap); why_new=the post-0.4.2
+    /// review found the spawn→register window; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_registered_during_exit_is_killed_and_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let survived = dir.path().join("survived");
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
+        children.seal_for_exit();
+
+        // The markers are written by a grandchild: killing only the direct
+        // child (kill_on_drop) leaves it alive, so this pins the group kill.
+        // Wait until the grandchild has started, or the direct-child kill can
+        // win the race against the shell even spawning it.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!(
+                "(: > {}; sleep 1; : > {}) & wait",
+                started.display(),
+                survived.display()
+            ))
+            .process_group(0)
+            .kill_on_drop(true);
+        let child = cmd.spawn().unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !started.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the test grandchild never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let err = register_child(&children, "job-exit", 7, child)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("应用正在退出"), "unexpected: {err}");
+        assert!(
+            children.lock().unwrap().is_empty(),
+            "a late registration must not enter the registry"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(
+            !survived.exists(),
+            "the child that registered during exit must be killed"
+        );
+    }
+
     /// Shared body of the huge-multibyte-stderr tail regression. `dir` holds
     /// the payload file `stderr.txt`; `script` is the platform fake yt-dlp,
     /// which must stream that file to stderr and exit 1. The payload and the
@@ -2208,7 +2306,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         std::fs::write(&payload_path, &payload).unwrap();
 
         let work_root = dir.join("work");
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
 
         const JOB_ID: &str = "job-stderr-tail";
@@ -2326,7 +2424,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     /// helpers revert to blocking `fn`s.
     #[tokio::test]
     async fn kill_helpers_are_async() {
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         assert!(!kill_download(&children, "ghost").await);
         assert!(!kill_registered_child(&children, "ghost", 1).await);
     }

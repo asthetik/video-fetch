@@ -81,6 +81,12 @@ jobs:
         run: python scripts/fetch_sidecars.py
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy with the integration test surface
+        # regression/soak and the `testing` module exist only under this
+        # feature (Cargo.toml required-features). Without this step a break in
+        # them compiles nowhere: the plain clippy pass skips the targets and
+        # the unit suite skips the tests without saying so.
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features test-utils -- -D warnings
       - name: Clippy in the release profile
         # A dev-profile compile cannot see `#[cfg(not(debug_assertions))]` code
         # at all, so nothing has ever linted it. The smoke job compiles those
@@ -133,12 +139,26 @@ jobs:
         shell: bash
         run: |
           # Floor against a silent zero after a rename; platform-gated tests
-          # make the per-OS count differ (measured 2026-10-16: 324 on macOS;
-          # Linux and Windows trail it slightly via their cfg gating).
+          # make the per-OS count differ (measured 2026-10-22: 354 on macOS;
+          # Linux and Windows trail it slightly via their cfg gating). 320 is
+          # still a module-sized drop from the real count — the old 150 would
+          # have waved an entire test module disappearing through.
           n=$(cargo test --manifest-path src-tauri/Cargo.toml -- --list | grep -c ': test$')
           echo "unit tests listed: $n"
-          [ "$n" -ge 150 ]
+          [ "$n" -ge 320 ]
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Regression e2e (Linux)
+        # One cell, serial: the real-binary suite owns the sidecars and the
+        # process table, so the five-platform matrix would only re-run the
+        # same thing. The count guard catches the other silent failure — the
+        # target skipping itself through an unmet required-features.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          n=$(cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --list | grep -c ': test$')
+          echo "regression tests listed: $n"
+          [ "$n" -ge 12 ]
+          cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
 
   release-smoke:
     # The release profile is read by `npx tauri build` and by nothing else, and
