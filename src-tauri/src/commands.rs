@@ -2456,7 +2456,7 @@ mod openable_roots_delete_tests {
     use super::*;
     use crate::db::Db;
     use crate::download::{ChannelProgressEmitter, Downloader};
-    use crate::ytdlp::ProgressUpdate;
+    use crate::ytdlp::{ChildRegistry, ProgressUpdate};
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -2520,7 +2520,7 @@ mod openable_roots_delete_tests {
             settings.clone(),
             Arc::new(UnusedDownloader),
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             root.path().join("work"),
         )
         .unwrap();
@@ -2947,7 +2947,7 @@ mod save_dir_tests {
 mod restart_cookie_tests {
     use super::*;
     use crate::download::{ChannelProgressEmitter, Downloader};
-    use crate::ytdlp::ProgressUpdate;
+    use crate::ytdlp::{ChildRegistry, ProgressUpdate};
     use async_trait::async_trait;
     use std::sync::Mutex;
     use tokio::time::sleep;
@@ -3028,7 +3028,7 @@ mod restart_cookie_tests {
             settings.clone(),
             downloader,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             root.path().join("work"),
         )
         .unwrap();
