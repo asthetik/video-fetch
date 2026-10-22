@@ -236,8 +236,9 @@ fn copy_temp_for(dest: &Path) -> std::io::Result<PathBuf> {
 /// Unique per attempt within and across processes: pid, nanoseconds and a
 /// per-process counter. Uniqueness is a correctness requirement, so creation
 /// still uses `create_new`; this suffix only keeps collisions (and retries)
-/// from happening at all.
-fn staging_suffix() -> String {
+/// from happening at all. Shared with the auth store's temp-and-rename write,
+/// whose sibling staging name must be just as unique.
+pub(crate) fn staging_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static ATTEMPT: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -316,8 +317,9 @@ fn copy_across_volumes(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// so a crash in the window would leave neither the source nor the delivered
 /// name. Best effort: filesystems that cannot flush a directory reject it with
 /// ENOTSUP/EINVAL, and failing every delivery on such a mount would be worse
-/// than the durability the filesystem can offer.
-fn sync_parent_dir(path: &Path) {
+/// than the durability the filesystem can offer. Also used by the auth store,
+/// whose cookie file is published the same way.
+pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         match std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
@@ -344,17 +346,17 @@ fn sync_parent_dir(path: &Path) {
 /// pin the call itself: directory durability cannot be observed without a
 /// power loss.
 #[cfg(all(test, unix))]
-mod sync_probe {
+pub(crate) mod sync_probe {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     static SYNCED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-    pub(super) fn record(path: &Path) {
+    pub(crate) fn record(path: &Path) {
         SYNCED.lock().unwrap().push(path.to_path_buf());
     }
 
-    pub(super) fn synced(path: &Path) -> bool {
+    pub(crate) fn synced(path: &Path) -> bool {
         SYNCED.lock().unwrap().iter().any(|p| p == path)
     }
 }

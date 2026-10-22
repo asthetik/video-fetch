@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cookies::{self, Cookie};
 use crate::error::{AppError, AppResult};
-use crate::fsutil::{restrict_private_file_perms, warn_unrestricted};
+use crate::fsutil::{
+    restrict_private_file_perms, staging_suffix, sync_parent_dir, warn_unrestricted,
+};
 use crate::models::AuthStatus;
 
 const COOKIES_FILENAME: &str = "cookies.txt";
@@ -37,6 +39,18 @@ impl FileStore {
             write_lock: Mutex::new(()),
         }
     }
+
+    /// A fresh sibling of the cookie file for this write. Unique per attempt,
+    /// so two writers, a stale temp, or a planted symlink can never collide
+    /// with, adopt, or be written through by this one.
+    fn temp_path(&self) -> AppResult<PathBuf> {
+        let Some(name) = self.file_path.file_name() else {
+            return Err(AppError::Message("auth store path has no file name".into()));
+        };
+        let mut tmp_name = name.to_os_string();
+        tmp_name.push(format!(".{}.tmp", staging_suffix()));
+        Ok(self.file_path.with_file_name(tmp_name))
+    }
 }
 
 impl AuthStore for FileStore {
@@ -62,10 +76,14 @@ impl AuthStore for FileStore {
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = self.file_path.with_extension("json.tmp");
+        let tmp = self.temp_path()?;
         let write = (|| -> AppResult<()> {
             let mut opts = fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
+            // create_new, not create+truncate: a file already at the staging
+            // name — a stale temp of ours or a symlink someone planted — is
+            // an error, never adopted and never followed. A fixed name let a
+            // planted symlink route the cookie jar into another file.
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -85,6 +103,10 @@ impl AuthStore for FileStore {
             let _ = fs::remove_file(&tmp);
             return Err(e);
         }
+        // Persist the rename itself: without the directory flush a power loss
+        // can undo the publish and leave neither the previous jar nor the new
+        // one on disk.
+        sync_parent_dir(&self.file_path);
         Ok(())
     }
 
@@ -487,6 +509,36 @@ mod tests {
         store.delete().unwrap();
         assert!(!path.exists());
         assert!(store.get().unwrap().is_none());
+    }
+
+    /// A fixed temp name let anything planted at `auth_cookies.json.tmp` be
+    /// followed and truncated on open, writing the session cookies into an
+    /// attacker-chosen file. The write must only touch a file it created.
+    #[cfg(unix)]
+    #[test]
+    fn file_store_does_not_write_through_a_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"victim content").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("auth_cookies.json.tmp")).unwrap();
+
+        let store = FileStore::new(dir.path());
+        store.set("cookie-jar").unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"victim content");
+        assert_eq!(store.get().unwrap().as_deref(), Some("cookie-jar"));
+    }
+
+    /// The rename that publishes the cookie file must be made durable: a
+    /// power loss after it can otherwise revert the directory entry and leave
+    /// neither the old jar nor the new one on disk.
+    #[cfg(unix)]
+    #[test]
+    fn file_store_flushes_the_directory_after_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        store.set("cookie-jar").unwrap();
+        assert!(crate::fsutil::sync_probe::synced(dir.path()));
     }
 
     #[test]
