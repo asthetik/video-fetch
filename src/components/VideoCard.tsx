@@ -23,7 +23,6 @@ function pickDefaultFormat(formats: FormatOption[]): FormatOption | null {
 
 interface VideoCardProps {
   meta: VideoMeta;
-  url: string;
   onEnqueued: (count: number) => void;
   onRefresh: () => void;
   active?: boolean;
@@ -34,7 +33,6 @@ interface VideoCardProps {
 
 export function VideoCard({
   meta,
-  url,
   onEnqueued,
   onRefresh,
   active = true,
@@ -192,7 +190,10 @@ export function VideoCard({
       }
 
       await api.enqueue({
-        url,
+        // The card is the meta's; the URL bar may already hold something else.
+        // Downloading through the live input would pair that URL with this
+        // meta's video id and title.
+        url: meta.webpage_url,
         video_id: meta.id,
         title: meta.title,
         page_indexes: pageIndexes,
