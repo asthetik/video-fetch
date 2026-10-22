@@ -498,11 +498,8 @@ impl DownloadManager {
         // concurrent insert.
         let mut existing_output = false;
         if !save_as_copy && settings.skip_existing {
-            let recorded = self
-                .db
-                .lock()
-                .map_err(lock_err)?
-                .find_done_output_paths(&job.video_id, job.page_index)?;
+            let recorded =
+                lock_db(&self.db).find_done_output_paths(&job.video_id, job.page_index)?;
             let audio_format = job.audio_format.as_deref();
             // Same prediction function and same inputs as check_conflict: the
             // uploader included, or a `%(uploader)s` template would make the
@@ -527,7 +524,7 @@ impl DownloadManager {
         // AlreadyExists, matching the original check order.
         let prepared;
         {
-            let db = self.db.lock().map_err(lock_err)?;
+            let db = lock_db(&self.db);
             let active =
                 db.has_active_job(&job.video_id, job.page_index, job.audio_format.as_deref())?;
             if active {
@@ -596,7 +593,7 @@ impl DownloadManager {
         template: &str,
     ) -> AppResult<DownloadConflict> {
         let save_dir = self.effective_save_dir()?;
-        let db = self.db.lock().map_err(lock_err)?;
+        let db = lock_db(&self.db);
         let mut downloading = false;
         let mut exists = false;
         let mut file_exists = false;
@@ -735,7 +732,7 @@ impl DownloadManager {
     }
 
     pub fn clear_finished(&self) -> AppResult<ClearFinishedResult> {
-        let cleared_ids = self.db.lock().map_err(lock_err)?.delete_finished_jobs()?;
+        let cleared_ids = lock_db(&self.db).delete_finished_jobs()?;
         // The rows are gone: drop their stop markers and runner tokens too, or
         // every cancelled-then-cleared job leaks its flag for the process
         // lifetime. Rows that survive the clear (paused included) keep both.
@@ -750,16 +747,20 @@ impl DownloadManager {
     }
 
     pub fn retry(&self, id: &str) -> AppResult<DownloadJob> {
-        let mut job = self.db.lock().map_err(lock_err)?.get_job(id)?;
-        if job.status != JobStatus::Failed {
-            return Err(AppError::Message("只能重试失败的任务".into()));
-        }
+        let job = {
+            let db = lock_db(&self.db);
+            let mut job = db.get_job(id)?;
+            if job.status != JobStatus::Failed {
+                return Err(AppError::Message("只能重试失败的任务".into()));
+            }
 
-        job.status = JobStatus::Pending;
-        job.progress = 0.0;
-        job.error = None;
-        job.output_path = None;
-        self.db.lock().map_err(lock_err)?.update_job(&job)?;
+            job.status = JobStatus::Pending;
+            job.progress = 0.0;
+            job.error = None;
+            job.output_path = None;
+            db.update_job(&job)?;
+            job
+        };
 
         {
             let mut flags = self.stop_flags.lock().map_err(lock_err)?;
@@ -859,7 +860,7 @@ impl DownloadManager {
         // delete between read and write would otherwise surface update_job's
         // missing-row error instead of the friendly one below.
         let job = {
-            let db = self.db.lock().map_err(lock_err)?;
+            let db = lock_db(&self.db);
             let mut job = db.find_job(id)?.ok_or_else(missing_job_err)?;
             if job.status != JobStatus::Paused {
                 return Err(AppError::Message("只能继续已暂停的任务".into()));
@@ -980,11 +981,11 @@ impl DownloadManager {
     }
 
     pub fn list(&self) -> AppResult<Vec<DownloadJob>> {
-        self.db.lock().map_err(lock_err)?.list_jobs()
+        lock_db(&self.db).list_jobs()
     }
 
     pub fn get_resolve_cache(&self, key: &str) -> AppResult<Option<(VideoMeta, i64)>> {
-        self.db.lock().map_err(lock_err)?.get_resolve_cache(key)
+        lock_db(&self.db).get_resolve_cache(key)
     }
 
     pub fn upsert_resolve_cache(
@@ -993,14 +994,11 @@ impl DownloadManager {
         meta: &VideoMeta,
         fetched_at: i64,
     ) -> AppResult<()> {
-        self.db
-            .lock()
-            .map_err(lock_err)?
-            .upsert_resolve_cache(key, meta, fetched_at)
+        lock_db(&self.db).upsert_resolve_cache(key, meta, fetched_at)
     }
 
     pub async fn delete(&self, id: &str, delete_file: bool) -> AppResult<()> {
-        let job = self.db.lock().map_err(lock_err)?.get_job(id)?;
+        let job = lock_db(&self.db).get_job(id)?;
         if matches!(
             job.status,
             JobStatus::Running | JobStatus::Pending | JobStatus::Paused
@@ -1016,7 +1014,7 @@ impl DownloadManager {
                 let _ = fs::remove_file(p);
             }
         }
-        self.db.lock().map_err(lock_err)?.delete_job(id)?;
+        lock_db(&self.db).delete_job(id)?;
         if let Ok(mut flags) = self.stop_flags.lock() {
             flags.remove(id);
         }
@@ -6594,6 +6592,79 @@ mod tests {
             "the pause write must land through the poisoned lock"
         );
         assert_eq!(row.error, None);
+    }
+
+    /// A panic under the db lock poisons it for the rest of the process. The
+    /// user must still be able to list, enqueue, retry and resume — otherwise
+    /// one internal error bricks the app until a restart.
+    ///
+    /// Value: protects=lock_db on list/enqueue/retry/resume (and the other
+    /// user-facing db reads/writes); fails_when=any of them goes through
+    /// `map_err(lock_err)` and reports "lock poisoned"; why_new=the post-0.4.2
+    /// review found poison recovery limited to the terminal writes;
+    /// seam=none
+    #[tokio::test]
+    async fn a_poisoned_db_lock_does_not_brick_user_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let mut failed = sample_job("job-poison-retry");
+        failed.status = JobStatus::Failed;
+        failed.video_id = "BV1retry".into();
+        manager.db.lock().unwrap().insert_job(&failed).unwrap();
+        let mut paused = sample_job("job-poison-resume");
+        paused.status = JobStatus::Paused;
+        paused.video_id = "BV1resume".into();
+        manager.db.lock().unwrap().insert_job(&paused).unwrap();
+
+        poison_db(&manager);
+
+        let listed = manager
+            .list()
+            .expect("list must survive a poisoned db lock");
+        assert_eq!(listed.len(), 2);
+
+        let mut fresh = sample_job("job-poison-enqueue");
+        fresh.video_id = "BV1fresh".into();
+        manager
+            .enqueue_classified(&mut fresh, false)
+            .expect("enqueue must survive a poisoned db lock");
+
+        let retried = manager.retry("job-poison-retry").expect("retry");
+        assert_eq!(retried.status, JobStatus::Pending);
+
+        let resumed = manager.resume("job-poison-resume").await.expect("resume");
+        assert_eq!(resumed.status, JobStatus::Pending);
+
+        // The skip-existing prediction and the conflict probe are the other
+        // db reads on the enqueue path; they must recover as well.
+        manager.settings.lock().unwrap().skip_existing = true;
+        let mut skip = sample_job("job-poison-skip");
+        skip.video_id = "BV1skip".into();
+        manager
+            .enqueue_classified(&mut skip, false)
+            .expect("skip-existing enqueue");
+        manager
+            .check_conflict(
+                "BV1fresh",
+                &[1],
+                "80",
+                None,
+                "clip",
+                "",
+                "%(title)s.%(ext)s",
+            )
+            .expect("conflict probe");
+
+        // Delete and clear are user actions on the same poisoned lock.
+        manager
+            .delete("job-poison-enqueue", false)
+            .await
+            .expect("delete");
+        manager.clear_finished().expect("clear finished");
     }
 
     /// Same rule for the terminal Done write in complete_relocation: its
