@@ -22,7 +22,8 @@ use crate::models::{
 };
 use crate::naming;
 use crate::ytdlp::{
-    self, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download, kill_download_blocking,
+    self, ChildRegistry, DownloadChildren, ProgressUpdate, YtDlpConfig, kill_download,
+    kill_download_blocking,
 };
 
 /// Type-erased per-job bulk-op future: `run_bulk` awaits each op in turn
@@ -463,7 +464,7 @@ impl DownloadManager {
         progress: Arc<dyn ProgressEmitter>,
         work_root: PathBuf,
     ) -> AppResult<Self> {
-        let children = Arc::new(Mutex::new(HashMap::new()));
+        let children = Arc::new(ChildRegistry::new());
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
         let downloader = Arc::new(YtDlpDownloader::new(
             cfg,
@@ -545,8 +546,6 @@ impl DownloadManager {
             job.output_path = None;
 
             prepared = job.clone();
-            #[cfg(test)]
-            enqueue_race_hook::before_insert(&job.video_id);
             db.insert_job(job)?;
         }
         self.emit(&prepared);
@@ -906,6 +905,10 @@ impl DownloadManager {
     /// same reason `abort_runners` is: either half on its own is a teardown
     /// that leaves the hazard the other half closes.
     fn kill_all_children(&self) {
+        // Seal before the snapshot: a runner between spawn and register is
+        // outside every snapshot taken below, so a registration that lands
+        // afterwards must kill its own child.
+        self.children.seal_for_exit();
         let ids: Vec<String> = match self.children.lock() {
             Ok(guard) => guard.keys().cloned().collect(),
             Err(_) => return,
@@ -1669,73 +1672,6 @@ fn lock_db(db: &Mutex<Db>) -> std::sync::MutexGuard<'_, Db> {
     db.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Test-only rendezvous for the enqueue check/insert race regression test.
-/// When armed for a marker (a video id), the first enqueue to reach the gap
-/// between the active check and the insert waits briefly for a second one, so
-/// both are guaranteed to have passed the check before either inserts. That
-/// makes the double-insert interleaving deterministic instead of probabilistic.
-/// Unarmed — and in production builds — the hook is a no-op.
-#[cfg(test)]
-mod enqueue_race_hook {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, Mutex, MutexGuard};
-    use std::time::Duration;
-
-    /// Upper bound on the first arriver's wait for its peer. Must be long
-    /// enough for a freshly spawned thread to reach the hook, and finite so
-    /// that code holding a lock the peer still needs cannot deadlock on a
-    /// rendezvous that can never complete.
-    const PEER_WAIT: Duration = Duration::from_secs(2);
-
-    static ARMED: Mutex<Option<String>> = Mutex::new(None);
-    static ARRIVED: AtomicUsize = AtomicUsize::new(0);
-    static SIGNAL: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
-
-    /// Disarms the hook when dropped (also on test panic).
-    pub struct Guard;
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            disarm();
-        }
-    }
-
-    /// Arm the hook for calls whose marker matches, resetting the rendezvous.
-    pub fn arm(marker: &str) -> Guard {
-        *ARMED.lock().unwrap() = Some(marker.to_owned());
-        ARRIVED.store(0, Ordering::SeqCst);
-        Guard
-    }
-
-    fn disarm() {
-        *ARMED.lock().unwrap() = None;
-    }
-
-    /// Called between the active check and the insert. See module docs.
-    pub fn before_insert(marker: &str) {
-        {
-            let armed = ARMED.lock().unwrap();
-            if armed.as_deref() != Some(marker) {
-                return;
-            }
-        }
-        let n = ARRIVED.fetch_add(1, Ordering::SeqCst) + 1;
-        let (lock, cv) = &SIGNAL;
-        let mut guard: MutexGuard<'_, ()> = lock.lock().unwrap();
-        if n >= 2 {
-            cv.notify_all();
-            return;
-        }
-        while ARRIVED.load(Ordering::SeqCst) < 2 {
-            let (g, timeout) = cv.wait_timeout(guard, PEER_WAIT).unwrap();
-            guard = g;
-            if timeout.timed_out() {
-                break;
-            }
-        }
-    }
-}
-
 /// Test-only fault injection for the cancel/pause terminal-write failure
 /// regression tests. When armed for a job id, the hook drops that row in the
 /// gap between `cancel_marked`/`pause_marked`'s row read and the terminal
@@ -2042,11 +1978,36 @@ mod tests {
             test_settings(save_dir),
             downloader,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.to_path_buf(),
         )
         .unwrap();
         (manager, rx)
+    }
+
+    /// The exit teardown must seal the registry before sweeping it: a runner
+    /// that spawns and registers in the window between the sweep's snapshot
+    /// and process end would leave a live yt-dlp behind.
+    ///
+    /// Value: protects=kill_all_children's seal call; fails_when=the registry
+    /// is not sealed first, so a registration landing after the snapshot stays
+    /// in the map and survives the exit; why_new=the post-0.4.2 review found
+    /// the spawn→register window; seam=none
+    #[tokio::test]
+    async fn shutdown_seals_the_child_registry_before_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work,
+            Arc::new(MockDownloader::failure()) as Arc<dyn Downloader>,
+        );
+        manager.shutdown_for_exit();
+        assert!(
+            manager.children.is_sealed(),
+            "the registry must be sealed before the sweep takes its snapshot"
+        );
     }
 
     async fn wait_for_status(manager: &DownloadManager, id: &str, status: JobStatus) {
@@ -2548,7 +2509,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let pid = Arc::new(Mutex::new(None));
         let downloader = Arc::new(OrphanPanicDownloader {
             children: Arc::clone(&children),
@@ -2635,7 +2596,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let pid = Arc::new(Mutex::new(None));
         let downloader = Arc::new(SuccessorRegPanicDownloader {
             children: Arc::clone(&children),
@@ -2728,7 +2689,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let children: DownloadChildren = Arc::new(Mutex::new(HashMap::new()));
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let stop_flags: StopFlags = Arc::new(Mutex::new(HashMap::new()));
         let pid = Arc::new(Mutex::new(None));
         let downloader = Arc::new(StopMarkedPanicDownloader {
@@ -3569,7 +3530,7 @@ mod tests {
                 called: Arc::clone(&called),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -3632,7 +3593,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -3770,6 +3731,9 @@ mod tests {
         wake: Arc<tokio::sync::Notify>,
         running: Arc<Mutex<HashSet<String>>>,
         peak: Arc<AtomicUsize>,
+        /// Fires inside the check→wait window so a test can stage a release
+        /// exactly where a `notify_waiters` used to be lost.
+        after_check: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         scratch: tempfile::TempDir,
     }
 
@@ -3780,8 +3744,13 @@ mod tests {
                 wake: Arc::new(tokio::sync::Notify::new()),
                 running: Arc::new(Mutex::new(HashSet::new())),
                 peak: Arc::new(AtomicUsize::new(0)),
+                after_check: Mutex::new(None),
                 scratch: tempfile::tempdir().unwrap(),
             }
+        }
+
+        fn set_after_check(&self, hook: impl Fn() + Send + Sync + 'static) {
+            *self.after_check.lock().unwrap() = Some(Box::new(hook));
         }
 
         fn release(&self, id: &str) {
@@ -3818,14 +3787,25 @@ mod tests {
                 self.peak.fetch_max(running.len(), Ordering::SeqCst);
             }
             loop {
+                // Arm the wait before checking: `notify_waiters` stores no
+                // permit, so a release between an unarmed check and the wait
+                // would be lost and this runner would park forever.
+                let notified = self.wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let released = match self.released.lock() {
                     Ok(released) => released.contains(&job.id),
                     Err(_) => true,
                 };
+                if let Ok(hook) = self.after_check.lock()
+                    && let Some(hook) = hook.as_ref()
+                {
+                    hook();
+                }
                 if released {
                     break;
                 }
-                self.wake.notified().await;
+                notified.await;
             }
             if let Ok(mut running) = self.running.lock() {
                 running.remove(&job.id);
@@ -3834,6 +3814,39 @@ mod tests {
             std::fs::write(&path, b"mock").map_err(|e| e.to_string())?;
             Ok(path)
         }
+    }
+
+    /// Reproduces the wake-up window deterministically: the hook fires after
+    /// the release check and before the wait. A `notify_waiters` landing in
+    /// that window (it stores no permit) must not be lost.
+    ///
+    /// Value: protects=the enabled-before-check wait in `LatchedDownloader`;
+    /// fails_when=the wait is armed after the check, so the hook's wake-up is
+    /// dropped and the run parks until the timeout; why_new=the post-0.4.2
+    /// review found the lost-wakeup window; seam=the after-check hook.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_between_the_check_and_the_wait_is_not_lost() {
+        let d = Arc::new(LatchedDownloader::new());
+        let released = d.released.clone();
+        let wake = d.wake.clone();
+        d.set_after_check(move || {
+            if let Ok(mut released) = released.lock() {
+                released.insert("job-hook".into());
+            }
+            wake.notify_waiters();
+        });
+
+        let d2 = d.clone();
+        let waiter = tokio::spawn(async move {
+            let job = sample_job("job-hook");
+            d2.run(&job, 0, Box::new(|_| {})).await
+        });
+        let done = tokio::time::timeout(Duration::from_millis(500), waiter).await;
+        assert!(
+            done.is_ok(),
+            "a release inside the check→wait window was lost"
+        );
+        done.unwrap().unwrap().unwrap();
     }
 
     /// Enqueue `count` distinct jobs and return their ids in enqueue order.
@@ -4302,7 +4315,7 @@ mod tests {
             settings.clone(),
             Arc::new(MockDownloader::success(1.0)),
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             dir.path().join("work"),
         )
         .unwrap();
@@ -4365,7 +4378,7 @@ mod tests {
             test_settings(&save_dir),
             Arc::new(NeverDownloader) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             dir.path().join("work"),
         )
         .unwrap();
@@ -4411,9 +4424,17 @@ mod tests {
     }
 
     /// Two concurrent enqueues for the same video page must not both pass the
-    /// active check and insert — two runners would write one output file. The
-    /// hook pins the interleaving (both checks before either insert) so the
-    /// regression reproduces deterministically instead of by luck.
+    /// active check and insert — two runners would write one output file. A
+    /// barrier releases every thread into `enqueue_classified` together, the
+    /// moment a split check/insert critical section lets several through; the
+    /// fixed code performs the check and the insert under one lock.
+    ///
+    /// Value: protects=the single db critical section around the active check
+    /// and the insert; fails_when=the check and insert take the db lock
+    /// separately (the barrier admits several threads past the check before
+    /// any insert); why_new=the old rendezvous hook waited inside the very
+    /// lock its peer needed, so it always timed out and pinned nothing;
+    /// seam=none
     #[test]
     fn concurrent_enqueue_classified_admits_a_single_active_job() {
         let dir = tempfile::tempdir().unwrap();
@@ -4425,40 +4446,44 @@ mod tests {
             Arc::new(ParkForeverDownloader),
         );
 
-        let _guard = enqueue_race_hook::arm("BV1race");
-        let spawn = |job_id: &str| {
-            let manager = manager.clone();
-            let mut job = sample_job(job_id);
-            job.video_id = "BV1race".into();
-            std::thread::spawn(move || manager.enqueue_classified(&mut job, false))
-        };
-        let first = spawn("job-race-a");
-        let second = spawn("job-race-b");
-        let results = [
-            first.join().unwrap().unwrap(),
-            second.join().unwrap().unwrap(),
-        ];
-
-        let enqueued = results
-            .iter()
-            .filter(|k| **k == EnqueueKind::Enqueued)
-            .count();
-        let duplicate = results
-            .iter()
-            .filter(|k| **k == EnqueueKind::DuplicateActive)
-            .count();
-        assert_eq!(
-            (enqueued, duplicate),
-            (1, 1),
-            "exactly one enqueue may win the active slot: {results:?}"
-        );
-        let rows = manager
-            .list()
-            .unwrap()
-            .into_iter()
-            .filter(|j| j.video_id == "BV1race")
-            .count();
-        assert_eq!(rows, 1, "check-then-insert must not insert two active rows");
+        for round in 0..16 {
+            let video_id = format!("BV1race{round}");
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let mut handles = Vec::new();
+            for n in 0..4 {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                let video_id = video_id.clone();
+                let mut job = sample_job(&format!("job-{round}-{n}"));
+                job.video_id = video_id;
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    manager.enqueue_classified(&mut job, false)
+                }));
+            }
+            let kinds: Vec<EnqueueKind> = handles
+                .into_iter()
+                .map(|h| h.join().unwrap().unwrap())
+                .collect();
+            let enqueued = kinds
+                .iter()
+                .filter(|k| **k == EnqueueKind::Enqueued)
+                .count();
+            assert_eq!(
+                enqueued, 1,
+                "round {round}: exactly one enqueue may win the active slot: {kinds:?}"
+            );
+            let rows = manager
+                .list()
+                .unwrap()
+                .into_iter()
+                .filter(|j| j.video_id == video_id)
+                .count();
+            assert_eq!(
+                rows, 1,
+                "round {round}: check-then-insert must not insert two active rows"
+            );
+        }
     }
 
     // ---- pause / resume ----
@@ -4475,7 +4500,7 @@ mod tests {
             test_settings(dir),
             downloader,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             dir.join("work"),
             stop_flags,
         )
@@ -5177,7 +5202,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -5261,7 +5286,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
         )
         .unwrap();
@@ -5982,7 +6007,7 @@ mod tests {
                 scratch: tempfile::tempdir().unwrap(),
             }) as Arc<dyn Downloader>,
             Arc::new(emitter),
-            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(ChildRegistry::new()),
             work_root.clone(),
             Arc::new(Mutex::new(HashMap::new())),
         )
