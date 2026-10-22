@@ -984,6 +984,17 @@ impl DownloadManager {
         lock_db(&self.db).list_jobs()
     }
 
+    /// The exact recorded path for a display path the webview handed back.
+    /// `None` when the string matches no recorded row, so the caller opens it
+    /// as given.
+    pub(crate) fn recorded_exact_path(&self, display: &str) -> Option<PathBuf> {
+        let bytes = lock_db(&self.db)
+            .exact_output_path_for(display)
+            .ok()
+            .flatten()?;
+        Some(fsutil::path_from_record_bytes(&bytes))
+    }
+
     pub fn get_resolve_cache(&self, key: &str) -> AppResult<Option<(VideoMeta, i64)>> {
         lock_db(&self.db).get_resolve_cache(key)
     }
@@ -1551,6 +1562,15 @@ impl DownloadManager {
         if let Err(e) = lock_db(&self.db).update_job(&done) {
             tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
         }
+        // The display string above is the only form the webview can carry; a
+        // name UTF-8 cannot represent arrives there melted to U+FFFD. Record
+        // the exact bytes so "open" resolves the real file, and clear the
+        // record when this delivery landed on a UTF-8 path (a retry may have
+        // moved it).
+        let exact = exact_output_path_record(&dest);
+        if let Err(e) = lock_db(&self.db).set_output_path_exact(job_id, exact.as_deref()) {
+            tracing::warn!(target: "core", "download: 精确路径写入失败 {job_id}: {e}");
+        }
         // Terminal writes retire the job's stop flag: a pause that raced this
         // completion otherwise leaves a marker no later path would ever clear.
         if let Ok(mut flags) = self.stop_flags.lock() {
@@ -1716,6 +1736,14 @@ mod terminal_write_hook {
             let _ = db.delete_job(job_id);
         }
     }
+}
+
+/// The exact-bytes record a delivery should keep: only a path the display
+/// string cannot carry needs one; a UTF-8 path clears any stale record.
+fn exact_output_path_record(dest: &Path) -> Option<Vec<u8>> {
+    dest.to_str()
+        .is_none()
+        .then(|| fsutil::path_to_record_bytes(dest))
 }
 
 /// Prefer the path yt-dlp reported when it exists; otherwise scan the work dir.
@@ -1926,6 +1954,120 @@ mod tests {
             std::fs::write(&path, b"video").map_err(|e| e.to_string())?;
             Ok(self.reported_path.clone().unwrap_or(path))
         }
+    }
+
+    /// Writes a product whose file name UTF-8 cannot represent, the shape a
+    /// title can produce on a filesystem that accepts raw bytes. Linux only:
+    /// APFS rejects such names at creation (EILSEQ), so the case cannot exist
+    /// on macOS, and Windows paths cannot carry them through the API.
+    #[cfg(target_os = "linux")]
+    struct NonUtf8NameMockDownloader {
+        work_root: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl Downloader for NonUtf8NameMockDownloader {
+        async fn run(
+            &self,
+            job: &DownloadJob,
+            _token: u64,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            use std::os::unix::ffi::OsStrExt;
+            let work = fsutil::work_dir_for(&self.work_root, &job.id);
+            std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+            let path = work.join(std::ffi::OsStr::from_bytes(b"bad-\xff-name.mp4"));
+            std::fs::write(&path, b"video").map_err(|e| e.to_string())?;
+            Ok(path)
+        }
+    }
+
+    /// The display string a delivered row carries is the only form the
+    /// webview can handle; resolving it back must land on the exact recorded
+    /// bytes, not on the melted string.
+    #[cfg(unix)]
+    #[test]
+    fn recorded_exact_path_resolves_the_display_string_to_the_recorded_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let raw = b"/save/bad-\xff-name.mp4";
+        let display = String::from_utf8_lossy(raw).into_owned();
+        {
+            let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+            let mut job = sample_job("exact-glue");
+            job.output_path = Some(display.clone());
+            db.insert_job(&job).unwrap();
+            db.set_output_path_exact("exact-glue", Some(raw)).unwrap();
+        }
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work,
+            Arc::new(MockDownloader::failure()) as Arc<dyn Downloader>,
+        );
+        assert_eq!(
+            manager.recorded_exact_path(&display),
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(raw)))
+        );
+        assert_eq!(manager.recorded_exact_path("/save/clip.mp4"), None);
+    }
+
+    /// Only a path the display string cannot carry gets an exact record, and
+    /// the record must be the raw OS bytes.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_melted_path_gets_an_exact_record() {
+        use std::os::unix::ffi::OsStrExt;
+        let dest = PathBuf::from("/save").join(std::ffi::OsStr::from_bytes(b"bad-\xff-name.mp4"));
+        assert!(dest.to_str().is_none());
+        assert_eq!(
+            exact_output_path_record(&dest),
+            Some(fsutil::path_to_record_bytes(&dest))
+        );
+        assert_eq!(exact_output_path_record(Path::new("/save/clip.mp4")), None);
+    }
+
+    /// A delivery whose file name UTF-8 cannot carry must record the exact
+    /// bytes: the stored display path melts the name to U+FFFD, and the
+    /// record is what lets "open" reach the real file. Linux only: APFS
+    /// rejects such names at creation, so the reachable case is pinned where
+    /// it can exist.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn delivery_records_the_exact_path_of_a_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &work,
+            Arc::new(NonUtf8NameMockDownloader {
+                work_root: work.clone(),
+            }) as Arc<dyn Downloader>,
+        );
+        let job = manager.enqueue(sample_job("job-non-utf8"), false).unwrap();
+        wait_for_status(&manager, &job.id, JobStatus::Done).await;
+
+        let raw_name = b"bad-\xff-name.mp4";
+        let listed = manager.list().unwrap();
+        let done = listed.iter().find(|j| j.id == job.id).unwrap();
+        let display = done.output_path.as_deref().unwrap();
+        assert_eq!(display, String::from_utf8_lossy(raw_name));
+
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let exact = db.exact_output_path_for(display).unwrap();
+        let expected = dir.path().join(std::ffi::OsStr::from_bytes(raw_name));
+        assert_eq!(
+            exact.map(|bytes| fsutil::path_from_record_bytes(&bytes)),
+            Some(expected.clone())
+        );
+        assert!(
+            expected.is_file(),
+            "the delivered file must exist under its exact name"
+        );
     }
 
     fn test_settings(dir: &Path) -> AppSettings {
