@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   progress REAL NOT NULL DEFAULT 0,
   error TEXT,
   output_path TEXT,
+  output_path_exact BLOB,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -74,6 +75,7 @@ impl Db {
             ("duration_secs", "INTEGER"),
             ("file_size", "INTEGER"),
             ("uploader", "TEXT"),
+            ("output_path_exact", "BLOB"),
         ] {
             if !column_exists(&conn, "jobs", col)? {
                 conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {kind}"), [])?;
@@ -334,6 +336,34 @@ impl Db {
             paths.push(path?);
         }
         Ok(paths)
+    }
+
+    /// Record the exact OS-encoded bytes of a delivered path whose display
+    /// string (the only form the webview can carry) cannot represent it.
+    /// `None` clears a stale record when a retry lands on a UTF-8 path.
+    pub fn set_output_path_exact(&self, id: &str, bytes: Option<&[u8]>) -> AppResult<()> {
+        let updated = self.conn.execute(
+            "UPDATE jobs SET output_path_exact = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![id, bytes],
+        )?;
+        if updated == 0 {
+            return Err(AppError::Message(MISSING_JOB_MESSAGE.into()));
+        }
+        Ok(())
+    }
+
+    /// The exact bytes recorded for the row whose display path equals
+    /// `display`, when one was recorded.
+    pub fn exact_output_path_for(&self, display: &str) -> AppResult<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT output_path_exact FROM jobs
+             WHERE output_path = ?1 AND output_path_exact IS NOT NULL
+             LIMIT 1",
+        )?;
+        let bytes = stmt
+            .query_row(params![display], |row| row.get::<_, Vec<u8>>(0))
+            .optional()?;
+        Ok(bytes)
     }
 
     pub fn delete_job(&self, id: &str) -> AppResult<()> {
@@ -885,6 +915,7 @@ mod tests {
             ("duration_secs", "INTEGER"),
             ("file_size", "INTEGER"),
             ("uploader", "TEXT"),
+            ("output_path_exact", "BLOB"),
         ] {
             assert_eq!(
                 column_decl_type(&db.conn, col).as_deref(),
@@ -892,6 +923,36 @@ mod tests {
                 "migrated column {col} must declare {kind}"
             );
         }
+    }
+
+    /// The exact path record must store the raw OS bytes and find them again
+    /// by the display string the webview can carry; clearing it must not
+    /// leave a stale path behind for a retry that landed on a UTF-8 name.
+    #[test]
+    fn exact_output_path_roundtrips_raw_bytes_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut job = sample_job_for_db("exact-1");
+        let raw = b"/save/bad-\xff-name.mp4";
+        let display = String::from_utf8_lossy(raw).into_owned();
+        job.output_path = Some(display.clone());
+        db.insert_job(&job).unwrap();
+
+        db.set_output_path_exact("exact-1", Some(raw)).unwrap();
+        assert_eq!(
+            db.exact_output_path_for(&display).unwrap().as_deref(),
+            Some(&raw[..])
+        );
+
+        db.set_output_path_exact("exact-1", None).unwrap();
+        assert_eq!(db.exact_output_path_for(&display).unwrap(), None);
+    }
+
+    #[test]
+    fn exact_output_path_write_reports_a_vanished_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        assert!(db.set_output_path_exact("missing", Some(b"x")).is_err());
     }
 
     #[test]

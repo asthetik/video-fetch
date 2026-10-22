@@ -1616,9 +1616,9 @@ fn is_app_output(path: &Path) -> bool {
 /// string (`https:`, `ms-msdt:`) reaches a protocol handler instead. The
 /// plugin's own scope does not help here: it validates the plugin's `open-path`
 /// *command*, while the free `open_path` used below goes straight to the opener.
-fn ensure_openable(raw: &str, roots: &[PathBuf]) -> AppResult<PathBuf> {
+fn ensure_openable(raw: &Path, roots: &[PathBuf]) -> AppResult<PathBuf> {
     let refused = || AppError::Message("无法打开：只允许打开应用保存的下载与日志".into());
-    let resolved = Path::new(raw).canonicalize().map_err(|_| refused())?;
+    let resolved = raw.canonicalize().map_err(|_| refused())?;
     if !roots.iter().any(|root| resolved.starts_with(root)) {
         return Err(refused());
     }
@@ -1681,7 +1681,7 @@ impl OpenableRootsCache {
 /// at delivery. Without the retry the freshly delivered file stays
 /// unopenable until a restart or a settings save.
 fn validate_openable(
-    path: &str,
+    path: &Path,
     cache: &OpenableRootsCache,
     compute: impl Fn() -> Vec<PathBuf>,
 ) -> AppResult<()> {
@@ -1751,14 +1751,21 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
 /// cache, so the per-call cost is one `canonicalize` of the target path.
 #[tauri::command]
 pub async fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
+    // The webview can only hand back the display string. A row whose file
+    // name is not valid UTF-8 recorded the exact OS bytes, so the real file
+    // opens instead of the U+FFFD-melted name.
+    let opened = state
+        .downloads
+        .recorded_exact_path(&path)
+        .unwrap_or_else(|| PathBuf::from(&path));
     // Validated as resolved, opened as given. `canonicalize` is what makes the
     // root check sound, but on Windows it also returns a `\\?\`-prefixed path,
     // and the opener hands that to ShellExecuteW, which does not understand the
     // form — it would fail to open, and report success while doing it.
-    validate_openable(&path, &state.openable_roots_cache, || {
+    validate_openable(&opened, &state.openable_roots_cache, || {
         openable_roots(&state)
     })?;
-    tauri_plugin_opener::open_path(&path, None::<&str>)
+    tauri_plugin_opener::open_path(&opened, None::<&str>)
         .map_err(|e| AppError::Message(format!("无法打开路径: {e}")))?;
     Ok(())
 }
@@ -2218,8 +2225,8 @@ mod tests {
         std::fs::write(&elsewhere, b"x").unwrap();
         let roots = vec![root.canonicalize().unwrap()];
 
-        assert!(ensure_openable(inside.to_str().unwrap(), &roots).is_ok());
-        assert!(ensure_openable(root.to_str().unwrap(), &roots).is_ok());
+        assert!(ensure_openable(&inside, &roots).is_ok());
+        assert!(ensure_openable(&root, &roots).is_ok());
         for refused in [
             elsewhere.to_str().unwrap(),
             "/etc/passwd",
@@ -2230,7 +2237,7 @@ mod tests {
             "does-not-exist.mp4",
         ] {
             assert!(
-                ensure_openable(refused, &roots).is_err(),
+                ensure_openable(Path::new(refused), &roots).is_err(),
                 "should have been refused: {refused}"
             );
         }
@@ -2249,8 +2256,8 @@ mod tests {
         std::fs::write(&script, b"x").unwrap();
         let roots = vec![root.canonicalize().unwrap()];
 
-        assert!(ensure_openable(bundle.to_str().unwrap(), &roots).is_err());
-        assert!(ensure_openable(script.to_str().unwrap(), &roots).is_err());
+        assert!(ensure_openable(&bundle, &roots).is_err());
+        assert!(ensure_openable(&script, &roots).is_err());
     }
 
     /// A9: `openable_roots` canonicalizes every history output's parent — O(history)
@@ -2306,7 +2313,7 @@ mod tests {
         cache.get_or_compute(|| vec![old]);
 
         let computes = std::cell::Cell::new(0usize);
-        let result = validate_openable(delivered.to_str().unwrap(), &cache, || {
+        let result = validate_openable(&delivered, &cache, || {
             computes.set(computes.get() + 1);
             vec![new.clone()]
         });
@@ -2320,7 +2327,7 @@ mod tests {
         let outside = dir.path().join("outside.mp4");
         std::fs::write(&outside, b"x").unwrap();
         assert!(
-            validate_openable(outside.to_str().unwrap(), &cache, || vec![new.clone()]).is_err(),
+            validate_openable(&outside, &cache, || vec![new.clone()]).is_err(),
             "a path outside every root must stay refused"
         );
     }

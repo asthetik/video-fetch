@@ -455,6 +455,45 @@ pub fn remove_job_work_dir(work_root: &Path, job_id: &str) -> std::io::Result<()
     }
 }
 
+/// The exact OS encoding of `path`, for database columns that must outlive a
+/// lossy `to_string_lossy`. Platform-native and stable across app upgrades:
+/// Unix raw bytes, Windows UTF-16LE code units.
+pub(crate) fn path_to_record_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+}
+
+/// Inverse of `path_to_record_bytes`, for bytes this app recorded on this
+/// platform. A malformed (odd-length) Windows record drops its last byte
+/// rather than mispairing code units.
+pub(crate) fn path_from_record_bytes(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        PathBuf::from(std::ffi::OsString::from_wide(&units))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +801,26 @@ mod tests {
                     .unwrap_or(false)
             })
             .collect()
+    }
+
+    /// The exact-path record must round-trip a name UTF-8 cannot carry: the
+    /// display string melts it to U+FFFD, and the record is what lets "open"
+    /// reach the real file.
+    #[cfg(unix)]
+    #[test]
+    fn recorded_path_bytes_roundtrip_a_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = PathBuf::from("/save").join(std::ffi::OsStr::from_bytes(b"bad-\xff-name.mp4"));
+        assert!(path.to_str().is_none());
+        let bytes = path_to_record_bytes(&path);
+        assert_eq!(bytes, b"/save/bad-\xff-name.mp4");
+        assert_eq!(path_from_record_bytes(&bytes), path);
+    }
+
+    #[test]
+    fn recorded_path_bytes_roundtrip_a_utf8_path() {
+        let path = PathBuf::from("/save/clip.mp4");
+        assert_eq!(path_from_record_bytes(&path_to_record_bytes(&path)), path);
     }
 
     #[test]
