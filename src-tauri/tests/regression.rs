@@ -454,3 +454,101 @@ async fn pause_all_resume_all_round_trips_the_queue() {
     h.wait_status(&b.id, JobStatus::Done, Duration::from_secs(120))
         .await;
 }
+
+fn files_with_prefix(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("read save dir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with(prefix))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn assert_no_staging(dir: &std::path::Path) {
+    let staging = files_with_prefix(dir, ".videofetch-");
+    assert!(staging.is_empty(), "staging files left behind: {staging:?}");
+}
+
+/// Value: protects=the full delivery path through the cross-volume copy
+/// fallback (work dir → save dir); fails_when=the fallback loses or truncates
+/// the product, or leaves a staging file; why_new=the fallback had no
+/// manager-level coverage; seam=force_copy_delivery (test-utils): the flag
+/// forces the fallback a test cannot reach otherwise (`rename` succeeds
+/// within one volume).
+#[tokio::test]
+async fn cross_volume_delivery_through_the_manager_delivers_the_product() {
+    let _force = video_fetch_lib::testing::force_copy_delivery();
+    let h = support::harness::Harness::new(1);
+    let job = h.enqueue(1);
+    h.wait_status(&job.id, JobStatus::Done, Duration::from_secs(120))
+        .await;
+    let delivered = h.delivered_path(1);
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &delivered);
+    assert_no_staging(&h.save_dir);
+}
+
+/// Value: protects=two jobs delivering to one destination through the copy
+/// fallback; fails_when=an attempt shares another's staging file (publishing
+/// a truncated product as Done, or failing with anything but the known
+/// destination-exists rule), or staging files survive; why_new=the post-0.4.2
+/// review found the shared staging name; seam=force_copy_delivery.
+///
+/// The interleaving is timing-dependent; the deterministic pins for the
+/// staging collision are the fsutil unit tests. This test exercises the real
+/// manager path and rejects every failure mode the collision can produce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_same_destination_jobs_never_share_staging() {
+    let _force = video_fetch_lib::testing::force_copy_delivery();
+    let h = support::harness::Harness::new(2);
+
+    let mut a = h.job_for(1);
+    a.output_template = "same.%(ext)s".into();
+    let mut b = h.job_for(2);
+    b.output_template = "same.%(ext)s".into();
+    let a = h.manager.enqueue(a, false).expect("enqueue a");
+    let b = h.manager.enqueue(b, false).expect("enqueue b");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let ja = h.job(&a.id);
+        let jb = h.job(&b.id);
+        let terminal = |s: &JobStatus| matches!(s, JobStatus::Done | JobStatus::Failed);
+        if terminal(&ja.status) && terminal(&jb.status) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "jobs did not settle: a={:?} b={:?}",
+            ja.status,
+            jb.status
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let ja = h.job(&a.id);
+    let jb = h.job(&b.id);
+    for job in [&ja, &jb] {
+        if job.status == JobStatus::Failed {
+            let err = job.error.clone().unwrap_or_default();
+            assert!(
+                err.contains("destination exists"),
+                "unexpected delivery failure: {err}"
+            );
+        }
+    }
+    assert!(
+        ja.status == JobStatus::Done || jb.status == JobStatus::Done,
+        "at least one delivery must land: a={:?} b={:?}",
+        ja.status,
+        jb.status
+    );
+
+    let delivered = files_with_prefix(&h.save_dir, "same.");
+    assert_eq!(delivered.len(), 1, "one destination file: {delivered:?}");
+    support::oracles::assert_delivered_merged(&h.ffmpeg, &delivered[0]);
+    assert_no_staging(&h.save_dir);
+}
