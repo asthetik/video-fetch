@@ -132,6 +132,17 @@ export function HomePage({
     [],
   );
 
+  /**
+   * Retire an in-flight resolve whose input is gone. The request-id bump makes
+   * every pending response and event inert; the spinner is settled here
+   * because the stale request's own `finally` will no longer match.
+   */
+  const discardResolve = useCallback(() => {
+    requestIdRef.current += 1;
+    setLoading(false);
+    setResolveStatus((s) => reduceResolveStatus(s, { type: "settled_idle" }));
+  }, []);
+
   useEffect(() => {
     void api.getAuthStatus().then((status) => {
       setAuthStatus(status);
@@ -223,6 +234,7 @@ export function HomePage({
         error={resolveStatus.error}
         onUrlChange={setUrl}
         onResolve={(next) => handleResolve(next)}
+        onDiscard={discardResolve}
       />
 
       {loading && !meta && !space && <p className="loading-text">正在获取视频信息…</p>}
