@@ -54,6 +54,7 @@
 
 ### Changed
 
+- 依赖例行更新：前后端小版本（Tauri 全家、React 19.3.1、Vite 8.3.5、tokio 1.54、lucide-react、motion 等），无 major 升级。
 - CI：`integration`（e2e 回归）任务并入单测矩阵——不再五平台各自重复执行，改由 Linux 单元格串行运行 `--features test-utils` 的 regression 套件，并校验用例数量下限（防止目标因 required-features 缺失而静默跳过）；lint 任务补跑同 feature 的 clippy，回归套件与 `testing` 接口不再有无编译入口的盲区。本地推送前仍可按 README 跑一遍。
 
 ## [0.4.2] - 2026-10-14
