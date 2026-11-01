@@ -968,8 +968,10 @@ async fn run_registered_output(
     let mut out_buf = Vec::new();
     let mut err_buf = Vec::new();
     let drained = tokio::time::timeout(timeout, async {
-        let (a, b) =
-            tokio::join!(stdout.read_to_end(&mut out_buf), stderr.read_to_end(&mut err_buf));
+        let (a, b) = tokio::join!(
+            stdout.read_to_end(&mut out_buf),
+            stderr.read_to_end(&mut err_buf)
+        );
         a.and(b)
     })
     .await;
@@ -2447,10 +2449,14 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
-        let err =
-            run_registered_output(&children, "test", cmd, std::time::Duration::from_millis(150))
-                .await
-                .unwrap_err();
+        let err = run_registered_output(
+            &children,
+            "test",
+            cmd,
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("超时"), "got: {err}");
         assert!(children.lock().unwrap().is_empty());
     }
