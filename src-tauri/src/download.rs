@@ -2981,7 +2981,9 @@ mod tests {
             &dir.path().join("work"),
             Arc::clone(&mock) as Arc<dyn Downloader>,
         );
-        let job = manager.enqueue(sample_job("job-degraded-kill"), false).unwrap();
+        let job = manager
+            .enqueue(sample_job("job-degraded-kill"), false)
+            .unwrap();
         sleep(Duration::from_millis(50)).await;
 
         let mut dead = tokio::process::Command::new("sleep")
@@ -2992,7 +2994,10 @@ mod tests {
         let _ = dead.wait().await.unwrap();
         manager.children.lock().unwrap().insert(
             job.id.clone(),
-            ytdlp::RegisteredChild { token: 1, child: dead },
+            ytdlp::RegisteredChild {
+                token: 1,
+                child: dead,
+            },
         );
 
         let work = fsutil::work_dir_for(&dir.path().join("work"), &job.id);
@@ -3017,7 +3022,9 @@ mod tests {
             &dir.path().join("work"),
             Arc::clone(&mock) as Arc<dyn Downloader>,
         );
-        let job = manager.enqueue(sample_job("job-confirmed-kill"), false).unwrap();
+        let job = manager
+            .enqueue(sample_job("job-confirmed-kill"), false)
+            .unwrap();
         sleep(Duration::from_millis(50)).await;
 
         let live = tokio::process::Command::new("sleep")
@@ -3028,7 +3035,10 @@ mod tests {
             .unwrap();
         manager.children.lock().unwrap().insert(
             job.id.clone(),
-            ytdlp::RegisteredChild { token: 1, child: live },
+            ytdlp::RegisteredChild {
+                token: 1,
+                child: live,
+            },
         );
 
         let work = fsutil::work_dir_for(&dir.path().join("work"), &job.id);
