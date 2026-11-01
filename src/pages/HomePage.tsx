@@ -58,7 +58,15 @@ export function HomePage({
       force = false,
       clearExisting = !force,
     ): Promise<boolean> => {
-      const requestId = requestIdRef.current + 1;
+      // The backend allocates the id: a locally generated one could be
+      // crafted to poison the backend's active generation. Two rapid
+      // resolves can settle this claim out of order; ids are monotonic, so
+      // a claim older than what the ref already holds was superseded
+      // before it started.
+      const requestId = await api.nextResolveId();
+      if (requestId < requestIdRef.current) {
+        return false;
+      }
       requestIdRef.current = requestId;
       setLoading(true);
       setResolveStatus((s) => reduceResolveStatus(s, { type: "resolve_started" }));
