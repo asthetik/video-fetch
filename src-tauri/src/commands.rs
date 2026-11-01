@@ -162,15 +162,21 @@ pub fn is_resolve_current(active_id: u64, request_id: u64) -> bool {
     active_id == request_id
 }
 
-/// Register a resolve generation. Only increases `active` (never lets an older id win).
-pub fn claim_resolve_id(active: &AtomicU64, request_id: Option<u64>) -> u64 {
-    match request_id {
-        Some(id) => {
-            active.fetch_max(id, Ordering::SeqCst);
-            id
-        }
-        None => active.fetch_add(1, Ordering::SeqCst).saturating_add(1),
-    }
+/// Allocate the next resolve generation. The backend is the only writer of
+/// `active`: a request id handed in over IPC used to be folded in with
+/// `fetch_max`, so one crafted `u64::MAX` poisoned the counter and every
+/// later resolve of the session was discarded as stale. Callers that did
+/// not claim first simply never become current.
+pub fn allocate_resolve_id(active: &AtomicU64) -> u64 {
+    active.fetch_add(1, Ordering::SeqCst).saturating_add(1)
+}
+
+/// Claim the id for an upcoming `resolve_url` call. Allocation lives on
+/// the backend so the frontend cannot raise `active_resolve_id` by handing
+/// a crafted id to `resolve_url` (see `allocate_resolve_id`).
+#[tauri::command]
+pub fn next_resolve_id(state: State<'_, AppState>) -> u64 {
+    allocate_resolve_id(&state.active_resolve_id)
 }
 
 /// Event contract for `resolve_url`: once formats are known, the request must
@@ -550,7 +556,8 @@ pub async fn resolve_url(
         }
     }
 
-    let request_id = claim_resolve_id(&state.active_resolve_id, request_id);
+    let request_id =
+        request_id.unwrap_or_else(|| allocate_resolve_id(&state.active_resolve_id));
 
     let is_current =
         || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
@@ -2397,24 +2404,35 @@ mod tests {
     }
 
     #[test]
-    fn claim_resolve_id_is_monotonic() {
+    fn allocate_resolve_id_is_monotonic() {
         let active = AtomicU64::new(0);
-        assert_eq!(claim_resolve_id(&active, Some(2)), 2);
+        assert_eq!(allocate_resolve_id(&active), 1);
+        assert_eq!(allocate_resolve_id(&active), 2);
         assert_eq!(active.load(Ordering::SeqCst), 2);
-        assert_eq!(claim_resolve_id(&active, Some(1)), 1);
-        // Older id must not lower the active generation.
-        assert_eq!(active.load(Ordering::SeqCst), 2);
-        assert!(!is_resolve_current(active.load(Ordering::SeqCst), 1));
-        assert!(is_resolve_current(active.load(Ordering::SeqCst), 2));
     }
 
     #[test]
     fn superseded_request_should_not_commit() {
         let active = AtomicU64::new(0);
-        let first = claim_resolve_id(&active, Some(1));
-        let second = claim_resolve_id(&active, Some(2));
+        let first = allocate_resolve_id(&active);
+        let second = allocate_resolve_id(&active);
         assert!(is_resolve_current(active.load(Ordering::SeqCst), second));
         assert!(!is_resolve_current(active.load(Ordering::SeqCst), first));
+    }
+
+    /// The poisoning fix: an id that arrives over IPC without being
+    /// allocated can never become current. `resolve_url` only *reads*
+    /// `active` for a supplied id (it allocates for `None`), so a crafted
+    /// `u64::MAX` is simply never current and the next allocated id still
+    /// works. (The "supplied id never writes" guarantee is structural —
+    /// `fetch_max` is deleted outright; it cannot be pinned from a unit
+    /// test because `resolve_url` needs an AppHandle. Stated in the PR.)
+    #[test]
+    fn supplied_id_cannot_poison_the_active_generation() {
+        let active = AtomicU64::new(5);
+        assert!(!is_resolve_current(active.load(Ordering::SeqCst), u64::MAX));
+        assert_eq!(allocate_resolve_id(&active), 6);
+        assert!(is_resolve_current(active.load(Ordering::SeqCst), 6));
     }
 
     /// Event contract: a cache-write failure must end the request in a
