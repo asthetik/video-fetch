@@ -1301,6 +1301,11 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
         .lock()
         .map_err(|_| AppError::Message("settings lock poisoned".into()))?
         .clone();
+    // IPC input is untrusted (Tauri threat model): sanitize against the
+    // stored settings before anything is persisted or propagated.
+    let settings = settings_store::sanitize_settings(&old, settings)
+        .map_err(AppError::Message)
+        .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
     let mut changed = Vec::new();
     if old.save_dir != settings.save_dir {
         changed.push("save_dir");
