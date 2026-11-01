@@ -813,6 +813,7 @@ pub async fn space_list_videos(
             let start = (page - 1) * size + 1;
             let end = page * size;
             crate::space::fetch_via_ytdlp(
+                state.downloads.child_registry(),
                 &state.ytdlp.yt_dlp_path,
                 mid,
                 start,

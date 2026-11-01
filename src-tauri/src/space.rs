@@ -183,6 +183,7 @@ pub fn is_valid_bvid(bvid: &str) -> bool {
 /// for the requested page. The flat playlist cannot filter or sort, so the
 /// caller must gate this behind [`fallback_allowed`].
 pub async fn fetch_via_ytdlp(
+    children: &crate::ytdlp::DownloadChildren,
     ytdlp_path: &std::path::Path,
     mid: u64,
     start: u64,
@@ -195,10 +196,9 @@ pub async fn fetch_via_ytdlp(
         .arg("--playlist-items")
         .arg(format!("{start}:{end}"));
     crate::ytdlp::arg_url(&mut cmd, &format!("https://space.bilibili.com/{mid}/video"));
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| AppError::Message(format!("无法启动 yt-dlp: {e}")))?;
+    let out =
+        crate::ytdlp::run_registered_output(children, "space", cmd, crate::ytdlp::SAMPLE_TIMEOUT)
+            .await?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr);
         return Err(AppError::Message(format!(

@@ -920,10 +920,13 @@ async fn enrich_multi_page_formats_by_sampling(
 /// Hard ceiling for one-shot metadata yt-dlp runs. The main download path
 /// is user-cancellable and swept on exit; a metadata spawn used to be
 /// neither — a network sink could park it forever, and quitting leaked it.
-/// Generous against normal resolves (a single-video `-J` takes seconds).
-const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// Per-part sampling runs in `enrich_multi_page_formats_by_sampling`.
-const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Set so a full multi-P `-J` (which extracts playurls for every part; a
+/// 100+ part anthology can legitimately take minutes) does not fail
+/// near-deterministically — a slow success beats a guaranteed timeout.
+pub(crate) const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// Light one-shot runs: per-part format sampling and flat space listings,
+/// where one request answers the whole call.
+pub(crate) const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One-shot metadata run with the download path's lifecycle guarantees:
 /// registered in the child registry (so the exit sweep kills it instead of
@@ -932,7 +935,7 @@ const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// pipes → register → drain → reclaim → wait dance; reclaiming matters so
 /// `wait` can report the real status while the registry stays the kill
 /// surface in between.
-async fn run_registered_output(
+pub(crate) async fn run_registered_output(
     children: &DownloadChildren,
     purpose: &str,
     mut cmd: Command,
