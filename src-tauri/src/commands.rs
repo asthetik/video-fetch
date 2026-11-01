@@ -248,6 +248,20 @@ fn warn_cmd(scope: &str, e: &AppError) {
     );
 }
 
+/// Defense-in-depth for the login window: it loads an external page and is
+/// granted no capability, so it cannot reach commands — until a capability
+/// edit silently re-grants it (the #137 failure mode). High-sensitivity
+/// commands re-check the caller's window label themselves.
+fn ensure_main_window_label(label: &str) -> AppResult<()> {
+    if label == "main" {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "不允许从窗口「{label}」执行该操作"
+        )))
+    }
+}
+
 /// Cookie import accepts only Netscape-format `.txt` files; every other
 /// extension is rejected before the file is read. IPC input is untrusted,
 /// so the file dialog's filter cannot be the only enforcement.
@@ -854,9 +868,11 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
 /// runtime (the `space_enqueue_batch` precedent) instead of the main thread.
 #[tauri::command]
 pub async fn enqueue_download(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     args: EnqueueArgs,
 ) -> AppResult<DownloadJob> {
+    ensure_main_window_label(window.label())?;
     if args.page_indexes.is_empty() {
         return Err(AppError::Message("请至少选择一个分 P".into()));
     }
@@ -1248,7 +1264,12 @@ pub struct DeleteJobArgs {
 }
 
 #[tauri::command]
-pub async fn delete_job(state: State<'_, AppState>, args: DeleteJobArgs) -> AppResult<()> {
+pub async fn delete_job(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    args: DeleteJobArgs,
+) -> AppResult<()> {
+    ensure_main_window_label(window.label())?;
     delete_job_impl(&state, &args.id, args.delete_file).await
 }
 
@@ -1309,7 +1330,12 @@ pub fn get_cookie_notice(state: State<'_, AppState>) -> Option<String> {
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<()> {
+pub fn save_settings(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> AppResult<()> {
+    ensure_main_window_label(window.label())?;
     naming::validate_output_template(&settings.filename_template)
         .map_err(AppError::Message)
         .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
@@ -1363,10 +1389,12 @@ pub fn get_auth_status(state: State<'_, AppState>) -> AuthStatus {
 
 #[tauri::command]
 pub fn import_cookies_path(
+    window: tauri::WebviewWindow,
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<AuthStatus> {
+    ensure_main_window_label(window.label())?;
     validate_cookies_import_path(&path)
         .map_err(AppError::Message)
         .inspect_err(|e| warn_cmd("auth: 导入 Cookie 失败", e))?;
@@ -1381,7 +1409,12 @@ pub fn import_cookies_path(
 }
 
 #[tauri::command]
-pub fn clear_auth(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+pub fn clear_auth(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    ensure_main_window_label(window.label())?;
     tracing::info!(target: "core", "auth: 退出登录");
     state.auth.clear_auth()?;
     // Also drop the login WebView session: an open window would otherwise let the
@@ -1775,7 +1808,12 @@ fn openable_roots(state: &AppState) -> Vec<PathBuf> {
 /// Async like the other heavy commands; the roots themselves come from the
 /// cache, so the per-call cost is one `canonicalize` of the target path.
 #[tauri::command]
-pub async fn open_path(state: State<'_, AppState>, path: String) -> AppResult<()> {
+pub async fn open_path(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<()> {
+    ensure_main_window_label(window.label())?;
     // The webview can only hand back the display string. A row whose file
     // name is not valid UTF-8 recorded the exact OS bytes, so the real file
     // opens instead of the U+FFFD-melted name.
@@ -2375,16 +2413,23 @@ mod tests {
             F: AsyncFn(A, B) -> T,
         {
         }
+        fn assert_async3<A, B, C, T, F>(_f: F)
+        where
+            F: AsyncFn(A, B, C) -> T,
+        {
+        }
         assert_async2(space_enqueue_batch);
-        assert_async2(enqueue_download);
+        // The three-argument forms take the injected `window` guard param
+        // (see ensure_main_window_label).
+        assert_async3(enqueue_download);
         assert_async2(cancel_job);
         assert_async1(cancel_all_jobs);
         assert_async2(pause_job);
         assert_async2(resume_job);
         assert_async1(pause_all_jobs);
         assert_async1(resume_all_jobs);
-        assert_async2(delete_job);
-        assert_async2(open_path);
+        assert_async3(delete_job);
+        assert_async3(open_path);
     }
 
     #[test]
@@ -2400,6 +2445,46 @@ mod tests {
         assert!(validate_cookies_import_path("/tmp/cookies.json").is_err());
         assert!(validate_cookies_import_path("cookies").is_err());
         assert!(validate_cookies_import_path("").is_err());
+    }
+
+    #[test]
+    fn only_the_main_window_label_is_trusted() {
+        assert!(ensure_main_window_label("main").is_ok());
+        assert!(ensure_main_window_label("bilibili-login").is_err());
+        assert!(ensure_main_window_label("").is_err());
+    }
+
+    /// The wiring pin: six high-sensitivity commands must call the label
+    /// guard. Counting the call sites in source (the file includes itself)
+    /// means deleting any one call — or wiring a seventh command and
+    /// forgetting the guard — changes the count and turns this red.
+    #[test]
+    fn high_sensitivity_commands_check_the_caller_window() {
+        // Assembled at runtime so this test's own source does not match
+        // itself: include_str embeds this very file, needle and all.
+        let needle = ["ensure_main_window_label(", "window.label())"].concat();
+        let src = include_str!("commands.rs");
+        assert_eq!(
+            src.matches(&needle).count(),
+            6,
+            "exactly six commands must guard on the caller's window label"
+        );
+    }
+
+    /// #137's failure mode: a capability edit silently widening IPC to
+    /// another window. The label guard is defense-in-depth; this pins the
+    /// JSON contract it backs up.
+    #[test]
+    fn capabilities_grant_ipc_to_the_main_window_only() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/capabilities/default.json"
+        ))
+        .unwrap();
+        let caps: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let windows = caps["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].as_str().unwrap(), "main");
     }
 
     #[test]
