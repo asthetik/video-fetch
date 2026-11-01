@@ -306,13 +306,22 @@ mod tests {
 
     #[test]
     fn empty_save_dir_is_rejected() {
-        assert!(validate_save_dir("").is_err());
-        assert!(validate_save_dir("   ").is_err());
+        // Message-pinned: without the empty check the value falls through
+        // to the absolute-path branch and is still rejected — only the
+        // message proves this guard fired.
+        let err = validate_save_dir("").unwrap_err();
+        assert!(err.contains("不能为空"), "got: {err}");
+        let err = validate_save_dir("   ").unwrap_err();
+        assert!(err.contains("不能为空"), "got: {err}");
     }
 
     #[test]
     fn relative_save_dir_is_rejected() {
-        assert!(validate_save_dir("Downloads/video").is_err());
+        // Message-pinned: a relative path that happens not to exist is
+        // also rejected by the metadata check; only the message proves the
+        // absolute-path guard fired before any filesystem access.
+        let err = validate_save_dir("Downloads/video").unwrap_err();
+        assert!(err.contains("绝对路径"), "got: {err}");
     }
 
     #[test]
@@ -320,10 +329,13 @@ mod tests {
         // Backslash form (Windows UNC), verbatim-UNC form, and the
         // forward-slash form Windows APIs also accept: none of these may
         // reach a file operation, which would turn the first download into
-        // an SMB probe with the user's credentials.
-        assert!(validate_save_dir(r"\\server\share").is_err());
-        assert!(validate_save_dir(r"\\?\UNC\server\share").is_err());
-        assert!(validate_save_dir("//server/share").is_err());
+        // an SMB probe with the user's credentials. Message-pinned: on
+        // non-Windows runners the later checks would reject these paths
+        // anyway — only the message proves the UNC guard fired first.
+        for raw in [r"\\server\share", r"\\?\UNC\server\share", "//server/share"] {
+            let err = validate_save_dir(raw).unwrap_err();
+            assert!(err.contains("网络路径"), "got: {err}");
+        }
     }
 
     #[test]
