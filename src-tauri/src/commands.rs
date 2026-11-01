@@ -556,8 +556,7 @@ pub async fn resolve_url(
         }
     }
 
-    let request_id =
-        request_id.unwrap_or_else(|| allocate_resolve_id(&state.active_resolve_id));
+    let request_id = request_id.unwrap_or_else(|| allocate_resolve_id(&state.active_resolve_id));
 
     let is_current =
         || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
