@@ -61,6 +61,7 @@ export interface ResolveFormatsFailedEvent {
 }
 
 export const api = {
+  nextResolveId: () => invoke<number>("next_resolve_id"),
   resolveUrl: (url: string, force = false, requestId?: number) =>
     invoke<VideoMeta>("resolve_url", {
       url,

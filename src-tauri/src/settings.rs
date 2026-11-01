@@ -99,6 +99,55 @@ pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     write
 }
 
+/// Concurrency bounds mirrored by the settings page slider
+/// (CONCURRENCY_MIN/CONCURRENCY_MAX). IPC input is untrusted, so the
+/// slider cannot be the only enforcement.
+pub const MIN_CONCURRENCY: u32 = 1;
+pub const MAX_CONCURRENCY: u32 = 16;
+
+/// Validate a newly chosen save dir: only an existing, absolute, local
+/// directory is accepted. An empty string would download into the process
+/// CWD, a relative path does the same from another base, and a UNC path
+/// turns the first file operation into an SMB probe with the user's
+/// credentials.
+pub fn validate_save_dir(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Err("保存目录不能为空".into());
+    }
+    // String-level on purpose: it covers every UNC spelling
+    // (`\\server\share`, `\\?\UNC\...`, `//server/share`) on every
+    // platform, so the tests exercise it on non-Windows runners too.
+    if raw.starts_with("\\\\") || raw.starts_with("//") {
+        return Err("保存目录不能是网络路径（UNC）".into());
+    }
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err("保存目录必须是绝对路径".into());
+    }
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(format!("保存路径不是一个文件夹：{raw}")),
+        Err(e) => Err(format!("保存目录不可用：{raw}（{e}）")),
+    }
+}
+
+pub fn clamp_concurrency(value: u32) -> u32 {
+    value.clamp(MIN_CONCURRENCY, MAX_CONCURRENCY)
+}
+
+/// Sanitize IPC-supplied settings against the stored ones. A save_dir that
+/// did not change passes through untouched — the on-disk default is an
+/// empty string until the first directory pick, and re-saving an unchanged
+/// value (any other field was toggled) must not brick settings saves. A new
+/// value must be a usable local directory. Concurrency is always clamped.
+pub fn sanitize_settings(old: &AppSettings, mut next: AppSettings) -> Result<AppSettings, String> {
+    if next.save_dir != old.save_dir {
+        validate_save_dir(&next.save_dir)?;
+    }
+    next.concurrency = clamp_concurrency(next.concurrency);
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +300,99 @@ mod tests {
             loaded.filename_template,
             "%(timestamp>%Y-%m-%dT%H-%M-%S)s_%(title)s.%(ext)s"
         );
+    }
+
+    // --- B10: IPC input validation -----------------------------------------
+
+    #[test]
+    fn empty_save_dir_is_rejected() {
+        // Message-pinned: without the empty check the value falls through
+        // to the absolute-path branch and is still rejected — only the
+        // message proves this guard fired.
+        let err = validate_save_dir("").unwrap_err();
+        assert!(err.contains("不能为空"), "got: {err}");
+        let err = validate_save_dir("   ").unwrap_err();
+        assert!(err.contains("不能为空"), "got: {err}");
+    }
+
+    #[test]
+    fn relative_save_dir_is_rejected() {
+        // Message-pinned: a relative path that happens not to exist is
+        // also rejected by the metadata check; only the message proves the
+        // absolute-path guard fired before any filesystem access.
+        let err = validate_save_dir("Downloads/video").unwrap_err();
+        assert!(err.contains("绝对路径"), "got: {err}");
+    }
+
+    #[test]
+    fn unc_save_dir_is_rejected() {
+        // Backslash form (Windows UNC), verbatim-UNC form, and the
+        // forward-slash form Windows APIs also accept: none of these may
+        // reach a file operation, which would turn the first download into
+        // an SMB probe with the user's credentials. Message-pinned: on
+        // non-Windows runners the later checks would reject these paths
+        // anyway — only the message proves the UNC guard fired first.
+        for raw in [r"\\server\share", r"\\?\UNC\server\share", "//server/share"] {
+            let err = validate_save_dir(raw).unwrap_err();
+            assert!(err.contains("网络路径"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn existing_directory_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_save_dir(dir.path().to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn missing_save_dir_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        assert!(validate_save_dir(gone.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn file_save_dir_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        fs::write(&file, b"x").unwrap();
+        assert!(validate_save_dir(file.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn concurrency_clamps_into_bounds() {
+        assert_eq!(clamp_concurrency(0), 1);
+        assert_eq!(clamp_concurrency(3), 3);
+        assert_eq!(clamp_concurrency(16), 16);
+        assert_eq!(clamp_concurrency(17), 16);
+        assert_eq!(clamp_concurrency(u32::MAX), 16);
+    }
+
+    #[test]
+    fn unchanged_empty_save_dir_passes_through() {
+        // The on-disk default is an empty save_dir until the first pick;
+        // re-saving other fields must not brick settings saves.
+        let old = AppSettings::default();
+        let mut next = old.clone();
+        next.skip_existing = !old.skip_existing;
+        let out = sanitize_settings(&old, next).unwrap();
+        assert_eq!(out.save_dir, "");
+        assert_eq!(out.skip_existing, !old.skip_existing);
+    }
+
+    #[test]
+    fn changed_save_dir_is_validated() {
+        let old = AppSettings::default();
+        let mut next = old.clone();
+        next.save_dir = "relative/path".into();
+        assert!(sanitize_settings(&old, next).is_err());
+    }
+
+    #[test]
+    fn concurrency_is_clamped_by_sanitize() {
+        let old = AppSettings::default();
+        let mut next = old.clone();
+        next.concurrency = 999;
+        assert_eq!(sanitize_settings(&old, next).unwrap().concurrency, 16);
     }
 }

@@ -1036,7 +1036,9 @@ impl DownloadManager {
     }
 
     pub fn update_settings(&self, settings: AppSettings) -> AppResult<()> {
-        let new_limit = settings.concurrency.max(1) as usize;
+        // Same clamp as the save_settings boundary: a hand-edited
+        // settings.json never sizes the semaphore past the documented max.
+        let new_limit = crate::settings::clamp_concurrency(settings.concurrency) as usize;
         {
             let mut current = self.settings.lock().map_err(lock_err)?;
             // Picking a different save dir mid-session is an explicit user

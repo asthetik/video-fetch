@@ -13,6 +13,7 @@ import {
   type ResolveStatus,
 } from "../lib/resolveStatus";
 import { createListenerBag } from "../lib/listenerBag";
+import { claimSurvivesDiscard } from "../lib/resolveClaim";
 import { DownloadQueue } from "../components/DownloadQueue";
 import { SpaceListView } from "../components/SpaceListView";
 import { UrlBar } from "../components/UrlBar";
@@ -48,6 +49,7 @@ export function HomePage({
   const metaRef = useRef(meta);
   const authRef = useRef(authStatus);
   const requestIdRef = useRef(0);
+  const discardEpochRef = useRef(0);
   urlRef.current = url;
   metaRef.current = meta;
   authRef.current = authStatus;
@@ -58,7 +60,32 @@ export function HomePage({
       force = false,
       clearExisting = !force,
     ): Promise<boolean> => {
-      const requestId = requestIdRef.current + 1;
+      // The backend allocates the id: a locally generated one could be
+      // crafted to poison the backend's active generation. The claim is
+      // one IPC round-trip; in that window a newer claim may settle first
+      // (ids are monotonic, so an older id is superseded) or the input may
+      // be discarded — discard bumps the ref itself, and the fresh id can
+      // come back equal to the bumped ref, so the epoch must vouch that no
+      // discard happened either.
+      const epochAtClaim = discardEpochRef.current;
+      let requestId: number;
+      try {
+        requestId = await api.nextResolveId();
+      } catch {
+        // The IPC channel is down; nothing was started and later invokes
+        // surface the failure. This resolve simply does not start.
+        return false;
+      }
+      if (
+        !claimSurvivesDiscard(
+          requestId,
+          requestIdRef.current,
+          epochAtClaim,
+          discardEpochRef.current,
+        )
+      ) {
+        return false;
+      }
       requestIdRef.current = requestId;
       setLoading(true);
       setResolveStatus((s) => reduceResolveStatus(s, { type: "resolve_started" }));
@@ -139,6 +166,7 @@ export function HomePage({
    * because the stale request's own `finally` will no longer match.
    */
   const discardResolve = useCallback(() => {
+    discardEpochRef.current += 1;
     requestIdRef.current += 1;
     setLoading(false);
     setResolveStatus((s) => reduceResolveStatus(s, { type: "settled_idle" }));
