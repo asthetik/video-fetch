@@ -1314,7 +1314,7 @@ pub(crate) fn register_child(
         .map_err(|e| AppError::Message(format!("download registry lock poisoned: {e}")))?;
     if children.is_sealed() {
         drop(guard);
-        kill_child_process_tree(&mut child);
+        let _ = kill_child_process_tree(&mut child);
         return Err(AppError::Message("应用正在退出，下载已停止".into()));
     }
     guard.insert(job_id.to_string(), RegisteredChild { token, child });
@@ -1365,23 +1365,40 @@ fn take_child(
     }
 }
 
+/// Outcome of killing a job's process tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillOutcome {
+    /// No live child was registered for the job.
+    NoChild,
+    /// The whole tree is confirmed dead (Windows: `taskkill /T` succeeded;
+    /// Unix: the group SIGKILL landed).
+    TreeConfirmed,
+    /// Only the direct child could be signalled (the `start_kill` fallback);
+    /// grandchildren may survive it.
+    DirectChildOnly,
+}
+
 /// Kill and unregister whatever child is registered for this job. Async so the
 /// Windows `taskkill` spawn-wait never parks the caller's thread (an async
 /// command's worker during cancel/pause, or a runner's task). The registry lock
-/// is released before the kill: a std mutex guard must not live across the await,
-/// and per-job outcomes do not change — the entry is already taken.
-pub async fn kill_download(children: &DownloadChildren, job_id: &str) -> bool {
+/// is released before the kill: a std mutex guard must not live across the await.
+pub async fn kill_download(children: &DownloadChildren, job_id: &str) -> KillOutcome {
     let entry = {
         let Ok(mut guard) = children.lock() else {
-            return false;
+            return KillOutcome::NoChild;
         };
         guard.remove(job_id)
     };
-    if let Some(entry) = entry {
-        kill_entry_async(entry).await;
-        return true;
+    match entry {
+        Some(entry) => {
+            if kill_entry_async(entry).await {
+                KillOutcome::TreeConfirmed
+            } else {
+                KillOutcome::DirectChildOnly
+            }
+        }
+        None => KillOutcome::NoChild,
     }
-    false
 }
 
 /// Blocking variant of `kill_download` for the exit teardown: it runs on the
@@ -1398,7 +1415,7 @@ pub fn kill_download_blocking(children: &DownloadChildren, job_id: &str) -> bool
         guard.remove(job_id)
     };
     if let Some(mut entry) = entry {
-        kill_child_process_tree(&mut entry.child);
+        let _ = kill_child_process_tree(&mut entry.child);
         return true;
     }
     false
@@ -1406,54 +1423,74 @@ pub fn kill_download_blocking(children: &DownloadChildren, job_id: &str) -> bool
 
 /// Kill one registered child's whole process tree off the registry lock. On
 /// Windows the kill blocks on `taskkill`, so it runs on the blocking pool; the
-/// Unix group SIGKILL is fire-and-forget and runs inline.
-async fn kill_entry_async(entry: RegisteredChild) {
+/// Unix group SIGKILL is fire-and-forget and runs inline. Returns whether the
+/// whole tree is confirmed dead.
+async fn kill_entry_async(entry: RegisteredChild) -> bool {
     let mut entry = entry;
     #[cfg(windows)]
     {
-        let _ =
-            tokio::task::spawn_blocking(move || kill_child_process_tree(&mut entry.child)).await;
+        tokio::task::spawn_blocking(move || kill_child_process_tree(&mut entry.child))
+            .await
+            .unwrap_or(false)
     }
     #[cfg(unix)]
     {
-        kill_child_process_tree(&mut entry.child);
+        kill_child_process_tree(&mut entry.child)
     }
 }
 
-/// Terminate yt-dlp and any children (e.g. ffmpeg). On Windows, `Child::start_kill`
-/// only kills the root process and leaves downloads running in the tree.
-fn kill_child_process_tree(child: &mut tokio::process::Child) {
-    #[cfg(windows)]
-    {
-        if let Some(pid) = child.id() {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            // std::process::Command — same CREATE_NO_WINDOW flag as hide_windows_console.
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
-            return;
+/// Terminate yt-dlp and any children (e.g. ffmpeg), reporting whether the
+/// whole tree is confirmed dead. On Windows `Child::start_kill` only kills
+/// the root process and leaves downloads running in the tree.
+fn kill_child_process_tree(child: &mut tokio::process::Child) -> bool {
+    if let Some(pid) = child.id() {
+        #[cfg(windows)]
+        {
+            if taskkill_tree(pid) {
+                return true;
+            }
         }
-    }
-    #[cfg(unix)]
-    {
-        if let Some(pid) = child.id() {
+        #[cfg(unix)]
+        {
             // The child is a process-group leader (spawned with process_group(0)):
             // SIGKILL to -pgid reaches the PyInstaller second stage and ffmpeg.
-            // Only a confirmed group kill returns; a failed one (e.g. a sandbox
+            // Only a confirmed group kill returns true; a failed one (e.g. a sandbox
             // denying negative-pid signals) falls through so the direct child is
             // still signalled instead of reporting a kill that never landed.
             // SAFETY: kill(2) with a negative pid targets the group; the group
             // belongs to the child we spawned, never to this process.
             if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == 0 {
-                return;
+                return true;
             }
         }
     }
     let _ = child.start_kill();
+    false
+}
+
+/// `taskkill /PID <pid> /T /F` from the absolute System32 path: a bare
+/// "taskkill" resolves through PATH, where a planted executable would run
+/// with this app's privileges. Any failure — missing SystemRoot, spawn
+/// error, non-zero exit — returns false so the caller falls back to
+/// `start_kill` on the direct child instead of assuming the tree died.
+#[cfg(windows)]
+fn taskkill_tree(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Some(system_root) = std::env::var_os("SystemRoot") else {
+        return false;
+    };
+    let taskkill = std::path::Path::new(&system_root)
+        .join("System32")
+        .join("taskkill.exe");
+    std::process::Command::new(taskkill)
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -2232,6 +2269,41 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(children.lock().unwrap().is_empty());
     }
 
+    /// B18: a group kill that lands reports the whole tree confirmed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_group_kill_reports_the_tree_confirmed() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        assert!(
+            kill_child_process_tree(&mut child),
+            "a landed group kill must report the tree as confirmed"
+        );
+        let _ = child.wait().await.unwrap();
+    }
+
+    /// B18: a reaped child has no pid, so no group exists to kill — the
+    /// direct-child fallback is the only option and must report degraded.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reaped_child_reports_the_tree_only_via_fallback() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("0")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let status = child.wait().await.unwrap();
+        assert!(status.success(), "the stand-in must exit cleanly first");
+        assert!(
+            !kill_child_process_tree(&mut child),
+            "with no pid there is no tree to confirm; only start_kill remains"
+        );
+    }
+
     /// A child spawned just as the exit teardown sweeps the registry must not
     /// outlive it: the sweep's snapshot can miss a registration that lands
     /// afterwards, so the registry is sealed first and a late registration
@@ -2428,7 +2500,10 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     #[tokio::test]
     async fn kill_helpers_are_async() {
         let children: DownloadChildren = Arc::new(ChildRegistry::new());
-        assert!(!kill_download(&children, "ghost").await);
+        assert_eq!(
+            kill_download(&children, "ghost").await,
+            KillOutcome::NoChild
+        );
         assert!(!kill_registered_child(&children, "ghost", 1).await);
     }
 }

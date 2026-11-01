@@ -645,7 +645,7 @@ impl DownloadManager {
     }
 
     async fn cancel_marked(&self, id: &str) -> AppResult<DownloadJob> {
-        kill_download(&self.children, id).await;
+        let kill_outcome = kill_download(&self.children, id).await;
 
         if let Ok(mut tasks) = self.running_tasks.lock()
             && let Some((_, handle)) = tasks.remove(id)
@@ -658,7 +658,13 @@ impl DownloadManager {
         // write behind "lock poisoned" and strand the row at its old status.
         let db = lock_db(&self.db);
         let mut job = db.get_job(id)?;
-        let _ = fsutil::remove_job_work_dir(&self.work_root, &job.id);
+        // A degraded kill (only the direct child was signalled) may leave an
+        // ffmpeg grandchild writing into the work dir; wiping it under a live
+        // writer races. The dir stays with the Failed row instead — reclaimed
+        // on retry or task deletion, same as any failed job.
+        if kill_outcome != ytdlp::KillOutcome::DirectChildOnly {
+            let _ = fsutil::remove_job_work_dir(&self.work_root, &job.id);
+        }
         if job.status == JobStatus::Done {
             // A finished row never runs the Err dispatch the marker exists for;
             // retire it so repeated no-op cancels cannot grow the map.
@@ -816,7 +822,7 @@ impl DownloadManager {
     }
 
     async fn pause_marked(&self, id: &str) -> AppResult<DownloadJob> {
-        kill_download(&self.children, id).await;
+        let _ = kill_download(&self.children, id).await;
         if let Ok(mut tasks) = self.running_tasks.lock()
             && let Some((_, handle)) = tasks.remove(id)
         {
@@ -2834,7 +2840,10 @@ mod tests {
             children.lock().unwrap().contains_key(&job.id),
             "the successor's registration must survive the panic cleanup"
         );
-        assert!(kill_download(&children, &job.id).await);
+        assert_eq!(
+            kill_download(&children, &job.id).await,
+            ytdlp::KillOutcome::TreeConfirmed
+        );
     }
 
     /// The panic kill runs in the stop-disposition branches too, not only the
@@ -2958,6 +2967,88 @@ mod tests {
         let cancelled = manager.cancel(&job.id).await.unwrap();
         assert_eq!(cancelled.status, JobStatus::Failed);
         assert_eq!(cancelled.error.as_deref(), Some("用户取消下载"));
+    }
+
+    /// B18: a degraded kill — the child was already reaped, so only the
+    /// direct-child fallback was possible — must not wipe the work dir
+    /// while a grandchild may still be writing into it; the startup orphan
+    /// sweep takes it instead.
+    #[tokio::test]
+    async fn cancel_keeps_the_work_dir_when_the_kill_degrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = Arc::new(MockDownloader::slow_success(500));
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::clone(&mock) as Arc<dyn Downloader>,
+        );
+        let job = manager
+            .enqueue(sample_job("job-degraded-kill"), false)
+            .unwrap();
+        sleep(Duration::from_millis(50)).await;
+
+        let mut dead = tokio::process::Command::new("sleep")
+            .arg("0")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let _ = dead.wait().await.unwrap();
+        manager.children.lock().unwrap().insert(
+            job.id.clone(),
+            ytdlp::RegisteredChild {
+                token: 1,
+                child: dead,
+            },
+        );
+
+        let work = fsutil::work_dir_for(&dir.path().join("work"), &job.id);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("demo.part"), b"partial").unwrap();
+
+        let cancelled = manager.cancel(&job.id).await.unwrap();
+        assert_eq!(cancelled.status, JobStatus::Failed);
+        assert!(
+            work.exists(),
+            "a degraded kill must leave the work dir with the Failed row for retry or deletion"
+        );
+    }
+
+    /// B18: a confirmed tree kill wipes the work dir immediately, as before.
+    #[tokio::test]
+    async fn cancel_wipes_the_work_dir_after_a_confirmed_kill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = Arc::new(MockDownloader::slow_success(500));
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::clone(&mock) as Arc<dyn Downloader>,
+        );
+        let job = manager
+            .enqueue(sample_job("job-confirmed-kill"), false)
+            .unwrap();
+        sleep(Duration::from_millis(50)).await;
+
+        let live = tokio::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        manager.children.lock().unwrap().insert(
+            job.id.clone(),
+            ytdlp::RegisteredChild {
+                token: 1,
+                child: live,
+            },
+        );
+
+        let work = fsutil::work_dir_for(&dir.path().join("work"), &job.id);
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("demo.part"), b"partial").unwrap();
+
+        let cancelled = manager.cancel(&job.id).await.unwrap();
+        assert_eq!(cancelled.status, JobStatus::Failed);
+        assert!(!work.exists(), "a confirmed kill wipes the work dir");
     }
 
     #[tokio::test]
