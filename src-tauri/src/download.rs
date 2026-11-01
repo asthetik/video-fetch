@@ -660,7 +660,8 @@ impl DownloadManager {
         let mut job = db.get_job(id)?;
         // A degraded kill (only the direct child was signalled) may leave an
         // ffmpeg grandchild writing into the work dir; wiping it under a live
-        // writer races. Leave it for the startup orphan sweep instead.
+        // writer races. The dir stays with the Failed row instead — reclaimed
+        // on retry or task deletion, same as any failed job.
         if kill_outcome != ytdlp::KillOutcome::DirectChildOnly {
             let _ = fsutil::remove_job_work_dir(&self.work_root, &job.id);
         }
@@ -3008,7 +3009,7 @@ mod tests {
         assert_eq!(cancelled.status, JobStatus::Failed);
         assert!(
             work.exists(),
-            "a degraded kill must leave the work dir for the orphan sweep"
+            "a degraded kill must leave the work dir with the Failed row for retry or deletion"
         );
     }
 
