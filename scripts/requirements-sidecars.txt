@@ -16,4 +16,4 @@
 # binaries with no package-registry ecosystem for Dependabot to track —
 # pinned as FFMPEG_VERSION, FFMPEG_BTBN_TAG and FFMPEG_MACOS_BUILD in
 # scripts/fetch_sidecars.py and bumped manually.
-yt-dlp==2026.8.19
+yt-dlp==2026.10.26
