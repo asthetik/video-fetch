@@ -802,6 +802,7 @@ fn cfg_command(cfg: &YtDlpConfig, cookies_path: Option<&Path>) -> Command {
 }
 
 pub async fn resolve_meta(
+    children: &DownloadChildren,
     cfg: &YtDlpConfig,
     url: &str,
     cookies_path: Option<&Path>,
@@ -818,10 +819,7 @@ pub async fn resolve_meta(
 
     arg_url(&mut cmd, &url);
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| AppError::Message(format!("无法启动 yt-dlp: {e}")))?;
+    let output = run_registered_output(children, "resolve", cmd, METADATA_TIMEOUT).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -833,7 +831,7 @@ pub async fn resolve_meta(
 
     let mut meta = video_meta_from_yt_dlp_json(&v)?;
     if meta.pages.len() > 1 {
-        enrich_multi_page_formats_by_sampling(cfg, cookies_path, &mut meta).await;
+        enrich_multi_page_formats_by_sampling(children, cfg, cookies_path, &mut meta).await;
     }
     Ok(meta)
 }
@@ -845,6 +843,7 @@ pub async fn resolve_meta(
 /// larger ones probe at most `MULTI_PAGE_FORMAT_SAMPLES` (skipping page 1 when
 /// its formats are already present).
 async fn enrich_multi_page_formats_by_sampling(
+    children: &DownloadChildren,
     cfg: &YtDlpConfig,
     cookies_path: Option<&Path>,
     meta: &mut VideoMeta,
@@ -882,9 +881,10 @@ async fn enrich_multi_page_formats_by_sampling(
         let cfg = cfg.clone();
         let cookies = cookies_path.map(Path::to_path_buf);
         let permit = Arc::clone(&sem);
+        let kids: DownloadChildren = Arc::clone(children);
         handles.push(tokio::spawn(async move {
             let _permit = permit.acquire_owned().await.ok()?;
-            let formats = fetch_formats_for_url(&cfg, &page_url, cookies.as_deref()).await;
+            let formats = fetch_formats_for_url(&kids, &cfg, &page_url, cookies.as_deref()).await;
             Some((index, page_url, formats))
         }));
     }
@@ -917,8 +917,99 @@ async fn enrich_multi_page_formats_by_sampling(
     meta.formats = finalize_formats_for_pages(observed, meta.pages.len());
 }
 
+/// Hard ceiling for one-shot metadata yt-dlp runs. The main download path
+/// is user-cancellable and swept on exit; a metadata spawn used to be
+/// neither — a network sink could park it forever, and quitting leaked it.
+/// Generous against normal resolves (a single-video `-J` takes seconds).
+const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Per-part sampling runs in `enrich_multi_page_formats_by_sampling`.
+const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One-shot metadata run with the download path's lifecycle guarantees:
+/// registered in the child registry (so the exit sweep kills it instead of
+/// leaking it past quit), kill_on_drop, its own process group, and a hard
+/// timeout that kills the whole tree. Mirrors `download`'s spawn → take
+/// pipes → register → drain → reclaim → wait dance; reclaiming matters so
+/// `wait` can report the real status while the registry stays the kill
+/// surface in between.
+async fn run_registered_output(
+    children: &DownloadChildren,
+    purpose: &str,
+    mut cmd: Command,
+    timeout: std::time::Duration,
+) -> AppResult<std::process::Output> {
+    use tokio::io::AsyncReadExt as _;
+
+    static META_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = META_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let key = format!("meta:{purpose}:{seq}");
+
+    cmd.kill_on_drop(true);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Message(format!("无法启动 yt-dlp: {e}")))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Message("yt-dlp stdout unavailable".into()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Message("yt-dlp stderr unavailable".into()))?;
+
+    // Token 0: only the timeout path and the exit sweep remove this entry,
+    // both by key, so no other run can ever claim it.
+    register_child(children, &key, 0, child)?;
+
+    let mut out_buf = Vec::new();
+    let mut err_buf = Vec::new();
+    let drained = tokio::time::timeout(timeout, async {
+        let (a, b) =
+            tokio::join!(stdout.read_to_end(&mut out_buf), stderr.read_to_end(&mut err_buf));
+        a.and(b)
+    })
+    .await;
+
+    let mut child = take_child(children, &key, 0)
+        .map_err(|e| AppError::Message(format!("元数据进程已被回收: {e}")))?;
+
+    match drained {
+        Ok(Ok(_)) => {
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| AppError::Message(format!("等待 yt-dlp 退出失败: {e}")))?;
+            Ok(std::process::Output {
+                status,
+                stdout: out_buf,
+                stderr: err_buf,
+            })
+        }
+        Ok(Err(e)) => {
+            let _ = kill_child_process_tree(&mut child);
+            Err(AppError::Message(format!("读取 yt-dlp 输出失败: {e}")))
+        }
+        Err(_) => {
+            // Stuck past the ceiling: kill the whole tree (grandchildren
+            // included) before reporting — start_kill alone only reaches
+            // the direct child, and relying on kill_on_drop alone would
+            // leave the tree running until this handle's drop.
+            let _ = kill_child_process_tree(&mut child);
+            Err(AppError::Message(format!(
+                "解析超时（{} 秒），请重试",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
+
 /// Runs `yt-dlp -J` and returns the parsed format table JSON, if any.
 async fn fetch_json_for_url(
+    children: &DownloadChildren,
     cfg: &YtDlpConfig,
     url: &str,
     cookies_path: Option<&Path>,
@@ -927,7 +1018,9 @@ async fn fetch_json_for_url(
     cmd.arg("-J").arg("--no-playlist");
     arg_url(&mut cmd, url);
 
-    let output = cmd.output().await.ok()?;
+    let output = run_registered_output(children, "probe", cmd, SAMPLE_TIMEOUT)
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -935,11 +1028,12 @@ async fn fetch_json_for_url(
 }
 
 async fn fetch_formats_for_url(
+    children: &DownloadChildren,
     cfg: &YtDlpConfig,
     url: &str,
     cookies_path: Option<&Path>,
 ) -> Option<Vec<FormatOption>> {
-    fetch_json_for_url(cfg, url, cookies_path)
+    fetch_json_for_url(children, cfg, url, cookies_path)
         .await
         .map(|v| parse_formats(&v))
 }
@@ -1049,7 +1143,7 @@ pub async fn download(
     let wants_flac = audio_format == Some("flac");
     if plan.extract_audio.is_some()
         && (audio_tier_cap(format_id).is_some() || wants_flac)
-        && let Some(json) = fetch_json_for_url(cfg, &url, cookies_path).await
+        && let Some(json) = fetch_json_for_url(children, cfg, &url, cookies_path).await
     {
         if wants_flac {
             // Never upsample a lossy source into a "lossless" FLAC.
@@ -2302,6 +2396,63 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             !kill_child_process_tree(&mut child),
             "with no pid there is no tree to confirm; only start_kill remains"
         );
+    }
+
+    /// B17: a registered metadata run returns the collected output and
+    /// leaves the registry clean.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_registered_metadata_run_returns_output() {
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
+        let mut cmd = Command::new("printf");
+        cmd.arg("meta!");
+        let out = run_registered_output(&children, "test", cmd, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(std::str::from_utf8(&out.stdout).unwrap(), "meta!");
+        assert!(children.lock().unwrap().is_empty());
+    }
+
+    /// B17: while a metadata run is alive its child sits in the registry —
+    /// that is what makes the exit sweep kill it instead of leaking it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_metadata_run_is_registered() {
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
+        let kids: DownloadChildren = Arc::clone(&children);
+        let run = tokio::spawn(async move {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("2");
+            run_registered_output(&kids, "test", cmd, std::time::Duration::from_secs(10)).await
+        });
+        let mut seen = false;
+        for _ in 0..100 {
+            if !children.lock().unwrap().is_empty() {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(seen, "the metadata child must be registered while it runs");
+        run.await.unwrap().unwrap();
+        assert!(children.lock().unwrap().is_empty());
+    }
+
+    /// B17: a stuck metadata run is killed at the timeout and reported,
+    /// with nothing left in the registry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_metadata_run_is_killed_and_reported() {
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let err =
+            run_registered_output(&children, "test", cmd, std::time::Duration::from_millis(150))
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("超时"), "got: {err}");
+        assert!(children.lock().unwrap().is_empty());
     }
 
     /// A child spawned just as the exit teardown sweeps the registry must not
