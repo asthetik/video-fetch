@@ -992,6 +992,12 @@ impl DownloadManager {
         lock_db(&self.db).list_jobs()
     }
 
+    /// The child registry shared with the one-shot metadata paths, so their
+    /// yt-dlp spawns are killed by the exit sweep like downloads are.
+    pub(crate) fn child_registry(&self) -> &DownloadChildren {
+        &self.children
+    }
+
     /// The exact recorded path for a display path the webview handed back.
     /// `None` when the string matches no recorded row, so the caller opens it
     /// as given.

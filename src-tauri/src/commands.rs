@@ -687,7 +687,14 @@ pub async fn resolve_url(
             let ytdlp_cfg = state.ytdlp.clone();
             let ytdlp_url = url.clone();
             let cookies_path = cookies.clone();
-            match ytdlp::resolve_meta(&ytdlp_cfg, &ytdlp_url, cookies_path.as_deref()).await {
+            match ytdlp::resolve_meta(
+                state.downloads.child_registry(),
+                &ytdlp_cfg,
+                &ytdlp_url,
+                cookies_path.as_deref(),
+            )
+            .await
+            {
                 Ok(ytdlp_meta) => match view_meta {
                     Some(view) => bilibili_view::merge_view_with_formats(view, ytdlp_meta),
                     None => ytdlp_meta,
@@ -806,6 +813,7 @@ pub async fn space_list_videos(
             let start = (page - 1) * size + 1;
             let end = page * size;
             crate::space::fetch_via_ytdlp(
+                state.downloads.child_registry(),
                 &state.ytdlp.yt_dlp_path,
                 mid,
                 start,
