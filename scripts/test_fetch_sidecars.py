@@ -1173,12 +1173,17 @@ class TestPinCoverage(unittest.TestCase):
     def test_all_platforms_are_pinned(self) -> None:
         pins = load_pins()
         downloads = pins["downloads"]
-        for system, machine, version in (
-            ("Darwin", "arm64", TAG),
-            ("Linux", "x86_64", TAG),
-            ("Linux", "aarch64", TAG),
-            ("Windows", "AMD64", TAG),
-            ("Windows", "ARM64", TAG),
+        # The release under test is whatever requirements-sidecars.txt pins:
+        # a Dependabot bump updates that file, and --update-pins must then
+        # have recorded the matching keys (a hard-coded tag would let a bump
+        # ship without its pins).
+        version = load_ytdlp_version()
+        for system, machine in (
+            ("Darwin", "arm64"),
+            ("Linux", "x86_64"),
+            ("Linux", "aarch64"),
+            ("Windows", "AMD64"),
+            ("Windows", "ARM64"),
         ):
             with self.subTest(platform=f"{system}/{machine}"):
                 # The pin key is the downloaded URL's basename plus the release
@@ -1227,14 +1232,15 @@ class TestPinCoverage(unittest.TestCase):
         # yt-dlp's equivalent is this guard: only the pinned release's keys.
         downloads = load_pins()["downloads"]
         ytdlp_keys = {name for name in downloads if name.startswith("yt-dlp")}
+        version = load_ytdlp_version()
         expected = {
             ytdlp_pin_key(pin_key_from_url(ytdlp_download_url(system, machine, version)), version)
-            for system, machine, version in (
-                ("Darwin", "arm64", TAG),
-                ("Linux", "x86_64", TAG),
-                ("Linux", "aarch64", TAG),
-                ("Windows", "AMD64", TAG),
-                ("Windows", "ARM64", TAG),
+            for system, machine in (
+                ("Darwin", "arm64"),
+                ("Linux", "x86_64"),
+                ("Linux", "aarch64"),
+                ("Windows", "AMD64"),
+                ("Windows", "ARM64"),
             )
         }
         self.assertEqual(ytdlp_keys, expected, "superseded yt-dlp pin keys linger")
