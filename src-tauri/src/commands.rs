@@ -1081,9 +1081,11 @@ pub(crate) fn batch_item_to_job(
 /// Async so the per-item DB/disk loop never blocks the main thread on large batches.
 #[tauri::command]
 pub async fn space_enqueue_batch(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     args: SpaceBatchArgs,
 ) -> AppResult<models::BatchEnqueueResult> {
+    ensure_main_window_label(window.label())?;
     let audio_format = normalize_audio_format(args.audio_format.clone())?;
     validate_space_batch_args(&args.items, &args.format_id, audio_format.as_deref())?;
     let settings = state
@@ -1155,7 +1157,11 @@ pub async fn cancel_all_jobs(state: State<'_, AppState>) -> AppResult<CancelAllR
 }
 
 #[tauri::command]
-pub fn clear_finished_jobs(state: State<'_, AppState>) -> AppResult<ClearFinishedResult> {
+pub fn clear_finished_jobs(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<ClearFinishedResult> {
+    ensure_main_window_label(window.label())?;
     clear_finished_jobs_impl(&state)
 }
 
@@ -1175,7 +1181,12 @@ fn clear_finished_jobs_impl(state: &AppState) -> AppResult<ClearFinishedResult> 
 }
 
 #[tauri::command]
-pub fn retry_job(state: State<'_, AppState>, id: String) -> AppResult<DownloadJob> {
+pub fn retry_job(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<DownloadJob> {
+    ensure_main_window_label(window.label())?;
     retry_job_impl(&state, &id)
 }
 
@@ -2418,7 +2429,7 @@ mod tests {
             F: AsyncFn(A, B, C) -> T,
         {
         }
-        assert_async2(space_enqueue_batch);
+        assert_async3(space_enqueue_batch);
         // The three-argument forms take the injected `window` guard param
         // (see ensure_main_window_label).
         assert_async3(enqueue_download);
@@ -2466,8 +2477,8 @@ mod tests {
         let src = include_str!("commands.rs");
         assert_eq!(
             src.matches(&needle).count(),
-            6,
-            "exactly six commands must guard on the caller's window label"
+            9,
+            "exactly nine commands must guard on the caller's window label"
         );
     }
 
