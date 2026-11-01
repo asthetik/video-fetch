@@ -2979,6 +2979,7 @@ mod tests {
     /// direct-child fallback was possible — must not wipe the work dir
     /// while a grandchild may still be writing into it; the startup orphan
     /// sweep takes it instead.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_keeps_the_work_dir_when_the_kill_degrades() {
         let dir = tempfile::tempdir().unwrap();
@@ -3020,6 +3021,7 @@ mod tests {
     }
 
     /// B18: a confirmed tree kill wipes the work dir immediately, as before.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_wipes_the_work_dir_after_a_confirmed_kill() {
         let dir = tempfile::tempdir().unwrap();
