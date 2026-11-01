@@ -2834,7 +2834,10 @@ mod tests {
             children.lock().unwrap().contains_key(&job.id),
             "the successor's registration must survive the panic cleanup"
         );
-        assert!(kill_download(&children, &job.id).await);
+        assert_eq!(
+            kill_download(&children, &job.id).await,
+            ytdlp::KillOutcome::TreeConfirmed
+        );
     }
 
     /// The panic kill runs in the stop-disposition branches too, not only the
