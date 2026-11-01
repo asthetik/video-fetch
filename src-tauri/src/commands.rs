@@ -242,6 +242,17 @@ fn warn_cmd(scope: &str, e: &AppError) {
     );
 }
 
+/// Cookie import accepts only Netscape-format `.txt` files; every other
+/// extension is rejected before the file is read. IPC input is untrusted,
+/// so the file dialog's filter cannot be the only enforcement.
+fn validate_cookies_import_path(path: &str) -> Result<(), String> {
+    if path.to_ascii_lowercase().ends_with(".txt") {
+        Ok(())
+    } else {
+        Err("仅支持导入 .txt 格式的 cookies 文件".into())
+    }
+}
+
 fn normalize_audio_format(value: Option<String>) -> AppResult<Option<String>> {
     let Some(raw) = value else {
         return Ok(None);
@@ -1350,6 +1361,9 @@ pub fn import_cookies_path(
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<AuthStatus> {
+    validate_cookies_import_path(&path)
+        .map_err(AppError::Message)
+        .inspect_err(|e| warn_cmd("auth: 导入 Cookie 失败", e))?;
     let status = state
         .auth
         .import_cookies_file(Path::new(&path))
@@ -2371,6 +2385,15 @@ mod tests {
     fn stale_request_id_is_not_current() {
         assert!(is_resolve_current(2, 2));
         assert!(!is_resolve_current(2, 1));
+    }
+
+    #[test]
+    fn cookies_import_accepts_txt_only() {
+        assert!(validate_cookies_import_path(r"C:\x\cookies.txt").is_ok());
+        assert!(validate_cookies_import_path("/tmp/COOKIES.TXT").is_ok());
+        assert!(validate_cookies_import_path("/tmp/cookies.json").is_err());
+        assert!(validate_cookies_import_path("cookies").is_err());
+        assert!(validate_cookies_import_path("").is_err());
     }
 
     #[test]
