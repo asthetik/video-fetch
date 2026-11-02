@@ -35,7 +35,7 @@ Video Fetch（影取）在发版包中捆绑以下独立可执行文件与字体
 | 常量 | 当前取值 |
 |------|---------|
 | `FFMPEG_VERSION` | `9.0.2` |
-| `FFMPEG_BTBN_TAG` | `autobuild-2026-10-31-12-59` |
+| `FFMPEG_BTBN_TAG` | `autobuild-2026-11-01-12-49` |
 | `FFMPEG_MACOS_BUILD` | `1789931890_9.0.2` |
 | `FFMPEG_MACOS_SIGNER` | `Martin Riedl` |
 | `FFMPEG_MACOS_TEAM_ID` | `KU3N25YGLU` |
