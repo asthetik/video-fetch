@@ -2544,17 +2544,29 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     /// A child that closes both pipes but never exits parks the metadata
     /// request forever: the timeout only bounds the drain, and the wait
     /// after EOF had no bound at all. The grace kills the tree and reports.
+    /// The hazard is the hung request itself — take_child removes the
+    /// registry entry before the wait, so no slot is held while it hangs.
     ///
-    /// Value: protects=run_registered_output's post-drain wait bound;
-    /// fails_when=the grace is missing — the request hangs holding a
-    /// registry slot; why_new=existing tests cover drain-timeout and
-    /// registration, never the wait-after-EOF; seam=none
+    /// Value: protects=run_registered_output's post-drain wait bound and its
+    /// tree kill; fails_when=the grace is missing (the request never
+    /// returns) or its kill is dropped (the tree outlives the call);
+    /// why_new=existing tests cover drain-timeout and registration, never
+    /// the wait-after-EOF; seam=none
     #[cfg(unix)]
     #[tokio::test]
     async fn a_child_that_closes_pipes_but_hangs_is_killed_after_the_grace() {
         let children: DownloadChildren = Arc::new(ChildRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat = dir.path().join("heartbeat");
+        // Closes both pipes, then a GRANDCHILD keeps appending: dropping the
+        // handle alone kills only the direct child (kill_on_drop), so a
+        // growing file after the call proves the grace arm failed to kill
+        // the whole tree.
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("exec 1>&- 2>&-; sleep 30");
+        cmd.arg("-c").arg(format!(
+            "exec 1>&- 2>&-; sh -c 'while :; do echo x >> {hb}; sleep 0.1; done' & while :; do sleep 0.1; done",
+            hb = heartbeat.display()
+        ));
         let started = std::time::Instant::now();
         let err = run_registered_output(
             &children,
@@ -2567,9 +2579,14 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         .unwrap_err();
         assert!(err.to_string().contains("未退出"), "got: {err}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        assert!(
-            children.lock().unwrap().is_empty(),
-            "the registry slot must be reclaimed"
+        // take_child already removed the registry entry before the wait, so
+        // emptiness proves nothing; the heartbeat is what pins the kill.
+        let size_after = std::fs::metadata(&heartbeat).map(|m| m.len()).unwrap_or(0);
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let size_later = std::fs::metadata(&heartbeat).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(
+            size_after, size_later,
+            "the grace arm must kill the process tree, not just return"
         );
     }
 
