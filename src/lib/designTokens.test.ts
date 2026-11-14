@@ -18,10 +18,18 @@ test("token sheet defines the panel radius tier and CJK line height", () => {
 
 test("empty-state copy uses the UI font, not the display font", () => {
   const uses = pages.match(/var\(--font-display\)/g)?.length ?? 0;
-  assert.equal(uses, 1, "only .brand-title (the wordmark) may use the display font");
+  assert.equal(uses, 0, "the display font is gone; nothing may reference --font-display");
 });
 
 test("the modal dialog lands on the panel radius tier", () => {
   const modal = components.match(/^\.modal\s*\{[^}]*\}/m)?.[0] ?? "";
   assert.match(modal, /border-radius:\s*var\(--radius-panel\);/);
+});
+
+test("the display webfont is gone repo-wide", () => {
+  assert.doesNotMatch(tokens, /Smiley Sans/, "DESIGN.md records the webfont as removed");
+  assert.doesNotMatch(tokens, /--font-display:/);
+  for (const sheet of [pages, components, read("styles/base.css"), read("styles/shell.css")]) {
+    assert.doesNotMatch(sheet, /var\(--font-display\)/);
+  }
 });

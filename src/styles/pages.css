@@ -340,9 +340,9 @@
   color: var(--accent);
 }
 
-/* Brand wordmark (display layer = Smiley Sans). */
+/* Brand wordmark. */
 .brand-title {
-  font-family: var(--font-display);
+  font-family: var(--font-ui);
   font-size: 1.25rem;
   font-weight: 400;
   line-height: 1.3;

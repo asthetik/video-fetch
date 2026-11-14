@@ -1,10 +1,4 @@
 /* src/styles/tokens.css */
-@font-face {
-  font-family: "Smiley Sans";
-  src: url("../assets/fonts/SmileySans-Oblique.ttf") format("truetype");
-  font-display: swap;
-}
-
 /* MiSans subsets: GB2312 full set + app UI chars, one file per used weight. */
 @font-face {
   font-family: "MiSans";
@@ -37,7 +31,6 @@
 :root {
   color-scheme: light;
   --font-ui: "MiSans", system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
-  --font-display: "Smiley Sans", system-ui, -apple-system, "PingFang SC", sans-serif;
   --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-human: "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", serif;
   font-family: var(--font-ui);
