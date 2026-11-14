@@ -6531,6 +6531,14 @@ mod tests {
                 .is_none(),
             "the poisoned map must not swallow the handle removal"
         );
+        // Abort drops the task's future asynchronously; wait for the probe to
+        // flip instead of asserting straight off the cancel call.
+        for _ in 0..200 {
+            if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(
             aborted.load(std::sync::atomic::Ordering::SeqCst),
             "cancel must abort the runner, not just drop the handle"
