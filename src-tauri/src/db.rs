@@ -56,6 +56,11 @@ pub(crate) const MISSING_JOB_MESSAGE: &str = "该任务已不存在，请刷新�
 impl Db {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
+        // WAL keeps every status write from paying the rollback journal's
+        // create+fsync+delete cycle; NORMAL sync is durable enough for a job
+        // queue whose startup recovery reconciles interrupted rows anyway.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
         // Lightweight migration for older databases. Fresh DBs already carry the
         // column from SCHEMA (a blind ALTER would fail with "duplicate column"),
@@ -476,6 +481,25 @@ fn status_from_str(s: &str) -> rusqlite::Result<JobStatus> {
 
 #[cfg(test)]
 mod tests {
+    /// WAL keeps every status write from paying the rollback journal's
+    /// create+fsync+delete cycle; all access is serialized behind one
+    /// Mutex<Db>, so the journal choice is the only write-amplification knob.
+    ///
+    /// Value: protects=Db::open's journal/sync pragmas; fails_when=the
+    /// connection keeps the default rollback journal; why_new=the hot path
+    /// (progress ticks, batch enqueue) was unbounded write amplification;
+    /// seam=none
+    #[test]
+    fn db_opens_in_wal_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        let mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
     use super::*;
     use crate::models::{JobConflict, JobStatus, VideoMeta};
 
