@@ -136,7 +136,11 @@ fn find_work_product_pass(work: &Path, media_only: bool) -> Option<PathBuf> {
             if !name.ends_with(".part")
                 && !name.ends_with(".ytdl")
                 && !is_merge_temp
-                && path.metadata().ok()?.len() > 0
+                // A candidate that vanished or turned unreadable between
+            // is_file() and metadata() is skipped, not fatal: aborting the
+            // whole pass here would strand a finished product (the same skip
+            // rule entries.flatten() applies one line up).
+            && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
                 && (!media_only || has_output_ext(&name))
             {
                 return Some(path);
@@ -498,6 +502,31 @@ pub(crate) fn path_from_record_bytes(bytes: &[u8]) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Pins the per-entry failure isolation shape of find_work_product_pass:
+    /// part/ytdl/temp entries are skipped, the first real product wins.
+    /// The metadata-failure branch itself (is_file true, metadata failing)
+    /// needs a TOCTOU or an AV handle and is not portable to force — it is
+    /// covered by review of the skip direction, not by this test.
+    ///
+    /// Value: protects=find_work_product_pass's filter set and skip-not-
+    /// abort shape; fails_when=a filter regresses or a skip becomes fatal;
+    /// why_new=no test pinned the filter set before; seam=none
+    #[test]
+    fn find_work_product_skips_nonproduct_entries_and_finds_the_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path();
+        fs::write(work.join("video.mp4.part"), b"fragment").unwrap();
+        fs::write(work.join("state.ytdl"), b"{}").unwrap();
+        fs::write(work.join("merge.temp.mp4"), b"half").unwrap();
+        fs::write(work.join("real.mp4"), b"video").unwrap();
+        let found = find_work_product(work).unwrap();
+        assert_eq!(
+            found.file_name().unwrap(),
+            "real.mp4",
+            "part/ytdl/temp entries must be skipped, not fatal"
+        );
+    }
 
     /// The perms helpers are the only thing keeping a private file or
     /// directory out of other users' reach. The mode is read back after a
