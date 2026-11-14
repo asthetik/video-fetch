@@ -131,6 +131,15 @@ pub(crate) fn lock_tokens(
 /// next pause needs for its immediate abort.
 pub(crate) type RunningTasks = Arc<Mutex<HashMap<String, (u64, JoinHandle<()>)>>>;
 
+/// Same recovery rule as the other plain-data locks: the map holds ids and
+/// handles whose data survives a panic, so a poisoned lock must not disarm
+/// the immediate abort on every later cancel/pause.
+pub(crate) fn lock_running_tasks(
+    tasks: &RunningTasks,
+) -> std::sync::MutexGuard<'_, HashMap<String, (u64, JoinHandle<()>)>> {
+    tasks.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// True while `token` is still the token the job's row belongs to.
 pub(crate) fn owns_job(tokens: &RunnerTokens, job_id: &str, token: u64) -> bool {
     lock_tokens(tokens).get(job_id).copied() == Some(token)
@@ -647,9 +656,7 @@ impl DownloadManager {
     async fn cancel_marked(&self, id: &str) -> AppResult<DownloadJob> {
         let kill_outcome = kill_download(&self.children, id).await;
 
-        if let Ok(mut tasks) = self.running_tasks.lock()
-            && let Some((_, handle)) = tasks.remove(id)
-        {
+        if let Some((_, handle)) = lock_running_tasks(&self.running_tasks).remove(id) {
             handle.abort();
         }
 
@@ -823,9 +830,7 @@ impl DownloadManager {
 
     async fn pause_marked(&self, id: &str) -> AppResult<DownloadJob> {
         let _ = kill_download(&self.children, id).await;
-        if let Ok(mut tasks) = self.running_tasks.lock()
-            && let Some((_, handle)) = tasks.remove(id)
-        {
+        if let Some((_, handle)) = lock_running_tasks(&self.running_tasks).remove(id) {
             handle.abort();
         }
 
@@ -954,10 +959,10 @@ impl DownloadManager {
     /// A runner parked on the semaphore has no child to kill and no checkpoint
     /// to reach, so this is the only way to retire it.
     fn abort_runners(&self) {
-        let handles: Vec<JoinHandle<()>> = match self.running_tasks.lock() {
-            Ok(mut tasks) => tasks.drain().map(|(_, (_, handle))| handle).collect(),
-            Err(_) => return,
-        };
+        let handles: Vec<JoinHandle<()>> = lock_running_tasks(&self.running_tasks)
+            .drain()
+            .map(|(_, (_, handle))| handle)
+            .collect();
         for handle in handles {
             handle.abort();
         }
@@ -1221,7 +1226,8 @@ impl DownloadManager {
             }
         });
 
-        if let Ok(mut tasks) = self.running_tasks.lock() {
+        {
+            let mut tasks = lock_running_tasks(&self.running_tasks);
             // A runner that finishes before this insert re-registers a dead
             // handle here (its unregister ran first); the stale entry then
             // only clears on the job's next stop. The window is inherent to
@@ -1235,8 +1241,8 @@ impl DownloadManager {
     /// runner's: a superseded runner must not unregister the handle its
     /// successor needs for the next pause's immediate abort.
     fn unregister_task(&self, job_id: &str, token: u64) {
-        if let Ok(mut tasks) = self.running_tasks.lock()
-            && let Some((owner, _)) = tasks.get(job_id)
+        let mut tasks = lock_running_tasks(&self.running_tasks);
+        if let Some((owner, _)) = tasks.get(job_id)
             && *owner == token
         {
             tasks.remove(job_id);
@@ -1275,8 +1281,12 @@ impl DownloadManager {
         // try_fail_job/emit run after the lock is released.
         let mut fail_msg: Option<String> = None;
         let mut start: Option<DownloadJob> = None;
-        match self.db.lock() {
-            Ok(db) => match db.get_job(&job_id) {
+        // Poison recovery matches lock_db's rule: resume/retry wrote this
+        // Pending row through a recovered lock, and the runner dying on the
+        // same poison is exactly what that recovery exists to prevent.
+        {
+            let db = lock_db(&self.db);
+            match db.get_job(&job_id) {
                 Ok(job) => {
                     // The start section is the last gate before a transfer: a
                     // runner a pause (or any later command) superseded must not
@@ -1303,8 +1313,7 @@ impl DownloadManager {
                     }
                 }
                 Err(e) => fail_msg = Some(e.to_string()),
-            },
-            Err(e) => fail_msg = Some(e.to_string()),
+            }
         }
         if let Some(msg) = fail_msg {
             self.try_fail_job(&job_id, token, &msg);
@@ -1357,9 +1366,8 @@ impl DownloadManager {
         let on_progress = {
             let job_id = job_id.clone();
             Box::new(move |update: ProgressUpdate| {
-                if let Ok(db) = db.lock()
-                    && let Ok(mut current) = db.get_job(&job_id)
-                {
+                let db = db.lock().unwrap_or_else(|e| e.into_inner());
+                if let Ok(mut current) = db.get_job(&job_id) {
                     // The stop and ownership checks belong in the same critical
                     // section as the write they guard (the start section's
                     // rule): a pause/resume completing between an earlier check
@@ -6359,6 +6367,86 @@ mod tests {
         );
     }
 
+    /// A fresh runner must not die on a poisoned db lock: resume/retry wrote
+    /// its Pending row through lock_db recovery, and the start section dying
+    /// on the same poison is exactly what lock_db exists to prevent.
+    ///
+    /// Value: protects=run_job's start-section poison recovery; fails_when=
+    /// the bare self.db.lock() turns the poison into a Failed row;
+    /// why_new=the existing poisoned-lock tests cover user commands, never
+    /// the runner start; seam=db lock poisoning
+    #[tokio::test]
+    async fn a_runner_starting_on_a_poisoned_db_lock_still_delivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let mut job = sample_job("job-poison");
+        job.status = JobStatus::Pending;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+        // test_settings pins save_dir to the tempdir itself; pre-place a
+        // finished product so the runner takes the recovery path to Done.
+        let work = fsutil::work_dir_for(&dir.path().join("work"), "job-poison");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("demo.mp4"), b"video").unwrap();
+
+        poison_db(&manager);
+
+        let token = manager.mint_runner_token("job-poison");
+        manager.run_job("job-poison".into(), token).await;
+
+        let j = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == "job-poison")
+            .unwrap();
+        assert_eq!(j.status, JobStatus::Done, "poison must not fail the runner");
+    }
+
+    /// A poisoned task-map lock must not disarm cancel's immediate abort:
+    /// the map holds plain ids and handles, so recovering beats skipping.
+    ///
+    /// Value: protects=cancel/pause's handle removal on a poisoned
+    /// running_tasks lock; fails_when=the Ok-only lock skips remove+abort
+    /// forever; why_new=all five running_tasks sites are Ok-only with no
+    /// into_inner recovery; seam=lock poisoning + a registered handle
+    #[tokio::test]
+    async fn cancel_aborts_the_runner_even_after_the_task_map_lock_was_poisoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let mut job = sample_job("job-abort");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+        let token = manager.mint_runner_token("job-abort");
+        let handle = tauri::async_runtime::spawn(std::future::pending::<()>());
+        manager
+            .running_tasks
+            .lock()
+            .unwrap()
+            .insert("job-abort".into(), (token, handle));
+
+        poison_running_tasks(&manager);
+
+        manager.cancel("job-abort").await.unwrap();
+
+        assert!(
+            manager
+                .running_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get("job-abort")
+                .is_none(),
+            "the poisoned map must not swallow the handle removal"
+        );
+    }
+
     /// A relocation that cannot land has to name both ends: the destination the
     /// user must deal with, and the work dir holding the finished download —
     /// nothing in the UI ever shows that directory, so a bare "destination
@@ -6806,6 +6894,25 @@ mod tests {
         std::panic::set_hook(hook);
         assert!(panicked.is_err());
         assert!(manager.db.lock().is_err(), "the db lock must be poisoned");
+    }
+
+    /// Same poison for the task map: plain ids and handles, sound data, so
+    /// recovery (not skipping) is the right reaction there too.
+    fn poison_running_tasks(manager: &DownloadManager) {
+        let _serialized = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tasks = Arc::clone(&manager.running_tasks);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = tasks.lock().unwrap();
+            panic!("poison the task map for the failure-path test");
+        }));
+        std::panic::set_hook(hook);
+        assert!(panicked.is_err());
+        assert!(
+            manager.running_tasks.lock().is_err(),
+            "the task map lock must be poisoned"
+        );
     }
 
     /// Capture tracing output emitted on this thread while `f` runs, so a test
