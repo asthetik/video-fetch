@@ -83,12 +83,38 @@ pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     // Written beside the real file and renamed into place: `fs::write` truncates
     // first, so an interrupted save left a settings.json that every later launch
     // failed to parse — before the window ever opened.
-    let tmp = path.with_extension("json.tmp");
+    // A unique staging name, created with create_new — the same rule as
+    // auth.rs: a fixed name plus create+truncate lets a planted symlink route
+    // the write into another file.
+    // A unique staging name, created with create_new — the same rule as
+    // auth.rs: a fixed name plus create+truncate lets a planted symlink route
+    // the write into another file.
+    let tmp = {
+        let Some(name) = path.file_name() else {
+            return Err(AppError::Message("settings 路径无文件名".into()));
+        };
+        let mut tmp_name = name.to_os_string();
+        tmp_name.push(format!(".{}.tmp", crate::fsutil::staging_suffix()));
+        path.with_file_name(tmp_name)
+    };
     let write = (|| -> AppResult<()> {
-        let mut file = fs::File::create(&tmp)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp)?;
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
         fs::rename(&tmp, &path)?;
+        // The rename is only durable once the directory entry is on disk;
+        // without this a power loss can drop the last acknowledged save
+        // (auth.rs pays the same cost for the cookie jar). Best-effort:
+        // filesystems that cannot flush a directory are ignored, same as
+        // the delivery path.
+        crate::fsutil::sync_parent_dir(&path);
         Ok(())
     })();
     if write.is_err() {
@@ -151,6 +177,40 @@ pub fn sanitize_settings(old: &AppSettings, mut next: AppSettings) -> Result<App
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A planted symlink at the staging name must never be followed — the
+    /// exact threat auth.rs documents and guards with create_new. With the
+    /// fixed json.tmp name plus create+truncate, the save wrote through the
+    /// symlink into the victim file.
+    ///
+    /// Value: protects=save_settings' staging hardening; fails_when=the
+    /// temp file uses a fixed name with create+truncate; why_new=settings
+    /// is the same directory and pattern as auth.rs but unguarded;
+    /// seam=unix symlink
+    #[cfg(unix)]
+    #[test]
+    fn save_settings_does_not_follow_a_planted_symlink_at_the_staging_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_dir = dir.path().join("app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, "precious").unwrap();
+
+        let fixed_tmp = app_dir.join("settings.json.tmp");
+        std::os::unix::fs::symlink(&victim, &fixed_tmp).unwrap();
+
+        save_settings(&app_dir, &AppSettings::default()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "precious",
+            "a planted symlink must never be followed"
+        );
+        assert!(
+            settings_path(&app_dir).is_file(),
+            "the save itself must land"
+        );
+    }
 
     /// A truncated write used to brick startup: `setup` propagates the parse
     /// error, so every launch died on the same file and the only way out was
