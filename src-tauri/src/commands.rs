@@ -3282,7 +3282,10 @@ mod restart_cookie_tests {
     }
 
     async fn wait_for_status(state: &AppState, id: &str, status: JobStatus) {
-        for _ in 0..200 {
+        // 6 s, not 2 s: a loaded Windows runner once took the resume-all test
+        // past a 2 s budget (2 extra runner spawns + DB writes) and failed a
+        // PR that touched none of it.
+        for _ in 0..600 {
             if let Ok(jobs) = state.downloads.list()
                 && let Some(job) = jobs.iter().find(|j| j.id == id)
                 && job.status == status
@@ -3295,7 +3298,9 @@ mod restart_cookie_tests {
     }
 
     async fn wait_for_runs(seen: &Arc<Mutex<Vec<bool>>>, count: usize) {
-        for _ in 0..200 {
+        // Same 6 s budget as wait_for_status: four sequential mock runs on a
+        // busy Windows runner did not fit in 2 s.
+        for _ in 0..600 {
             if seen.lock().unwrap().len() >= count {
                 return;
             }
