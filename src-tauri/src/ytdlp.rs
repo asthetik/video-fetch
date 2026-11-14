@@ -819,7 +819,8 @@ pub async fn resolve_meta(
 
     arg_url(&mut cmd, &url);
 
-    let output = run_registered_output(children, "resolve", cmd, METADATA_TIMEOUT).await?;
+    let output =
+        run_registered_output(children, "resolve", cmd, METADATA_TIMEOUT, WAIT_EXIT_GRACE).await?;
 
     if !output.status.success() {
         return Err(resolve_failed_message(&output.stderr));
@@ -959,6 +960,9 @@ pub(crate) const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// Light one-shot runs: per-part format sampling and flat space listings,
 /// where one request answers the whole call.
 pub(crate) const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bound on the final `wait()` after both pipes hit EOF: a child that closed
+/// its output but keeps hanging would otherwise park the request forever.
+pub(crate) const WAIT_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// One-shot metadata run with the download path's lifecycle guarantees:
 /// registered in the child registry (so the exit sweep kills it instead of
@@ -972,6 +976,7 @@ pub(crate) async fn run_registered_output(
     purpose: &str,
     mut cmd: Command,
     timeout: std::time::Duration,
+    wait_grace: std::time::Duration,
 ) -> AppResult<std::process::Output> {
     use tokio::io::AsyncReadExt as _;
 
@@ -1016,15 +1021,26 @@ pub(crate) async fn run_registered_output(
 
     match drained {
         Ok(Ok(_)) => {
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| AppError::Message(format!("等待 yt-dlp 退出失败: {e}")))?;
-            Ok(std::process::Output {
-                status,
-                stdout: out_buf,
-                stderr: err_buf,
-            })
+            let waited = tokio::time::timeout(wait_grace, child.wait()).await;
+            match waited {
+                Ok(status) => {
+                    let status = status
+                        .map_err(|e| AppError::Message(format!("等待 yt-dlp 退出失败: {e}")))?;
+                    Ok(std::process::Output {
+                        status,
+                        stdout: out_buf,
+                        stderr: err_buf,
+                    })
+                }
+                Err(_) => {
+                    // Pipes closed but the process never exited: bounded
+                    // here instead of parking the request forever.
+                    let _ = kill_child_process_tree(&mut child);
+                    Err(AppError::Message(
+                        "yt-dlp 关闭输出后未退出，已终止（请重试）".into(),
+                    ))
+                }
+            }
         }
         Ok(Err(e)) => {
             let _ = kill_child_process_tree(&mut child);
@@ -1055,7 +1071,7 @@ async fn fetch_json_for_url(
     cmd.arg("-J").arg("--no-playlist");
     arg_url(&mut cmd, url);
 
-    let output = run_registered_output(children, "probe", cmd, SAMPLE_TIMEOUT)
+    let output = run_registered_output(children, "probe", cmd, SAMPLE_TIMEOUT, WAIT_EXIT_GRACE)
         .await
         .ok()?;
     if !output.status.success() {
@@ -2443,9 +2459,15 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         let children: DownloadChildren = Arc::new(ChildRegistry::new());
         let mut cmd = Command::new("printf");
         cmd.arg("meta!");
-        let out = run_registered_output(&children, "test", cmd, std::time::Duration::from_secs(5))
-            .await
-            .unwrap();
+        let out = run_registered_output(
+            &children,
+            "test",
+            cmd,
+            std::time::Duration::from_secs(5),
+            WAIT_EXIT_GRACE,
+        )
+        .await
+        .unwrap();
         assert!(out.status.success());
         assert_eq!(std::str::from_utf8(&out.stdout).unwrap(), "meta!");
         assert!(children.lock().unwrap().is_empty());
@@ -2461,7 +2483,14 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         let run = tokio::spawn(async move {
             let mut cmd = Command::new("sleep");
             cmd.arg("2");
-            run_registered_output(&kids, "test", cmd, std::time::Duration::from_secs(10)).await
+            run_registered_output(
+                &kids,
+                "test",
+                cmd,
+                std::time::Duration::from_secs(10),
+                WAIT_EXIT_GRACE,
+            )
+            .await
         });
         let mut seen = false;
         for _ in 0..100 {
@@ -2512,6 +2541,38 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(msg.starts_with("yt-dlp 解析失败"));
     }
 
+    /// A child that closes both pipes but never exits parks the metadata
+    /// request forever: the timeout only bounds the drain, and the wait
+    /// after EOF had no bound at all. The grace kills the tree and reports.
+    ///
+    /// Value: protects=run_registered_output's post-drain wait bound;
+    /// fails_when=the grace is missing — the request hangs holding a
+    /// registry slot; why_new=existing tests cover drain-timeout and
+    /// registration, never the wait-after-EOF; seam=none
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_closes_pipes_but_hangs_is_killed_after_the_grace() {
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec 1>&- 2>&-; sleep 30");
+        let started = std::time::Instant::now();
+        let err = run_registered_output(
+            &children,
+            "test",
+            cmd,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("未退出"), "got: {err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            children.lock().unwrap().is_empty(),
+            "the registry slot must be reclaimed"
+        );
+    }
+
     /// B17: a stuck metadata run is killed at the timeout and reported,
     /// with nothing left in the registry.
     #[cfg(unix)]
@@ -2525,6 +2586,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
             "test",
             cmd,
             std::time::Duration::from_millis(150),
+            WAIT_EXIT_GRACE,
         )
         .await
         .unwrap_err();
