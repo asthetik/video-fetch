@@ -822,8 +822,7 @@ pub async fn resolve_meta(
     let output = run_registered_output(children, "resolve", cmd, METADATA_TIMEOUT).await?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Message(format!("yt-dlp 解析失败: {stderr}")));
+        return Err(resolve_failed_message(&output.stderr));
     }
 
     let v: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -834,6 +833,16 @@ pub async fn resolve_meta(
         enrich_multi_page_formats_by_sampling(children, cfg, cookies_path, &mut meta).await?;
     }
     Ok(meta)
+}
+
+/// The resolve failure message carries only the tail of yt-dlp's stderr —
+/// the same 4 KiB bound the download path keeps — so a chatty failure (pages
+/// of WARNINGs before the fatal line) cannot ship megabytes through toasts,
+/// the activity log and IPC payloads.
+fn resolve_failed_message(stderr_bytes: &[u8]) -> AppError {
+    let mut stderr = String::from_utf8_lossy(stderr_bytes).into_owned();
+    trim_stderr_tail(&mut stderr, 4096);
+    AppError::Message(format!("yt-dlp 解析失败: {stderr}"))
 }
 
 /// Probe additional parts when playlist `-J` only filled formats for early entries.
@@ -2483,6 +2492,24 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(all_probes_failed_error(2, 3, 3).is_none());
         // Nothing was attempted: not this guard's case.
         assert!(all_probes_failed_error(0, 0, 0).is_none());
+    }
+
+    /// The resolve failure message must carry only the tail of yt-dlp's
+    /// stderr — the same bound the download path keeps — so a chatty -J
+    /// failure cannot ship megabytes through toasts, the activity log and
+    /// IPC payloads.
+    ///
+    /// Value: protects=resolve_failed_message's tail bound; fails_when=the
+    /// full stderr is embedded; why_new=the download path bounds its tail
+    /// (trim_stderr_tail) but resolve never did; seam=none
+    #[test]
+    fn resolve_failed_message_keeps_only_the_tail() {
+        let mut noise = vec![b'x'; 512 * 1024];
+        noise.extend_from_slice(b"TAIL-MARKER");
+        let msg = resolve_failed_message(&noise).to_string();
+        assert!(msg.len() < 8 * 1024, "got {} bytes", msg.len());
+        assert!(msg.ends_with("TAIL-MARKER"), "the tail must survive");
+        assert!(msg.starts_with("yt-dlp 解析失败"));
     }
 
     /// B17: a stuck metadata run is killed at the timeout and reported,
