@@ -3143,7 +3143,11 @@ mod tests {
             db.insert_job(&done).unwrap();
         }
 
-        let mock = Arc::new(MockDownloader::slow_success(800));
+        // A delay far beyond the test's lifetime: neither job may complete on
+        // its own, so both are active whenever cancel_all runs (a 40 ms sleep
+        // stretched by a starved Windows runner once let one finish first and
+        // cancelled==1).
+        let mock = Arc::new(MockDownloader::slow_success(60_000));
         let (manager, _rx) = test_manager(
             dir.path(),
             &dir.path().join("work"),
@@ -6527,6 +6531,14 @@ mod tests {
                 .is_none(),
             "the poisoned map must not swallow the handle removal"
         );
+        // Abort drops the task's future asynchronously; wait for the probe to
+        // flip instead of asserting straight off the cancel call.
+        for _ in 0..200 {
+            if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(
             aborted.load(std::sync::atomic::Ordering::SeqCst),
             "cancel must abort the runner, not just drop the handle"
