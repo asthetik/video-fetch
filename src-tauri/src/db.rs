@@ -57,10 +57,23 @@ impl Db {
     pub fn open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
         // WAL keeps every status write from paying the rollback journal's
-        // create+fsync+delete cycle; NORMAL sync is durable enough for a job
-        // queue whose startup recovery reconciles interrupted rows anyway.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // create+fsync+delete cycle. synchronous=NORMAL trades the per-commit
+        // fsync for a checkpoint-level one: a process crash loses nothing
+        // (the WAL file is intact), while a power loss can drop the last
+        // acknowledged commits — startup recovery reconciles row *states*,
+        // but a lost delete or enqueue cannot be reconstructed. That is a
+        // deliberate throughput trade-off, not a guarantee.
+        //
+        // Best-effort: switching the journal rewrites the database header, so
+        // a read-only or full data directory (or a VFS without shared memory)
+        // must not turn the setting into a startup failure — the app starts
+        // either way, on SQLite's rollback journal when WAL is unavailable.
+        if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
+            tracing::warn!(target: "core", "db: 无法切换到 WAL，继续使用回滚日志: {e}");
+        }
+        if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
+            tracing::warn!(target: "core", "db: 无法设置 synchronous=NORMAL: {e}");
+        }
         conn.execute_batch(SCHEMA)?;
         // Lightweight migration for older databases. Fresh DBs already carry the
         // column from SCHEMA (a blind ALTER would fail with "duplicate column"),
@@ -489,6 +502,45 @@ mod tests {
     /// connection keeps the default rollback journal; why_new=the hot path
     /// (progress ticks, batch enqueue) was unbounded write amplification;
     /// seam=none
+    /// Switching the journal rewrites the database header: a read-only or
+    /// full data directory must not turn the upgrade into a startup failure.
+    /// The database opens, keeps SQLite's rollback journal, and the app
+    /// starts.
+    ///
+    /// Value: protects=Db::open's best-effort journal pragma; fails_when=the
+    /// pragma error is propagated and every launch dies before the window
+    /// opens; why_new=#269 made WAL a startup hard requirement;
+    /// seam=unix dir permissions
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_data_dir_still_opens_with_the_rollback_journal() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t.db");
+        // Create the schema while the directory is writable, then put the
+        // database back on the rollback journal so the WAL switch has work.
+        drop(Db::open(&db_path).unwrap());
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        }
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = Db::open(&db_path);
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = result.expect("a read-only data dir must not fail startup");
+        let mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode.to_lowercase(),
+            "delete",
+            "falls back to the rollback journal"
+        );
+    }
+
     #[test]
     fn db_opens_in_wal_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,6 +550,11 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+        let sync: i64 = db
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 1, "synchronous must be NORMAL");
     }
 
     use super::*;
