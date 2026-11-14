@@ -277,7 +277,19 @@ mod tests {
 
         assert!(save_settings(dir.path(), &AppSettings::default()).is_err());
 
-        assert!(!dir.path().join("settings.json.tmp").exists());
+        // The staging name is unique per attempt (settings.json.<suffix>.tmp),
+        // so the old fixed-name assertion could never fail: scan for any
+        // scratch file the failed save may have left behind.
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("settings.json.") && name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed save must leave no scratch file: {leftovers:?}"
+        );
     }
 
     /// The save swaps a finished temp file in rather than rewriting the real
