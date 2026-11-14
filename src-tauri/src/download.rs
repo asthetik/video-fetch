@@ -1363,9 +1363,20 @@ impl DownloadManager {
         let progress = Arc::clone(&self.progress);
         let stop_flags = Arc::clone(&self.stop_flags);
         let runner_tokens = Arc::clone(&self.runner_tokens);
+        let progress_gate: Arc<Mutex<Option<(f64, std::time::Instant)>>> =
+            Arc::new(Mutex::new(None));
         let on_progress = {
             let job_id = job_id.clone();
+            let progress_gate = Arc::clone(&progress_gate);
             Box::new(move |update: ProgressUpdate| {
+                let now = std::time::Instant::now();
+                {
+                    let mut gate = progress_gate.lock().unwrap_or_else(|e| e.into_inner());
+                    if !should_persist_progress(*gate, update.percent, now) {
+                        return;
+                    }
+                    *gate = Some((update.percent, now));
+                }
                 let db = db.lock().unwrap_or_else(|e| e.into_inner());
                 if let Ok(mut current) = db.get_job(&job_id) {
                     // The stop and ownership checks belong in the same critical
@@ -1740,6 +1751,28 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
 /// and a row stuck at Running.
 fn lock_db(db: &Mutex<Db>) -> std::sync::MutexGuard<'_, Db> {
     db.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A progress tick is persisted and emitted only when it moves the bar at
+/// least this many percentage points, or PROGRESS_MIN_INTERVAL has passed
+/// since the last persisted tick. yt-dlp reports several lines a second and
+/// every one of them used to cost a full-row read+write under the db lock
+/// plus an IPC emit.
+pub(crate) const PROGRESS_MIN_DELTA: f64 = 0.5;
+pub(crate) const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn should_persist_progress(
+    prev: Option<(f64, std::time::Instant)>,
+    pct: f64,
+    now: std::time::Instant,
+) -> bool {
+    match prev {
+        None => true,
+        Some((last_pct, last_at)) => {
+            (pct - last_pct).abs() >= PROGRESS_MIN_DELTA
+                || now.duration_since(last_at) >= PROGRESS_MIN_INTERVAL
+        }
+    }
 }
 
 /// Test-only fault injection for the cancel/pause terminal-write failure
@@ -5031,6 +5064,30 @@ mod tests {
         let j = jobs.iter().find(|j| j.id == "job-p").unwrap();
         assert_eq!(j.status, JobStatus::Paused);
         assert!(j.error.is_none());
+    }
+
+    /// A progress tick is persisted and emitted only when it moves the bar
+    /// at least PROGRESS_MIN_DELTA percent or PROGRESS_MIN_INTERVAL has
+    /// passed since the last persisted tick: yt-dlp reports several lines a
+    /// second and every one of them used to cost a full-row read+write under
+    /// the db lock plus an IPC emit.
+    ///
+    /// Value: protects=should_persist_progress; fails_when=every tick hits
+    /// the db (no bound at all); why_new=the hot path had no throttle;
+    /// seam=none (pure decision function)
+    #[test]
+    fn progress_persistence_is_delta_or_time_bounded() {
+        let t0 = std::time::Instant::now();
+        // First tick always lands.
+        assert!(should_persist_progress(None, 0.0, t0));
+        // Below-delta, below-interval: suppressed.
+        let t1 = t0 + std::time::Duration::from_millis(50);
+        assert!(!should_persist_progress(Some((0.0, t0)), 0.2, t1));
+        // Delta alone carries it.
+        assert!(should_persist_progress(Some((0.0, t0)), 0.6, t1));
+        // Interval alone carries it (keeps speed/eta fresh on a stall).
+        let t2 = t0 + std::time::Duration::from_millis(600);
+        assert!(should_persist_progress(Some((0.0, t0)), 0.1, t2));
     }
 
     #[tokio::test]
