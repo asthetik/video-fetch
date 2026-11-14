@@ -6470,6 +6470,22 @@ mod tests {
     /// A poisoned task-map lock must not disarm cancel's immediate abort:
     /// the map holds plain ids and handles, so recovering beats skipping.
     ///
+    /// Moves into a spawned task; aborting the task drops the future and, with
+    /// it, this probe — the only channel through which an abort is observable
+    /// (a detached handle and an aborted one both leave the map entry gone).
+    struct AbortProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for AbortProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The name promises the immediate abort, not just the map cleanup: the
+    /// Ok-only lock regression this test was written for is what makes the
+    /// removal poison-recoverable, while a cancel that merely drops the handle
+    /// would leave a Pending job's runner parked on the semaphore.
+    ///
     /// Value: protects=cancel/pause's handle removal on a poisoned
     /// running_tasks lock; fails_when=the Ok-only lock skips remove+abort
     /// forever; why_new=all five running_tasks sites are Ok-only with no
@@ -6486,7 +6502,12 @@ mod tests {
         job.status = JobStatus::Running;
         manager.db.lock().unwrap().insert_job(&job).unwrap();
         let token = manager.mint_runner_token("job-abort");
-        let handle = tauri::async_runtime::spawn(std::future::pending::<()>());
+        let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = AbortProbe(Arc::clone(&aborted));
+        let handle = tauri::async_runtime::spawn(async move {
+            let _probe = probe;
+            std::future::pending::<()>().await;
+        });
         manager
             .running_tasks
             .lock()
@@ -6505,6 +6526,10 @@ mod tests {
                 .get("job-abort")
                 .is_none(),
             "the poisoned map must not swallow the handle removal"
+        );
+        assert!(
+            aborted.load(std::sync::atomic::Ordering::SeqCst),
+            "cancel must abort the runner, not just drop the handle"
         );
     }
 
