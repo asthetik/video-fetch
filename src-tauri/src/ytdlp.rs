@@ -831,7 +831,7 @@ pub async fn resolve_meta(
 
     let mut meta = video_meta_from_yt_dlp_json(&v)?;
     if meta.pages.len() > 1 {
-        enrich_multi_page_formats_by_sampling(children, cfg, cookies_path, &mut meta).await;
+        enrich_multi_page_formats_by_sampling(children, cfg, cookies_path, &mut meta).await?;
     }
     Ok(meta)
 }
@@ -842,15 +842,32 @@ pub async fn resolve_meta(
 /// Anthologies with ≤`MULTI_PAGE_FULL_PROBE_AT_MOST` parts probe every page;
 /// larger ones probe at most `MULTI_PAGE_FORMAT_SAMPLES` (skipping page 1 when
 /// its formats are already present).
+/// An anthology whose `-J` carried no formats and whose every sampled probe
+/// failed ends with an empty quality list: surface that instead of a silent
+/// success the UI renders as an undownloadable video.
+fn all_probes_failed_error(
+    observed_formats: usize,
+    failed: usize,
+    attempted: usize,
+) -> Option<AppError> {
+    if observed_formats == 0 && attempted > 0 && failed == attempted {
+        Some(AppError::Message(format!(
+            "清晰度列表获取失败（{failed}/{attempted} 个分 P 探测均未成功），请稍后重试"
+        )))
+    } else {
+        None
+    }
+}
+
 async fn enrich_multi_page_formats_by_sampling(
     children: &DownloadChildren,
     cfg: &YtDlpConfig,
     cookies_path: Option<&Path>,
     meta: &mut VideoMeta,
-) {
+) -> AppResult<()> {
     let known_heights = distinct_heights(&meta.formats);
     if known_heights.len() >= 2 {
-        return;
+        return Ok(());
     }
 
     let page_count = meta.pages.len();
@@ -864,17 +881,18 @@ async fn enrich_multi_page_formats_by_sampling(
         indices.retain(|&i| i != 1);
     }
     if indices.is_empty() {
-        return;
+        return Ok(());
     }
 
     let base = if meta.webpage_url.is_empty() {
-        return;
+        return Ok(());
     } else {
         meta.webpage_url.clone()
     };
 
     let mut observed = meta.formats.clone();
     let mut handles = Vec::new();
+    let attempted = indices.len();
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
     for index in indices {
         let page_url = page_url_for_index(&base, index);
@@ -914,7 +932,12 @@ async fn enrich_multi_page_formats_by_sampling(
         );
     }
 
+    let observed_len = observed.len();
     meta.formats = finalize_formats_for_pages(observed, meta.pages.len());
+    if let Some(e) = all_probes_failed_error(observed_len, failed, attempted) {
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Hard ceiling for one-shot metadata yt-dlp runs. The main download path
@@ -2442,6 +2465,24 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert!(seen, "the metadata child must be registered while it runs");
         run.await.unwrap().unwrap();
         assert!(children.lock().unwrap().is_empty());
+    }
+
+    /// An anthology whose `-J` carried no formats and whose every sampled
+    /// probe failed must surface as an error, not a silent Ok with an empty
+    /// quality list the UI renders as an undownloadable video.
+    ///
+    /// Value: protects=all_probes_failed_error; fails_when=the decision
+    /// treats all-failed as success; why_new=probe failures were warn-only;
+    /// seam=none (pure decision function)
+    #[test]
+    fn all_probe_failure_surfaces_as_an_error() {
+        assert!(all_probes_failed_error(0, 3, 3).is_some());
+        // Partial failures keep the partial list plus the existing warn.
+        assert!(all_probes_failed_error(0, 2, 3).is_none());
+        // -J already supplied formats: probes are additive, never fatal.
+        assert!(all_probes_failed_error(2, 3, 3).is_none());
+        // Nothing was attempted: not this guard's case.
+        assert!(all_probes_failed_error(0, 0, 0).is_none());
     }
 
     /// B17: a stuck metadata run is killed at the timeout and reported,
