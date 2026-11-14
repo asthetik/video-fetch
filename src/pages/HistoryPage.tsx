@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { createListenerBag } from "../lib/listenerBag";
 import { toast } from "sonner";
 import {
   FolderOpen,
@@ -93,7 +94,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   // open; terminal events also trigger a reload so completed rows pick up
   // persisted metadata (file size) that the event payload doesn't carry.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    const listeners = createListenerBag();
 
     void listen<DownloadProgressPayload>("download://progress", (event) => {
       const patch = event.payload;
@@ -107,12 +108,10 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       if (patch.status === "done" || patch.status === "failed") {
         void loadJobs();
       }
-    }).then((fn) => {
-      unlisten = fn;
-    });
+    }).then(listeners.track);
 
     return () => {
-      unlisten?.();
+      listeners.dispose();
     };
   }, [loadJobs]);
 

@@ -1034,9 +1034,16 @@ impl DownloadManager {
             self.try_cancel(id).await;
         }
         if delete_file && let Some(path) = job.output_path.as_deref() {
-            let p = PathBuf::from(path);
+            // Prefer the recorded exact bytes: the display string is melted
+            // for non-UTF-8 names and can never match the real file (the
+            // open command resolves the same record).
+            let p = self
+                .recorded_exact_path(path)
+                .unwrap_or_else(|| PathBuf::from(path));
             if p.is_file() {
-                let _ = fs::remove_file(p);
+                fs::remove_file(&p).map_err(|e| {
+                    AppError::Message(format!("删除文件失败: {e}（文件可能被占用，请关闭后重试）"))
+                })?;
             }
         }
         lock_db(&self.db).delete_job(id)?;
@@ -1566,27 +1573,48 @@ impl DownloadManager {
             )
         })?;
         let _ = fsutil::remove_job_work_dir(&self.work_root, job_id);
-        let mut done = running.clone();
-        done.status = JobStatus::Done;
-        done.progress = 1.0;
-        done.output_path = Some(dest.to_string_lossy().into());
-        done.file_size = std::fs::metadata(&dest)
-            .ok()
-            .map(|m| m.len())
-            .or(done.file_size);
-        done.error = None;
-        if let Err(e) = lock_db(&self.db).update_job(&done) {
-            tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
-        }
-        // The display string above is the only form the webview can carry; a
-        // name UTF-8 cannot represent arrives there melted to U+FFFD. Record
-        // the exact bytes so "open" resolves the real file, and clear the
-        // record when this delivery landed on a UTF-8 path (a retry may have
-        // moved it).
-        let exact = exact_output_path_record(&dest);
-        if let Err(e) = lock_db(&self.db).set_output_path_exact(job_id, exact.as_deref()) {
-            tracing::warn!(target: "core", "download: 精确路径写入失败 {job_id}: {e}");
-        }
+        self.land_done_row(job_id, token, running, &dest)
+    }
+
+    /// The Done write, cut out of `complete_relocation` so its guard is
+    /// testable on its own: the stop/ownership re-check shares the db
+    /// critical section with the write (fail_job's rule). A cancel landing
+    /// during the relocation stretch has already terminaled the row; this
+    /// write must not go over it.
+    fn land_done_row(
+        &self,
+        job_id: &str,
+        token: u64,
+        running: &DownloadJob,
+        dest: &Path,
+    ) -> Result<(), String> {
+        let exact = exact_output_path_record(dest);
+        let done = {
+            let db = lock_db(&self.db);
+            if let Some(disposition) = self.stop_disposition_for(job_id, token) {
+                tracing::debug!(
+                    target: "core",
+                    "download: 不覆盖停止终态（{disposition:?}）{job_id}"
+                );
+                return Ok(());
+            }
+            if let Err(e) = db.set_output_path_exact(job_id, exact.as_deref()) {
+                tracing::warn!(target: "core", "download: 精确路径写入失败 {job_id}: {e}");
+            }
+            let mut done = running.clone();
+            done.status = JobStatus::Done;
+            done.progress = 1.0;
+            done.output_path = Some(dest.to_string_lossy().into());
+            done.file_size = std::fs::metadata(dest)
+                .ok()
+                .map(|m| m.len())
+                .or(done.file_size);
+            done.error = None;
+            if let Err(e) = db.update_job(&done) {
+                tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+            }
+            done
+        };
         // Terminal writes retire the job's stop flag: a pause that raced this
         // completion otherwise leaves a marker no later path would ever clear.
         if let Ok(mut flags) = self.stop_flags.lock() {
@@ -6177,6 +6205,158 @@ mod tests {
             "the resumed row must be left alone"
         );
         assert!(owns_job(&manager.runner_tokens, "job-late", owner));
+    }
+
+    /// A cancel that lands while the product is being moved has already
+    /// written the Failed row: the Done write after the move must not go
+    /// over it (events Failed→Done would break the cancel contract).
+    ///
+    /// Value: protects=land_done_row's post-relocation re-check; fails_when=
+    /// the check is missing — the unconditional Done write lands on the
+    /// cancel's terminal row; why_new=the existing relocation test only
+    /// covers a stale token checked BEFORE the move; seam=none
+    #[test]
+    fn a_cancel_landing_during_relocation_keeps_the_failed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_dir = dir.path().join("videos");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let mut job = sample_job("job-mid");
+        job.status = JobStatus::Running;
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        let token = manager.mint_runner_token("job-mid");
+        // The cancel completed during the move: marker up, row already Failed.
+        manager
+            .stop_flags
+            .lock()
+            .unwrap()
+            .insert("job-mid".into(), StopKind::Cancel);
+        let mut failed = job.clone();
+        failed.status = JobStatus::Failed;
+        failed.error = Some("已取消".into());
+        manager.db.lock().unwrap().update_job(&failed).unwrap();
+
+        let dest = save_dir.join("demo.mp4");
+        std::fs::write(&dest, b"video").unwrap();
+
+        manager
+            .land_done_row("job-mid", token, &job, &dest)
+            .unwrap();
+
+        let j = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == "job-mid")
+            .unwrap();
+        assert_eq!(j.status, JobStatus::Failed, "cancel must stay terminal");
+        assert!(j.error.is_some(), "the cancel reason must survive");
+    }
+
+    /// A deleted job with delete_file=true must remove the real file through
+    /// the recorded exact bytes, not the display string: for a non-UTF-8
+    /// delivery the display string is melted and can never match. macOS
+    /// cannot create non-UTF-8 filenames (EILSEQ), so the record-precedence
+    /// mechanism is pinned with a display that points elsewhere and a valid
+    /// recorded path.
+    ///
+    /// Value: protects=delete's exact-path resolution; fails_when=delete
+    /// builds the path from the display string only — the real file
+    /// survives silently while the row goes; why_new=the exact record
+    /// exists for open() but delete never consulted it; seam=db
+    /// exact_output_path record
+    #[test]
+    fn delete_removes_the_file_through_its_recorded_exact_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("videos");
+        std::fs::create_dir_all(&save).unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let real = save.join("real.mp4");
+        std::fs::write(&real, b"v").unwrap();
+        // The display string a melted path would leave: it resolves to a
+        // file that does not exist.
+        let display = save.join("melted.mp4").to_string_lossy().into_owned();
+
+        let mut job = sample_job("job-exact");
+        job.status = JobStatus::Done;
+        job.output_path = Some(display);
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+        manager
+            .db
+            .lock()
+            .unwrap()
+            .set_output_path_exact(
+                "job-exact",
+                Some(fsutil::path_to_record_bytes(&real).as_slice()),
+            )
+            .unwrap();
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(manager.delete("job-exact", true))
+            .unwrap();
+
+        assert!(
+            !real.exists(),
+            "the real file must be deleted via the exact record"
+        );
+    }
+
+    /// An undeletable file (Windows lock, read-only dir) must surface as an
+    /// error and keep the row, not vanish the row and strand the file.
+    ///
+    /// Value: protects=delete's remove error surfacing; fails_when=the error
+    /// is swallowed and the row is deleted anyway — the user keeps a file
+    /// the app can no longer manage; why_new=no test covered the swallowed
+    /// `let _` on remove_file; seam=unix dir permissions
+    #[cfg(unix)]
+    #[test]
+    fn delete_reports_a_failed_file_removal_and_keeps_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("videos");
+        std::fs::create_dir_all(&save).unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let real = save.join("demo.mp4");
+        std::fs::write(&real, b"v").unwrap();
+
+        let mut job = sample_job("job-lock");
+        job.status = JobStatus::Done;
+        job.output_path = Some(real.to_string_lossy().into_owned());
+        manager.db.lock().unwrap().insert_job(&job).unwrap();
+
+        let parent = real.parent().unwrap();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt as _;
+        perms.set_mode(0o555);
+        std::fs::set_permissions(parent, perms).unwrap();
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(manager.delete("job-lock", true));
+
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(parent, perms).unwrap();
+
+        assert!(result.is_err(), "an undeletable file must surface");
+        assert!(
+            manager.list().unwrap().iter().any(|j| j.id == "job-lock"),
+            "the row stays until the file can go"
+        );
     }
 
     /// A relocation that cannot land has to name both ends: the destination the

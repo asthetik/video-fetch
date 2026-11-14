@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { createListenerBag } from "../lib/listenerBag";
 import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -101,7 +102,7 @@ export function DownloadQueue({
   }, [loadJobs, refreshToken]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    const listeners = createListenerBag();
 
     void listen<DownloadProgressPayload>("download://progress", (event) => {
       const patch = event.payload;
@@ -113,12 +114,10 @@ export function DownloadQueue({
         }
         return upsertJob(prev, mergeJob(prev[idx], patch));
       });
-    }).then((fn) => {
-      unlisten = fn;
-    });
+    }).then(listeners.track);
 
     return () => {
-      unlisten?.();
+      listeners.dispose();
     };
   }, [loadJobs]);
 
