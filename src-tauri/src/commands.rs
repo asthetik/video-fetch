@@ -3324,11 +3324,17 @@ mod restart_cookie_tests {
     /// Enqueue one job, let its first run park as Running, then pause it: the
     /// Paused row a crash-and-restart leaves behind.
     async fn paused_job(app: &TestApp, id: &str, video_id: &str) {
+        let runs_before = app.seen.lock().unwrap().len();
         app.state
             .downloads
             .enqueue(probe_job(id, video_id), false)
             .unwrap();
         wait_for_status(&app.state, id, JobStatus::Running).await;
+        // The row turns Running one step before the downloader records its
+        // start; pausing inside that window aborts the runner before `seen`
+        // grows, so wait for the recorded run first (a loaded Windows runner
+        // once left len()==1 where a test asserted 2).
+        wait_for_runs(&app.seen, runs_before + 1).await;
         app.state.downloads.pause(id).await.unwrap();
         assert_eq!(job_status(&app.state, id), JobStatus::Paused);
     }
