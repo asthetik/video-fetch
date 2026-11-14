@@ -1986,6 +1986,15 @@ fn picked_dir_to_string(dir: PathBuf) -> Result<String, AppError> {
         .map_err(|_| AppError::Message("该路径包含无法保存的字符，请另选目录".into()))
 }
 
+/// Same non-UTF-8 guard as `picked_dir_to_string`, with file-picking copy:
+/// a melted path can never be opened — the cookie import fails with ENOENT
+/// on the U+FFFD string and the user has no way to know why.
+fn picked_file_to_string(path: PathBuf) -> Result<String, AppError> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| AppError::Message("该文件路径包含无法使用的字符，请另选文件".into()))
+}
+
 #[tauri::command]
 pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
     let folder =
@@ -2016,7 +2025,12 @@ pub async fn pick_cookies_file(app: AppHandle) -> AppResult<String> {
     .map_err(|e| AppError::Message(format!("对话框任务失败: {e}")))?;
 
     match file {
-        Some(path) => Ok(path.to_string()),
+        Some(path) => {
+            let file = path
+                .into_path()
+                .map_err(|e| AppError::Message(format!("对话框路径无效: {e}")))?;
+            picked_file_to_string(file)
+        }
         None => Err(AppError::Message("已取消选择文件".into())),
     }
 }
@@ -3091,6 +3105,19 @@ mod save_dir_tests {
         let msg = err.to_string();
         assert_eq!(msg, "该路径包含无法保存的字符，请另选目录");
         // The error text must not carry a melted path either.
+        assert!(!msg.contains('\u{FFFD}'));
+    }
+
+    /// Same guard for the cookie-file picker: a melted path can never be
+    /// opened, so the import would fail with a bare ENOENT on the U+FFFD
+    /// string and the user would have no way to know why.
+    #[test]
+    fn picked_file_to_string_rejects_non_utf8_path_without_melting() {
+        let raw = PathBuf::from(non_utf8_name());
+        let err = picked_file_to_string(raw)
+            .expect_err("non-UTF-8 pick must not be converted via lossy melt");
+        let msg = err.to_string();
+        assert_eq!(msg, "该文件路径包含无法使用的字符，请另选文件");
         assert!(!msg.contains('\u{FFFD}'));
     }
 }
