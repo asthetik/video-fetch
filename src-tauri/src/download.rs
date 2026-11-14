@@ -3143,7 +3143,11 @@ mod tests {
             db.insert_job(&done).unwrap();
         }
 
-        let mock = Arc::new(MockDownloader::slow_success(800));
+        // A delay far beyond the test's lifetime: neither job may complete on
+        // its own, so both are active whenever cancel_all runs (a 40 ms sleep
+        // stretched by a starved Windows runner once let one finish first and
+        // cancelled==1).
+        let mock = Arc::new(MockDownloader::slow_success(60_000));
         let (manager, _rx) = test_manager(
             dir.path(),
             &dir.path().join("work"),
