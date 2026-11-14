@@ -4,10 +4,10 @@ import { formatDuration } from "../lib/spaceFormat";
 import type { DownloadJob } from "../types";
 
 const FALLBACK_GRADIENTS = [
-  "linear-gradient(135deg, #5e6ad2, #8b5cf6)",
-  "linear-gradient(135deg, #2f8f6b, #5e6ad2)",
-  "linear-gradient(135deg, #c2477e, #8b5cf6)",
-  "linear-gradient(135deg, #5e6ad2, #2f8f6b)",
+  "linear-gradient(135deg, var(--pink), var(--accent))",
+  "linear-gradient(135deg, var(--success), var(--pink))",
+  "linear-gradient(135deg, var(--warn), var(--accent))",
+  "linear-gradient(135deg, var(--celebrate), var(--pink))",
 ];
 
 // Deterministic gradient pick: the multiply-accumulate is exact in double
