@@ -4995,7 +4995,11 @@ mod tests {
     #[tokio::test]
     async fn pause_running_job_keeps_progress_and_workdir() {
         let dir = tempfile::tempdir().unwrap();
-        let downloader = Arc::new(CountingDownloader::new(600, false));
+        // Park the first run: the pause oracle must not have to win a race
+        // against the downloader's own failure (a loaded Windows runner once
+        // let the 600ms Err land first, leaving Failed where the test asserts
+        // Paused — the parking helper exists for exactly this).
+        let downloader = Arc::new(CountingDownloader::new(600, false).parking_first_run());
         let manager = manager_for(dir.path(), downloader, Arc::new(Mutex::new(HashMap::new())));
         let mut job = sample_job("job-p");
         job.video_id = "BV1p".into();
