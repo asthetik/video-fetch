@@ -196,9 +196,14 @@ pub async fn fetch_via_ytdlp(
         .arg("--playlist-items")
         .arg(format!("{start}:{end}"));
     crate::ytdlp::arg_url(&mut cmd, &format!("https://space.bilibili.com/{mid}/video"));
-    let out =
-        crate::ytdlp::run_registered_output(children, "space", cmd, crate::ytdlp::SAMPLE_TIMEOUT)
-            .await?;
+    let out = crate::ytdlp::run_registered_output(
+        children,
+        "space",
+        cmd,
+        crate::ytdlp::SAMPLE_TIMEOUT,
+        crate::ytdlp::WAIT_EXIT_GRACE,
+    )
+    .await?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr);
         return Err(AppError::Message(format!(
