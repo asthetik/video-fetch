@@ -91,7 +91,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: ${{ matrix.platform }}
+          # The bucket ci.yml's release-smoke saves from main: a tag build is
+          # the cold-cache case this store exists to warm (the ARM cells'
+          # 90-minute timeouts budget exactly that). Same string as the
+          # release-smoke shared-key, image-segmented the way ci.yml explains.
+          shared-key: src-tauri-release-${{ matrix.platform }}
 
       - name: Install Tauri Linux deps
         if: runner.os == 'Linux'
