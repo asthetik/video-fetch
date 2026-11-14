@@ -387,7 +387,7 @@ html[data-theme="dark"] .segment-item.on {
   background: var(--surface);
   border: 1px solid var(--surface-border);
   box-shadow: var(--surface-shadow);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-panel);
   padding: 1.15rem 1.2rem 1.2rem;
 }
 

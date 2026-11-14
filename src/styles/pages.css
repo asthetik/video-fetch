@@ -163,7 +163,7 @@
 
 .queue-empty {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: var(--font-ui);
   font-size: 1.05rem;
   color: var(--muted);
 }
@@ -672,7 +672,7 @@
 
 .logs-viewer-empty {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: var(--font-ui);
   font-size: 1.05rem;
   color: var(--muted);
 }
@@ -1095,7 +1095,7 @@
 
 .empty-state-title {
   margin: 0.4rem 0 0;
-  font-family: var(--font-display);
+  font-family: var(--font-ui);
   font-size: 1.05rem;
   color: var(--text);
 }

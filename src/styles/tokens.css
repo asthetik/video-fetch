@@ -41,7 +41,7 @@
   --font-data: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-human: "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", serif;
   font-family: var(--font-ui);
-  line-height: 1.5;
+  line-height: 1.6;
 
   --bg: #faf7f4;
   /* Surfaces stay pure white so the paper canvas earns its warmth: the tint
@@ -115,6 +115,8 @@
 
   --seg-track: #efe8de;
   --radius-card: 18px;
+  /* Panels and dialogs: DESIGN.md rounded lg */
+  --radius-panel: 24px;
   --radius-ctl: 10px;
   --radius-chip: 999px;
 
