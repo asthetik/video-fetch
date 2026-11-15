@@ -875,6 +875,26 @@ async fn enrich_multi_page_formats_by_sampling(
     cookies_path: Option<&Path>,
     meta: &mut VideoMeta,
 ) -> AppResult<()> {
+    let kids = Arc::clone(children);
+    let cfg = cfg.clone();
+    let cookies = cookies_path.map(Path::to_path_buf);
+    enrich_with_probe(meta, move |page_url: String| {
+        let kids = Arc::clone(&kids);
+        let cfg = cfg.clone();
+        let cookies = cookies.clone();
+        async move { fetch_formats_for_url(&kids, &cfg, &page_url, cookies.as_deref()).await }
+    })
+    .await
+}
+
+/// The sampling orchestration with an injected per-page probe: skip rules,
+/// semaphore-bounded concurrency and the all-probes-failed guard, testable
+/// without spawning yt-dlp.
+async fn enrich_with_probe<F, Fut>(meta: &mut VideoMeta, probe: F) -> AppResult<()>
+where
+    F: Fn(String) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Option<Vec<FormatOption>>> + Send,
+{
     let known_heights = distinct_heights(&meta.formats);
     if known_heights.len() >= 2 {
         return Ok(());
@@ -900,19 +920,18 @@ async fn enrich_multi_page_formats_by_sampling(
         meta.webpage_url.clone()
     };
 
+    let probe = std::sync::Arc::new(probe);
     let mut observed = meta.formats.clone();
     let mut handles = Vec::new();
     let attempted = indices.len();
     let sem = Arc::new(tokio::sync::Semaphore::new(4));
     for index in indices {
         let page_url = page_url_for_index(&base, index);
-        let cfg = cfg.clone();
-        let cookies = cookies_path.map(Path::to_path_buf);
         let permit = Arc::clone(&sem);
-        let kids: DownloadChildren = Arc::clone(children);
+        let probe = Arc::clone(&probe);
         handles.push(tokio::spawn(async move {
             let _permit = permit.acquire_owned().await.ok()?;
-            let formats = fetch_formats_for_url(&kids, &cfg, &page_url, cookies.as_deref()).await;
+            let formats = probe(page_url.clone()).await;
             Some((index, page_url, formats))
         }));
     }
@@ -2587,6 +2606,80 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         assert_eq!(
             size_after, size_later,
             "the grace arm must kill the process tree, not just return"
+        );
+    }
+
+    fn anthology(pages: u32) -> VideoMeta {
+        VideoMeta {
+            id: "BV1test".into(),
+            title: "t".into(),
+            uploader: None,
+            thumbnail: None,
+            duration_secs: None,
+            webpage_url: "https://www.bilibili.com/video/BV1test".into(),
+            pages: (1..=pages)
+                .map(|i| PageItem {
+                    index: i,
+                    title: format!("p{i}"),
+                    page_id: format!("pid{i}"),
+                })
+                .collect(),
+            formats: vec![],
+            audio_formats: vec![],
+            platform: "bilibili".into(),
+        }
+    }
+
+    fn probe_format(height: u32) -> FormatOption {
+        FormatOption {
+            format_id: format!("f{height}"),
+            label: format!("{height}P"),
+            height: Some(height),
+            fps: None,
+            tbr: None,
+            hires: false,
+        }
+    }
+
+    /// The sampling orchestration itself — skip rules, concurrency, the
+    /// all-probes-failed guard — with an injected probe instead of a real
+    /// yt-dlp spawn: #255 pinned only the pure predicate.
+    ///
+    /// Value: protects=enrich_with_probe's orchestration and guard wiring;
+    /// fails_when=the guard is dropped (all-failed resolves Ok) or sampled
+    /// formats never land; why_new=enrich had no test at all and its call
+    /// site could be deleted; seam=injected probe closure
+    #[tokio::test]
+    async fn all_probe_failures_surface_from_the_live_enrich_path() {
+        let mut meta = anthology(3);
+        let err = enrich_with_probe(&mut meta, |_url: String| async {
+            None::<Vec<FormatOption>>
+        })
+        .await
+        .expect_err("all probes failing must surface, not resolve Ok");
+        assert!(err.to_string().contains("清晰度列表获取失败"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn sampled_formats_land_and_partial_failures_stay_ok() {
+        let mut meta = anthology(3);
+        enrich_with_probe(&mut meta, |url: String| async move {
+            if url.ends_with("p=1") {
+                None
+            } else {
+                Some(vec![probe_format(if url.ends_with("p=2") {
+                    480
+                } else {
+                    720
+                })])
+            }
+        })
+        .await
+        .expect("a partial failure keeps the partial list");
+        let heights: Vec<u32> = meta.formats.iter().filter_map(|f| f.height).collect();
+        assert!(
+            heights.contains(&480) && heights.contains(&720),
+            "got: {heights:?}"
         );
     }
 
