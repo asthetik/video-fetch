@@ -3,11 +3,16 @@ import { Music, Play } from "lucide-react";
 import { formatDuration } from "../lib/spaceFormat";
 import type { DownloadJob } from "../types";
 
+// A flat dark scrim under the white play/note glyph: palette pairs alone
+// drop the icon below DESIGN.md's 3:1 non-text floor (the amber end of the
+// old celebrate pair reached 1.8:1), and the scrim keeps every stop above
+// it in both themes.
+const SCRIM = "linear-gradient(rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.3))";
 const FALLBACK_GRADIENTS = [
   "linear-gradient(135deg, var(--pink), var(--accent))",
   "linear-gradient(135deg, var(--success), var(--pink))",
   "linear-gradient(135deg, var(--warn), var(--accent))",
-  "linear-gradient(135deg, var(--celebrate), var(--pink))",
+  "linear-gradient(135deg, var(--accent), var(--success))",
 ];
 
 // Deterministic gradient pick: the multiply-accumulate is exact in double
@@ -47,7 +52,10 @@ export function ThumbTile({ job }: { job: DownloadJob }) {
           onError={() => setFailed(true)}
         />
       ) : (
-        <span className="thumb-fallback" style={{ background: gradient }}>
+        <span
+          className="thumb-fallback"
+          style={{ background: `${SCRIM}, ${gradient}` }}
+        >
           {audio ? (
             <Music size={16} strokeWidth={2} aria-hidden="true" />
           ) : (
