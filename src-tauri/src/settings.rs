@@ -75,6 +75,20 @@ fn migrate_filename_template(settings: &mut AppSettings) -> bool {
     true
 }
 
+/// Open the staging file exclusively: create_new, so a file already at the
+/// name — a stale temp of ours or a symlink someone planted — is an error,
+/// never adopted and never followed (auth.rs's rule).
+fn open_staging_exclusive(tmp: &Path) -> std::io::Result<fs::File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    opts.open(tmp)
+}
+
 pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     fs::create_dir_all(app_dir)?;
     let path = settings_path(app_dir);
@@ -98,14 +112,7 @@ pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
         path.with_file_name(tmp_name)
     };
     let write = (|| -> AppResult<()> {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
-        let mut file = opts.open(&tmp)?;
+        let mut file = open_staging_exclusive(&tmp)?;
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
         fs::rename(&tmp, &path)?;
@@ -210,6 +217,28 @@ mod tests {
             settings_path(&app_dir).is_file(),
             "the save itself must land"
         );
+    }
+
+    /// The staging open is create_new: a file already sitting at the staging
+    /// name (a stale temp of ours, or a symlink someone planted) must be an
+    /// error, never truncated and never followed. The unique-name half is
+    /// pinned by the symlink test; this pins the exclusive half regardless
+    /// of the name.
+    ///
+    /// Value: protects=open_staging_exclusive's create_new; fails_when=the
+    /// open degrades to create+truncate; why_new=#258's test could only
+    /// observe the unique-name half; seam=none
+    #[test]
+    fn staging_open_refuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("settings.json.anything.tmp");
+        fs::write(&tmp, b"precious").unwrap();
+
+        assert!(
+            open_staging_exclusive(&tmp).is_err(),
+            "an existing staging file must never be adopted or truncated"
+        );
+        assert_eq!(fs::read(&tmp).unwrap(), b"precious");
     }
 
     /// A truncated write used to brick startup: `setup` propagates the parse
