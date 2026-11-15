@@ -19,6 +19,16 @@ test("token sheet defines the panel radius tier and CJK line height", () => {
 test("empty-state copy uses the UI font, not the display font", () => {
   const uses = pages.match(/var\(--font-display\)/g)?.length ?? 0;
   assert.equal(uses, 0, "the display font is gone; nothing may reference --font-display");
+  // Counting absences proves nothing about presence: each empty-state rule
+  // must actually carry the UI font.
+  for (const sel of [".queue-empty", ".logs-viewer-empty", ".empty-state-title"]) {
+    const block = pages.match(new RegExp(`^${sel.replace(".", "\\.")}\\s*\\{[^}]*\}`, "m"))?.[0] ?? "";
+    assert.match(
+      block,
+      /font-family:\s*var\(--font-ui\);/,
+      `${sel} must set the UI font`,
+    );
+  }
 });
 
 test("the modal dialog lands on the panel radius tier", () => {
