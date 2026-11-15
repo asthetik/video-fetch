@@ -86,9 +86,6 @@ pub fn save_settings(app_dir: &Path, settings: &AppSettings) -> AppResult<()> {
     // A unique staging name, created with create_new — the same rule as
     // auth.rs: a fixed name plus create+truncate lets a planted symlink route
     // the write into another file.
-    // A unique staging name, created with create_new — the same rule as
-    // auth.rs: a fixed name plus create+truncate lets a planted symlink route
-    // the write into another file.
     let tmp = {
         let Some(name) = path.file_name() else {
             return Err(AppError::Message("settings 路径无文件名".into()));
