@@ -846,12 +846,6 @@ fn resolve_failed_message(stderr_bytes: &[u8]) -> AppError {
     AppError::Message(format!("yt-dlp 解析失败: {stderr}"))
 }
 
-/// Probe additional parts when playlist `-J` only filled formats for early entries.
-///
-/// Skips probing when the playlist JSON already exposed ≥2 distinct heights.
-/// Anthologies with ≤`MULTI_PAGE_FULL_PROBE_AT_MOST` parts probe every page;
-/// larger ones probe at most `MULTI_PAGE_FORMAT_SAMPLES` (skipping page 1 when
-/// its formats are already present).
 /// An anthology whose `-J` carried no formats and whose every sampled probe
 /// failed ends with an empty quality list: surface that instead of a silent
 /// success the UI renders as an undownloadable video.
@@ -869,6 +863,12 @@ fn all_probes_failed_error(
     }
 }
 
+/// Probe additional parts when playlist `-J` only filled formats for early entries.
+///
+/// Skips probing when the playlist JSON already exposed ≥2 distinct heights.
+/// Anthologies with ≤`MULTI_PAGE_FULL_PROBE_AT_MOST` parts probe every page;
+/// larger ones probe at most `MULTI_PAGE_FORMAT_SAMPLES` (skipping page 1 when
+/// its formats are already present).
 async fn enrich_multi_page_formats_by_sampling(
     children: &DownloadChildren,
     cfg: &YtDlpConfig,
