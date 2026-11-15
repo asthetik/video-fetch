@@ -3158,9 +3158,11 @@ mod tests {
         job_b.video_id = "BV2xx".into();
         let b = manager.enqueue(job_b, false).unwrap();
         sleep(Duration::from_millis(40)).await;
-        mock.mark_cancelled(&a.id);
-        mock.mark_cancelled(&b.id);
-
+        // No mark_cancelled before the call: the mock's cancelled flag makes
+        // its run return Err, and a runner that wins that race fails its row
+        // before cancel_all's snapshot — the row is then excluded from the
+        // batch and cancelled==1. The abort cancel issues already ends the
+        // mock's poll loop; the cancel message is asserted below.
         let result = manager.cancel_all().await.unwrap();
         assert_eq!(result.cancelled, 2);
         assert!(result.errors.is_empty());
