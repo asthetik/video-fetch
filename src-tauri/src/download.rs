@@ -1912,6 +1912,9 @@ mod tests {
         rich_progress: Option<ProgressUpdate>,
         /// Isolated scratch dir for mock output files (not the OS shared temp root).
         scratch: tempfile::TempDir,
+        /// Fired back-to-back with no await in between, then the run parks:
+        /// the throttle is exercised with the interval arm out of play.
+        progress_script: Option<Vec<f64>>,
     }
 
     impl MockDownloader {
@@ -1927,6 +1930,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: None,
+                progress_script: None,
                 scratch: Self::new_scratch(),
             }
         }
@@ -1939,6 +1943,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: Some(update),
+                progress_script: None,
                 scratch: Self::new_scratch(),
             }
         }
@@ -1951,6 +1956,23 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: None,
+                progress_script: None,
+                scratch: Self::new_scratch(),
+            }
+        }
+
+        /// Fires each percent back-to-back (no await between ticks, so the
+        /// 500 ms interval arm of the progress gate can never fire) and then
+        /// parks forever: only the delta arm decides which ticks persist.
+        fn progress_burst(script: &[f64]) -> Self {
+            Self {
+                progress: 0.0,
+                succeed: true,
+                delay_ms: 0,
+                cancelled: Arc::new(Mutex::new(HashMap::new())),
+                reported_progress: Arc::new(Mutex::new(None)),
+                rich_progress: None,
+                progress_script: Some(script.to_vec()),
                 scratch: Self::new_scratch(),
             }
         }
@@ -1963,6 +1985,7 @@ mod tests {
                 cancelled: Arc::new(Mutex::new(HashMap::new())),
                 reported_progress: Arc::new(Mutex::new(None)),
                 rich_progress: None,
+                progress_script: None,
                 scratch: Self::new_scratch(),
             }
         }
@@ -1982,6 +2005,15 @@ mod tests {
             _token: u64,
             on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
         ) -> Result<PathBuf, String> {
+            if let Some(script) = &self.progress_script {
+                for pct in script {
+                    on_progress(ProgressUpdate {
+                        percent: *pct,
+                        ..Default::default()
+                    });
+                }
+                std::future::pending::<()>().await;
+            }
             if self.delay_ms > 0 {
                 for _ in 0..self.delay_ms / 10 {
                     if self
@@ -5092,6 +5124,58 @@ mod tests {
         // Interval alone carries it (keeps speed/eta fresh on a stall).
         let t2 = t0 + std::time::Duration::from_millis(600);
         assert!(should_persist_progress(Some((0.0, t0)), 0.1, t2));
+    }
+
+    /// The gate is wired into the live on_progress path, not just the pure
+    /// function: a burst fired with no awaits between ticks (the interval
+    /// arm out of play) must persist and emit exactly the first tick plus
+    /// each >=0.5 step.
+    ///
+    /// Value: protects=run_job's on_progress gate wiring; fails_when=the
+    /// call site drops the gate (every tick hits the db and the bridge);
+    /// why_new=#268 pinned only the pure function; seam=mock progress burst
+    #[tokio::test]
+    async fn progress_burst_persists_only_gate_passing_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        // Non-zero script: the enqueue and start-section baseline emits both
+        // carry progress 0.0, so the non-zero events are exactly the ticks
+        // that passed the gate.
+        let mock = Arc::new(MockDownloader::progress_burst(&[0.2, 0.3, 0.4, 0.9, 0.95]));
+        let (manager, mut rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            mock as Arc<dyn Downloader>,
+        );
+        let job = sample_job("job-burst");
+        let id = job.id.clone();
+        manager.enqueue(job, false).unwrap();
+        wait_for_status(&manager, &id, JobStatus::Running).await;
+
+        let mut percents: Vec<f64> = Vec::new();
+        for _ in 0..300 {
+            while let Ok(ev) = rx.try_recv() {
+                assert_eq!(ev.id, id);
+                if ev.progress > 1e-9 {
+                    percents.push(ev.progress * 100.0);
+                }
+            }
+            if percents.len() >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        // Give any wrongly-emitted tick a beat to arrive.
+        sleep(Duration::from_millis(120)).await;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.progress > 1e-9 {
+                percents.push(ev.progress * 100.0);
+            }
+        }
+        assert_eq!(percents.len(), 2, "got: {percents:?}");
+        assert!((percents[0] - 0.2).abs() < 1e-6);
+        assert!((percents[1] - 0.9).abs() < 1e-6);
+
+        manager.cancel(&id).await.unwrap();
     }
 
     #[tokio::test]
