@@ -503,15 +503,18 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Pins the per-entry failure isolation shape of find_work_product_pass:
-    /// part/ytdl/temp entries are skipped, the first real product wins.
-    /// The metadata-failure branch itself (is_file true, metadata failing)
-    /// needs a TOCTOU or an AV handle and is not portable to force — it is
-    /// covered by review of the skip direction, not by this test.
+    /// Pins the filter set of find_work_product_pass: part/ytdl/temp entries
+    /// are skipped and the first real product wins (four earlier tests pin
+    /// parts of the set; this one names all three skips together).
+    /// The skip-not-abort shape of the metadata branch has no oracle here —
+    /// forcing is_file-true-then-metadata-fail needs a TOCTOU window or an
+    /// antivirus handle — so that line is covered by review of its direction
+    /// only, not by this test.
     ///
-    /// Value: protects=find_work_product_pass's filter set and skip-not-
-    /// abort shape; fails_when=a filter regresses or a skip becomes fatal;
-    /// why_new=no test pinned the filter set before; seam=none
+    /// Value: protects=the filter set (part/ytdl/temp skips + non-empty
+    /// product wins); fails_when=a filter regression lets a non-product win
+    /// or a real product be missed; why_new=consolidates the three skips
+    /// into one named oracle; seam=none
     #[test]
     fn find_work_product_skips_nonproduct_entries_and_finds_the_product() {
         let dir = tempfile::tempdir().unwrap();
