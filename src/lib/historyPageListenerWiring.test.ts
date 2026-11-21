@@ -19,7 +19,15 @@ test("the progress listener registers through the bag", () => {
   assert.match(
     src,
     /const listeners = createListenerBag\(\);/,
-    "the bag must be created inside the effect",
+    "the bag must be created",
+  );
+  // Creation alone proves nothing about WHERE: a bag hoisted to component
+  // scope stays disposed forever after the first unmount and silently stops
+  // tracking. It must be the first statement of the effect.
+  assert.match(
+    src,
+    /useEffect\(\(\) => \{[\s\S]{0,400}?const listeners = createListenerBag\(\);/,
+    "the bag must be created inside the effect, not hoisted",
   );
   assert.doesNotMatch(
     src,
