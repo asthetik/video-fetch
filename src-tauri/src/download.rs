@@ -1625,6 +1625,29 @@ impl DownloadManager {
                     target: "core",
                     "download: 不覆盖停止终态（{disposition:?}）{job_id}"
                 );
+                if matches!(disposition, StopDisposition::MarkCancelled) {
+                    // The relocation already delivered the file before the
+                    // cancel landed; the row stays Failed, but its message
+                    // must say where the finished product is — nothing else
+                    // ever names the save-dir location again.
+                    match db.get_job(job_id) {
+                        Ok(mut row) => {
+                            row.error = Some(format!("已取消；成品已交付至 {}", dest.display()));
+                            if let Err(e) = db.update_job(&row) {
+                                tracing::warn!(
+                                    target: "core",
+                                    "download: 取消附注写入失败 {job_id}: {e}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "core",
+                                "download: 取消附注读取失败 {job_id}: {e}"
+                            );
+                        }
+                    }
+                }
                 return Ok(());
             }
             if let Err(e) = db.set_output_path_exact(job_id, exact.as_deref()) {
@@ -6421,7 +6444,13 @@ mod tests {
             .find(|j| j.id == "job-mid")
             .unwrap();
         assert_eq!(j.status, JobStatus::Failed, "cancel must stay terminal");
-        assert!(j.error.is_some(), "the cancel reason must survive");
+        // The relocation delivered the file before the cancel landed; the
+        // message must name where the finished product is.
+        let msg = j.error.as_deref().unwrap_or_default();
+        assert!(
+            msg.contains("已取消") && msg.contains("videos"),
+            "the cancel note must name the delivered location: {msg}"
+        );
     }
 
     /// A deleted job with delete_file=true must remove the real file through
