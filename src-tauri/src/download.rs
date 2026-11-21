@@ -1608,6 +1608,12 @@ impl DownloadManager {
         dest: &Path,
     ) -> Result<(), String> {
         let exact = exact_output_path_record(dest);
+        // Stat before taking the db lock: a slow filesystem (network save
+        // dir) must not stall every other job's writes while this row lands.
+        let file_size = std::fs::metadata(dest)
+            .ok()
+            .map(|m| m.len())
+            .or(running.file_size);
         let done = {
             let db = lock_db(&self.db);
             if let Some(disposition) = self.stop_disposition_for(job_id, token) {
@@ -1624,10 +1630,7 @@ impl DownloadManager {
             done.status = JobStatus::Done;
             done.progress = 1.0;
             done.output_path = Some(dest.to_string_lossy().into());
-            done.file_size = std::fs::metadata(dest)
-                .ok()
-                .map(|m| m.len())
-                .or(done.file_size);
+            done.file_size = file_size;
             done.error = None;
             if let Err(e) = db.update_job(&done) {
                 tracing::error!(target: "core", "download: 状态写入失败 {job_id}: {e}");
