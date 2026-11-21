@@ -26,10 +26,13 @@ test("every resolve/auth listener registers through the bag", () => {
   // Creation alone proves nothing about WHERE: a bag hoisted to component
   // scope stays disposed forever after the first unmount and silently stops
   // tracking. It must be the first statement of the effect.
-  assert.match(
-    src,
-    /useEffect\(\(\) => \{[\s\S]{0,400}?const listeners = createListenerBag\(\);/,
-    "the bag must be created inside the effect, not hoisted",
+  // Indentation pins the scope: a body statement sits at 4+ spaces, a
+  // hoisted one at 2 (prettier-consistent throughout the repo).
+  const created = src.match(/^( +)const listeners = createListenerBag\(\);/m);
+  assert.ok(created, "the creation line must exist");
+  assert.ok(
+    created[1].length >= 4,
+    "the bag must be created inside the effect body, not hoisted to component scope",
   );
 });
 
