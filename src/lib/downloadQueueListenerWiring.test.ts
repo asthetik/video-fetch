@@ -21,7 +21,18 @@ test("the progress listener registers through the bag", () => {
   assert.match(
     src,
     /const listeners = createListenerBag\(\);/,
-    "the bag must be created inside the effect",
+    "the bag must be created",
+  );
+  // Creation alone proves nothing about WHERE: a bag hoisted to component
+  // scope stays disposed forever after the first unmount and silently stops
+  // tracking. It must be the first statement of the effect.
+  // Indentation pins the scope: a body statement sits at 4+ spaces, a
+  // hoisted one at 2 (prettier-consistent throughout the repo).
+  const created = src.match(/^( +)const listeners = createListenerBag\(\);/m);
+  assert.ok(created, "the creation line must exist");
+  assert.ok(
+    created[1].length >= 4,
+    "the bag must be created inside the effect body, not hoisted to component scope",
   );
   assert.doesNotMatch(
     src,
