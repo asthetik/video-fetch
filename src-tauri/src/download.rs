@@ -1039,12 +1039,16 @@ impl DownloadManager {
             self.try_cancel(id).await;
         }
         if delete_file && let Some(path) = job.output_path.as_deref() {
-            // Prefer the recorded exact bytes: the display string is melted
-            // for non-UTF-8 names and can never match the real file (the
-            // open command resolves the same record).
-            let p = self
-                .recorded_exact_path(path)
-                .unwrap_or_else(|| PathBuf::from(path));
+            // Resolve by THIS row's id: the display string is melted for
+            // non-UTF-8 names and can even collide across rows (two invalid
+            // names melting to the same display), which a display-keyed
+            // lookup could answer with another row's file.
+            let exact = lock_db(&self.db)
+                .exact_output_path_for_job(id)
+                .ok()
+                .flatten()
+                .map(|bytes| fsutil::path_from_record_bytes(&bytes));
+            let p = exact.unwrap_or_else(|| PathBuf::from(path));
             if p.is_file() {
                 fs::remove_file(&p).map_err(|e| {
                     AppError::Message(format!("删除文件失败: {e}（文件可能被占用，请关闭后重试）"))
@@ -6471,6 +6475,67 @@ mod tests {
         assert!(
             !real.exists(),
             "the real file must be deleted via the exact record"
+        );
+    }
+
+    /// Two rows whose display strings melt identically must not cross-delete:
+    /// delete resolves the exact record by job id, not by the melted display
+    /// (a display-keyed LIMIT 1 lookup answers with whichever row comes
+    /// first and can remove the OTHER row's file).
+    ///
+    /// Value: protects=delete's by-id exact resolution; fails_when=the lookup
+    /// keys on the display string again; why_new=the melted-display collision
+    /// was review-confirmed but untestable via real non-UTF-8 names on macOS;
+    /// seam=two rows sharing one display, distinct exact records
+    #[test]
+    fn delete_resolves_the_exact_record_by_job_id_not_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("videos");
+        std::fs::create_dir_all(&save).unwrap();
+        let manager = manager_for(
+            dir.path(),
+            Arc::new(CountingDownloader::new(0, true)),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let melted = save.join("melted.mp4").to_string_lossy().into_owned();
+
+        let file_a = save.join("a.mp4");
+        let file_b = save.join("b.mp4");
+        std::fs::write(&file_a, b"a").unwrap();
+        std::fs::write(&file_b, b"b").unwrap();
+
+        let mut first = sample_job("job-first");
+        first.status = JobStatus::Done;
+        first.output_path = Some(melted.clone());
+        let mut second = sample_job("job-second");
+        second.status = JobStatus::Done;
+        second.output_path = Some(melted);
+        {
+            let db = manager.db.lock().unwrap();
+            db.insert_job(&first).unwrap();
+            db.insert_job(&second).unwrap();
+            db.set_output_path_exact(
+                "job-first",
+                Some(fsutil::path_to_record_bytes(&file_a).as_slice()),
+            )
+            .unwrap();
+            db.set_output_path_exact(
+                "job-second",
+                Some(fsutil::path_to_record_bytes(&file_b).as_slice()),
+            )
+            .unwrap();
+        }
+
+        // Delete the SECOND row: a display-keyed lookup answers with the
+        // first row's record (lower rowid) and would remove a.mp4 instead.
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(manager.delete("job-second", true))
+            .unwrap();
+
+        assert!(
+            !file_b.exists() && file_a.exists(),
+            "delete must remove its own row's file (b), never the sibling's (a)"
         );
     }
 

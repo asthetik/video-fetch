@@ -372,6 +372,21 @@ impl Db {
 
     /// The exact bytes recorded for the row whose display path equals
     /// `display`, when one was recorded.
+    /// The exact bytes recorded for THIS row. Delete must resolve by id, not
+    /// by the melted display string: two different invalid names can melt to
+    /// the same display, and a display-keyed lookup could then delete the
+    /// other row's file.
+    pub fn exact_output_path_for_job(&self, id: &str) -> AppResult<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT output_path_exact FROM jobs
+             WHERE id = ?1 AND output_path_exact IS NOT NULL",
+        )?;
+        let bytes = stmt
+            .query_row(params![id], |row| row.get::<_, Vec<u8>>(0))
+            .optional()?;
+        Ok(bytes)
+    }
+
     pub fn exact_output_path_for(&self, display: &str) -> AppResult<Option<Vec<u8>>> {
         let mut stmt = self.conn.prepare(
             "SELECT output_path_exact FROM jobs
