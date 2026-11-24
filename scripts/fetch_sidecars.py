@@ -88,7 +88,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 YTDLP_DOWNLOAD_BASE = "https://github.com/yt-dlp/yt-dlp/releases/download"
-FFMPEG_BTBN_TAG = "autobuild-2026-11-01-12-49"
+FFMPEG_BTBN_TAG = "autobuild-2026-11-24-12-41"
 FFMPEG_BTBN_BASE = (
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/" + FFMPEG_BTBN_TAG
 )
