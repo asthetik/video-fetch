@@ -2,13 +2,7 @@
 
 本项目的版本说明集中记录于此，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.4.6] - 未发布
-
-### Fixed
-
-- 依赖例行更新：后端 rusqlite 升至 0.42.0（自带 SQLite 3.54.1），libsqlite3-sys 随之升至 0.40.0；tauri-plugin-shell、tauri-plugin-opener、tauri-plugin-dialog、tauri-plugin-single-instance 的版本下限同步对齐到锁文件中的当前版本，无接口与行为变化。
-
-## [0.4.6] - 未发布
+## [0.4.6] - 2026-11-25
 
 ### Fixed
 
