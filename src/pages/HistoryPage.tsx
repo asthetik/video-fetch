@@ -237,9 +237,29 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     try {
       await api.deleteJob(job.id, choice === "record_and_file");
       setAllJobs((prev) => prev.filter((j) => j.id !== job.id));
+      if (choice === "record") {
+        // Only a record-only delete is undoable; the backend keeps the row
+        // for the undo window (RecentDeletedJobs, TTL 60s, session-only).
+        toast.success("已删除任务记录", {
+          description: "本地文件不受影响",
+          action: { label: "撤销", onClick: () => void undoDelete(job.id) },
+          duration: 8000,
+        });
+      }
       onJobsChanged?.();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+      await loadJobs();
+    }
+  }
+
+  async function undoDelete(id: string) {
+    try {
+      await api.restoreDeletedJob(id);
+      toast.success("已恢复任务记录");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
       await loadJobs();
     }
   }

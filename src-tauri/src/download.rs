@@ -1027,6 +1027,14 @@ impl DownloadManager {
         lock_db(&self.db).upsert_resolve_cache(key, meta, fetched_at)
     }
 
+    /// Re-insert a stashed row from the session's delete graveyard (the
+    /// undo affordance for record-only deletes). The row keeps its id,
+    /// status and timestamps; an id that re-appeared meanwhile surfaces as
+    /// a plain constraint error.
+    pub async fn restore(&self, job: DownloadJob) -> AppResult<()> {
+        lock_db(&self.db).insert_job(&job)
+    }
+
     pub async fn delete(&self, id: &str, delete_file: bool) -> AppResult<()> {
         let job = lock_db(&self.db).get_job(id)?;
         if matches!(
