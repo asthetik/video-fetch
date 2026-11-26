@@ -20,27 +20,37 @@ export function NamingPreview({ template }: NamingPreviewProps) {
 
   useEffect(() => {
     let cancelled = false;
-    void api
-      .previewName(
-        template,
-        SAMPLE.title,
-        SAMPLE.id,
-        SAMPLE.uploader,
-        SAMPLE.ext,
-        SAMPLE.index,
-      )
-      .then((name) => {
-        if (!cancelled) {
-          setPreview(name);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPreview("—");
-        }
-      });
+    // Settings state updates per keystroke; only the persist is debounced
+    // upstream. Wait out a 300ms quiet window here so a template edit fires
+    // one backend preview instead of one per character, and keep the last
+    // preview visible while waiting.
+    const timer = setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      void api
+        .previewName(
+          template,
+          SAMPLE.title,
+          SAMPLE.id,
+          SAMPLE.uploader,
+          SAMPLE.ext,
+          SAMPLE.index,
+        )
+        .then((name) => {
+          if (!cancelled) {
+            setPreview(name);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setPreview("—");
+          }
+        });
+    }, 300);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [template]);
 
