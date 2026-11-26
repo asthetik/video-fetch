@@ -582,19 +582,18 @@ pub async fn resolve_url(
     let log_bvid = resolve_cache::extract_bilibili_id(&url);
     tracing::info!(target: "core", "resolve: 开始 {}", log_bvid.as_deref().unwrap_or("未知"));
 
-    let client = reqwest::Client::builder()
-        .user_agent(bilibili_view::USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
+    // Same builder settings as the shared client (UA + 8s timeouts), so the
+    // clone is behavior-identical to the private build this used to do per
+    // resolve — one connection pool and DNS cache instead of fresh ones
+    // every call.
+    let client = state.http_client.clone();
     let cookie_header = stored_cookies
         .as_deref()
         .map(cookies::cookie_header_for_bilibili)
         .filter(|s| !s.is_empty());
 
     // Fast path: single-part videos resolve via view -> playurl; failures fall back to yt-dlp.
-    let view_meta = match bilibili_view::resolve_view(&url).await {
+    let view_meta = match bilibili_view::resolve_view(&url, &client).await {
         Ok(partial) if is_current() => {
             let _ = app.emit(
                 RESOLVE_PARTIAL_EVENT,
@@ -2650,6 +2649,30 @@ mod tests {
     /// the behavioral tests cannot reach (the emit needs an AppHandle), so
     /// they are pinned in source: dropping either silently kills the
     /// other page's refresh or the undo window on failure.
+    /// Every resolve used to build two throwaway reqwest clients per call
+    /// (connection pool + DNS cache discarded immediately). The shared
+    /// client carries the same UA and timeouts, so the pin holds the
+    /// single-builder invariant: exactly the one in build_app_state.
+    #[test]
+    fn resolve_reuses_the_shared_http_client() {
+        // CRLF-normalized: Windows checkouts hand include_str CRLF source.
+        // The needle is assembled at runtime so this test's own source does
+        // not match itself (include_str embeds the whole file, needles and
+        // all).
+        let commands = include_str!("commands.rs").replace("\r\n", "\n");
+        let view = include_str!("bilibili_view.rs").replace("\r\n", "\n");
+        let needle = ["reqwest::", "Client::builder()"].concat();
+        assert_eq!(
+            commands.matches(&needle).count(),
+            1,
+            "resolve_url must clone the shared client instead of building a private one per resolve"
+        );
+        assert!(
+            !view.contains("Client::builder()"),
+            "resolve_view must take the shared client from its caller"
+        );
+    }
+
     #[test]
     fn restore_wires_the_restored_event_and_the_failure_restash() {
         // Normalize CRLF first: Windows checkouts hand include_str a
