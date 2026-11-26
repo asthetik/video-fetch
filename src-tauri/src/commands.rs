@@ -2605,7 +2605,9 @@ mod tests {
     /// other page's refresh or the undo window on failure.
     #[test]
     fn restore_wires_the_restored_event_and_the_failure_restash() {
-        let src = include_str!("commands.rs");
+        // Normalize CRLF first: Windows checkouts hand include_str a
+        // \r\n source and a \n needle would silently never match.
+        let src = include_str!("commands.rs").replace("\r\n", "\n");
         assert!(
             src.contains("app.emit(\"download://restored\", &id)"),
             "restore must emit download://restored so the other surface reloads"
