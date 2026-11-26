@@ -57,6 +57,18 @@ export function LogsPage() {
     updateJumpVisibility();
   }, [lines, updateJumpVisibility]);
 
+  // A resize changes clientHeight without firing scroll; recompute or the
+  // button goes stale until the next scroll or line change.
+  useEffect(() => {
+    const el = logViewRef.current;
+    if (!el || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => updateJumpVisibility());
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateJumpVisibility]);
+
   function scrollToBottom() {
     const el = logViewRef.current;
     if (!el) {

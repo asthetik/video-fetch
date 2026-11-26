@@ -54,6 +54,29 @@ test("the log viewer offers a jump-to-bottom control", () => {
   );
 });
 
+test("the jump wiring is pinned end to end", () => {
+  assert.match(
+    page,
+    /ref=\{logViewRef\}/,
+    "the scroll container must be the measured element",
+  );
+  assert.match(
+    page,
+    /onScroll=\{updateJumpVisibility\}/,
+    "scrolling is what toggles the button; without the handler it never appears",
+  );
+  assert.match(
+    page,
+    /el\.scrollTop = el\.scrollHeight;/,
+    "the click must actually scroll to the bottom",
+  );
+  assert.match(
+    page,
+    /new ResizeObserver\(\(\) => updateJumpVisibility\(\)\)/,
+    "a resize changes clientHeight without a scroll event; the observer keeps the button honest",
+  );
+});
+
 test("the jump button floats over the viewer", () => {
   assert.match(
     css,

@@ -664,6 +664,8 @@
 .log-view {
   margin: 0;
   padding: 0.5rem;
+  /* Room for the floating jump button over the tail lines. */
+  padding-bottom: 2.75rem;
   overflow: auto;
   flex: 1;
   min-height: 240px;
