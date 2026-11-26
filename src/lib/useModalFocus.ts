@@ -27,12 +27,14 @@ export function useModalFocus(
     panelRef.current?.focus();
     // Tab is trapped inside the modal while it is open: a modal is a focus
     // boundary — letting focus escape behind the backdrop leaves keyboard
-    // users operating an invisible page. The listener rides on document,
-    // not the panel: a busy dialog disables the focused button, the browser
-    // drops focus onto body, and a body-targeted Tab would never bubble
-    // through the panel. Focus outside the panel (body, or the tabIndex=-1
-    // panel itself) counts as index -1, so Tab pulls it back to the first
-    // control and Shift+Tab to the last. Both ends wrap.
+    // users operating an invisible page. The listener rides on document in
+    // the capture phase: a busy dialog disables the focused button and the
+    // browser drops focus onto body; worse, the dialog backdrops stop
+    // keydown propagation while it bubbles up through React's portal
+    // delegation on document.body, so a bubbling document listener would
+    // never see the event at all. Focus outside the panel (body, or the
+    // tabIndex=-1 panel itself) counts as index -1, so Tab pulls it back to
+    // the first control and Shift+Tab to the last. Both ends wrap.
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Tab") {
         return;
@@ -62,9 +64,11 @@ export function useModalFocus(
       next.focus();
       e.preventDefault();
     };
-    document.addEventListener("keydown", onKeyDown);
+    // Capture phase only: bubbling Tab is stopped at the backdrop before it
+    // can reach a document-level bubble listener.
+    document.addEventListener("keydown", onKeyDown, true);
     return () => {
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
       // A tab switch can have hidden the trigger (hidden+inert home subtree)
       // while the dialog was open; restoring focus there would fail
       // silently and leave it on body.

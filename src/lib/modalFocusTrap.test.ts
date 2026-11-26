@@ -6,9 +6,10 @@ import { join } from "node:path";
 // A modal is a focus boundary while it is open: Tab must cycle through the
 // panel's controls instead of escaping behind the backdrop onto the invisible
 // page. The trap must also survive the busy window — disabling the focused
-// button drops focus onto body, and a body-targeted Tab never reaches a
-// listener attached to the panel, so the trap has to ride on document.
-// Node tests cannot mount React, so the trap is pinned in source.
+// button drops focus onto body, and the backdrops' synthetic stopPropagation
+// kills bubbling keydown before it can reach document — so the trap rides on
+// document in the capture phase. Node tests cannot mount React, so the trap
+// is pinned in source.
 const SOURCE = join(import.meta.dirname, "..", "lib", "useModalFocus.ts");
 const src = readFileSync(SOURCE, "utf8");
 
@@ -20,13 +21,13 @@ test("the modal hook traps Tab while the panel is open", () => {
   );
   assert.match(
     src,
-    /document\.addEventListener\("keydown", onKeyDown\)/,
-    "the trap must listen on document: a busy dialog drops focus to body and a body-targeted Tab never reaches a panel listener",
+    /document\.addEventListener\("keydown", onKeyDown, true\)/,
+    "the trap must listen on document in capture phase: a busy dialog drops focus to body, and the backdrops' stopPropagation kills bubbling keydown before a bubble-phase listener could see it",
   );
   assert.match(
     src,
-    /document\.removeEventListener\("keydown", onKeyDown\)/,
-    "the Tab handler must be removed when the modal closes",
+    /document\.removeEventListener\("keydown", onKeyDown, true\)/,
+    "the capture-phase Tab handler must be removed with the matching capture flag",
   );
 });
 
