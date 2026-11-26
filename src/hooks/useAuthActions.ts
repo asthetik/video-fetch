@@ -12,6 +12,9 @@ import type { AuthStatus as AuthStatusType } from "../types";
 const LOGIN_HINT =
   "未获取到登录凭证。请完成网页登录，或到设置 → 高级导入 cookies.txt。";
 
+/** Backend sentinel for "the user closed the login window" — see commands.rs. */
+const LOGIN_CANCELLED = "auth:login-cancelled";
+
 /**
  * Shared auth state + actions for auth controls: initial fetch,
  * auth://status event stream, busy flags, logout confirmation, and a transient
@@ -82,7 +85,12 @@ export function useAuthActions(
         setHint(LOGIN_HINT);
       }
     } catch (err) {
-      setHint(toErrorMessage(err));
+      const message = toErrorMessage(err);
+      // A voluntary close is the user saying "not now" — stay silent
+      // instead of nagging. Timeouts and real failures still surface.
+      if (message !== LOGIN_CANCELLED) {
+        setHint(message);
+      }
     } finally {
       setLoggingIn(false);
     }

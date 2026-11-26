@@ -1632,6 +1632,25 @@ async fn clear_webview_session(win: &tauri::WebviewWindow) {
 
 /// Open an embedded Bilibili login WebView, poll for SESSDATA, and return auth status.
 ///
+/// How the login poll ended: a captured status, or the user closing the
+/// login window before anything was captured.
+enum PollOutcome {
+    Status(AuthStatus),
+    Cancelled,
+}
+
+/// The sentinel the frontend matches to stay silent on a voluntary close
+/// (its own choice needs no toast). Stable marker; B20's structured error
+/// model will replace the string match.
+const LOGIN_CANCELLED: &str = "auth:login-cancelled";
+
+fn login_outcome(outcome: PollOutcome) -> AppResult<AuthStatus> {
+    match outcome {
+        PollOutcome::Status(status) => Ok(status),
+        PollOutcome::Cancelled => Err(AppError::Message(LOGIN_CANCELLED.into())),
+    }
+}
+
 /// Waits until cookies are captured, the login window is closed, or a timeout elapses.
 /// Cookie scraping via WebView APIs is best-effort on some platforms; if status stays
 /// logged out, use Settings → Advanced → import Netscape `cookies.txt`.
@@ -1701,7 +1720,7 @@ pub async fn start_bilibili_login(
     }
 
     let app_handle = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel::<AuthStatus>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<PollOutcome>();
     let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
     let tx_poll = std::sync::Arc::clone(&tx);
 
@@ -1710,13 +1729,11 @@ pub async fn start_bilibili_login(
             tokio::time::sleep(Duration::from_millis(1200)).await;
 
             let Some(win) = app_handle.get_webview_window(BILIBILI_LOGIN_LABEL) else {
-                // Window closed before we captured cookies.
+                // Window closed before we captured cookies: the user said
+                // "not now". Distinct from the timeout so the frontend can
+                // stay silent instead of nagging about a choice it made.
                 if let Some(tx) = tx_poll.lock().ok().and_then(|mut g| g.take()) {
-                    let status = app_handle
-                        .try_state::<AppState>()
-                        .map(|s| s.auth.auth_status())
-                        .unwrap_or(AuthStatus::LoggedOut);
-                    let _ = tx.send(status);
+                    let _ = tx.send(PollOutcome::Cancelled);
                 }
                 return;
             };
@@ -1725,7 +1742,7 @@ pub async fn start_bilibili_login(
                 let _ = win.close();
                 let _ = app_handle.emit("auth://status", status.clone());
                 if let Some(tx) = tx_poll.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(status);
+                    let _ = tx.send(PollOutcome::Status(status));
                 }
                 return;
             }
@@ -1736,17 +1753,18 @@ pub async fn start_bilibili_login(
                 .try_state::<AppState>()
                 .map(|s| s.auth.auth_status())
                 .unwrap_or(AuthStatus::LoggedOut);
-            let _ = tx.send(status);
+            let _ = tx.send(PollOutcome::Status(status));
         }
     });
 
-    let status = match rx.await {
-        Ok(status) => status,
-        Err(_) => state.auth.auth_status(),
+    let outcome = match rx.await {
+        Ok(outcome) => outcome,
+        Err(_) => PollOutcome::Status(state.auth.auth_status()),
     };
+    let status = login_outcome(outcome)?;
     match &status {
         AuthStatus::LoggedIn => tracing::info!(target: "core", "auth: 登录成功"),
-        _ => tracing::info!(target: "core", "auth: 登录未完成（窗口关闭或超时）"),
+        _ => tracing::info!(target: "core", "auth: 登录超时"),
     }
     Ok(status)
 }
@@ -2624,6 +2642,17 @@ mod tests {
         assert!(
             impl_body.contains("恢复失败：{e}"),
             "the failure must surface as Chinese user copy, not a raw SQLite string"
+        );
+    }
+
+    #[test]
+    fn login_outcome_maps_cancelled_to_the_sentinel_error() {
+        assert!(login_outcome(PollOutcome::Status(AuthStatus::LoggedIn)).is_ok());
+        let cancelled = login_outcome(PollOutcome::Cancelled).unwrap_err();
+        assert_eq!(
+            cancelled.to_string(),
+            LOGIN_CANCELLED,
+            "the frontend matches this exact marker to stay silent on a voluntary close"
         );
     }
 
