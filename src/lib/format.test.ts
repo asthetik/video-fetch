@@ -11,11 +11,11 @@ test("formatBytes walks the usual tiers", () => {
   assert.equal(formatBytes(3.5 * 1024 * 1024), "3.50 MB");
 });
 
-test("GB is the top tier — larger sizes accumulate in GB, never TB", () => {
+test("GB is the top tier — larger sizes accumulate in GB", () => {
   assert.equal(formatBytes(2 * 1024 ** 3), "2.00 GB");
   assert.equal(
     formatBytes(1024 ** 4),
     "1024.0 GB",
-    "a terabyte-scale size must render in GB; the TB tier was dropped by decision",
+    "a terabyte-scale size must render in GB, the top tier",
   );
 });

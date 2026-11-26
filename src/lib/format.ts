@@ -2,8 +2,8 @@ export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) {
     return "0 B";
   }
-  // GB is the top tier by decision (2026-11-26): anything larger accumulates
-  // here instead of introducing a TB unit nobody asked for.
+  // GB is the top tier by decision (2026-11-26): anything larger
+  // accumulates here.
   const units = ["B", "KB", "MB", "GB"];
   let value = bytes;
   let unit = 0;
