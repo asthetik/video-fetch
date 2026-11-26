@@ -1384,11 +1384,16 @@ async fn delete_job_impl(state: &AppState, id: &str, delete_file: bool) -> AppRe
 #[tauri::command]
 pub async fn restore_deleted_job(
     window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<DownloadJob> {
     ensure_main_window_label(window.label())?;
-    restore_deleted_job_impl(&state, &id).await
+    let job = restore_deleted_job_impl(&state, &id).await?;
+    // Surfaces other than the undoing one reload on this event — the queue
+    // page's undo must reach an open history page and vice versa.
+    let _ = app.emit("download://restored", &id);
+    Ok(job)
 }
 
 /// [`restore_deleted_job`] body, split out so tests can drive the restore
@@ -1399,7 +1404,14 @@ async fn restore_deleted_job_impl(state: &AppState, id: &str) -> AppResult<Downl
         .take(id, std::time::Instant::now())
         .ok_or_else(|| AppError::Message("撤销窗口已过期，或该记录不是本次会话删除的".into()))?;
     tracing::info!(target: "core", "download: 撤销删除 {}", id);
-    state.downloads.restore(job.clone()).await?;
+    if let Err(e) = state.downloads.restore(job.clone()).await {
+        // A failed re-insert must not burn the undo window: put the row
+        // back so the user can retry.
+        state
+            .recent_deleted_jobs
+            .record(job, std::time::Instant::now());
+        return Err(AppError::Message(format!("恢复失败：{e}")));
+    }
     Ok(job)
 }
 
@@ -2587,6 +2599,32 @@ mod tests {
     /// guard. Counting the call sites in source (the file includes itself)
     /// means deleting any one call — or wiring a new command and
     /// forgetting the guard — changes the count and turns this red.
+    /// The undo's cross-surface refresh and its failure re-stash are wiring
+    /// the behavioral tests cannot reach (the emit needs an AppHandle), so
+    /// they are pinned in source: dropping either silently kills the
+    /// other page's refresh or the undo window on failure.
+    #[test]
+    fn restore_wires_the_restored_event_and_the_failure_restash() {
+        let src = include_str!("commands.rs");
+        assert!(
+            src.contains("app.emit(\"download://restored\", &id)"),
+            "restore must emit download://restored so the other surface reloads"
+        );
+        let impl_body = src
+            .split("async fn restore_deleted_job_impl")
+            .nth(1)
+            .expect("restore impl present")
+            .to_string();
+        assert!(
+            impl_body.contains("recent_deleted_jobs\n            .record(job"),
+            "a failed re-insert must re-stash the row instead of burning the undo window"
+        );
+        assert!(
+            impl_body.contains("恢复失败：{e}"),
+            "the failure must surface as Chinese user copy, not a raw SQLite string"
+        );
+    }
+
     #[test]
     fn high_sensitivity_commands_check_the_caller_window() {
         // Assembled at runtime so this test's own source does not match
