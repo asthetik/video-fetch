@@ -28,7 +28,7 @@ const REROLL_LIMIT: usize = 8;
 const QUIESCE_TICKS: usize = 12;
 
 #[tokio::test]
-#[ignore = "soak: run locally, never in CI"]
+#[ignore = "soak: opt-in — the CI soak job and local drives pass --ignored"]
 async fn soak_churns_downloads_and_asserts_invariants() {
     let minutes: u64 = parse_env_or("SOAK_MINUTES", std::env::var("SOAK_MINUTES"), 5);
     let seed: u64 = parse_env_or(

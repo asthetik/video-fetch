@@ -116,7 +116,7 @@ jobs:
         with:
           workspaces: src-tauri -> target
           # Image-segmented bucket, so no cache entry can cross images; the
-          # name is the one `lint` explains.
+          # name is the one `lint` explains (its bucket, shared here).
           shared-key: src-tauri-${{ matrix.os }}
       - name: Install Tauri Linux deps
         if: runner.os == 'Linux'
@@ -159,6 +159,47 @@ jobs:
           echo "regression tests listed: $n"
           [ "$n" -ge 12 ]
           cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test regression -- --test-threads=1
+
+  soak:
+    # The soak churns mocked downloads and asserts invariants — the only
+    # place the crash/clean/restart oracles run at all. It is #[ignore]d so
+    # ordinary `cargo test` skips it (minutes-scale by design); this job is
+    # its CI execution point: a short drive on every push/PR keeps the soak
+    # code from rotting, while minutes-long local drives remain the deep
+    # check. Shares the unit job's cache bucket (same dev profile family).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          # Image-segmented bucket, the one `lint` explains; shared with
+          # `unit` (and `lint` itself) on the same image.
+          shared-key: src-tauri-ubuntu-22.04
+      - name: Install Tauri Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+      - name: Cache sidecar binaries
+        uses: actions/cache@v6
+        with:
+          path: src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/requirements-sidecars.txt', 'scripts/fetch_sidecars.py', 'scripts/sidecar_pins.json') }}
+      - name: Fetch sidecar binaries
+        # Compile-time requirement: tauri-build copies bundle.externalBin.
+        run: python scripts/fetch_sidecars.py
+      - name: Soak drive (short)
+        env:
+          SOAK_MINUTES: "2"
+        # --include-ignored, not --ignored: the file also holds plain tests
+        # (the SOAK_* parse guards) that only this target compiles; the churn
+        # test itself is ignored and runs either way.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test soak -- --include-ignored
 
   release-smoke:
     # The release profile is read by `npx tauri build` and by nothing else, and
