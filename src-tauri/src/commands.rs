@@ -2655,21 +2655,38 @@ mod tests {
     /// single-builder invariant: exactly the one in build_app_state.
     #[test]
     fn resolve_reuses_the_shared_http_client() {
-        // CRLF-normalized: Windows checkouts hand include_str CRLF source.
+        // Walk the whole src tree — a private builder hiding in wbi.rs,
+        // playurl.rs or space.rs leaks a pool per call just the same.
+        // CRLF-normalized: Windows checkouts hand file reads CRLF source.
         // The needle is assembled at runtime so this test's own source does
-        // not match itself (include_str embeds the whole file, needles and
-        // all).
-        let commands = include_str!("commands.rs").replace("\r\n", "\n");
-        let view = include_str!("bilibili_view.rs").replace("\r\n", "\n");
+        // not match itself (the walk embeds this file, needles and all).
+        fn rs_sources(root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(root).expect("src dir readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rs_sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(
+                        std::fs::read_to_string(&path)
+                            .unwrap_or_default()
+                            .replace("\r\n", "\n"),
+                    );
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        rs_sources(std::path::Path::new("src"), &mut sources);
+        assert!(!sources.is_empty(), "the src tree must be walkable");
         let needle = ["reqwest::", "Client::builder()"].concat();
+        let files_with_builder = sources.iter().filter(|src| src.contains(&needle)).count();
         assert_eq!(
-            commands.matches(&needle).count(),
-            1,
-            "resolve_url must clone the shared client instead of building a private one per resolve"
+            files_with_builder, 1,
+            "exactly one file may build a reqwest client: build_app_state's shared one"
         );
-        assert!(
-            !view.contains("Client::builder()"),
-            "resolve_view must take the shared client from its caller"
+        let hits: usize = sources.iter().map(|src| src.matches(&needle).count()).sum();
+        assert_eq!(
+            hits, 1,
+            "and exactly once — every other path must borrow the shared client"
         );
     }
 
