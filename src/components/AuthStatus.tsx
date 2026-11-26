@@ -62,7 +62,7 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
               type="button"
               className="btn btn-sm"
               onClick={requestLogout}
-              disabled={loggingOut}
+              disabled={loggingIn || loggingOut}
             >
               {loggingOut ? "登出中…" : "登出"}
             </button>

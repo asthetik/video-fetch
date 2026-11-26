@@ -17,7 +17,11 @@ test("the settings row offers re-login alongside logout when stale", () => {
     /authState\.data === "possibly_expired" \? \(/,
     "the stale state needs its own branch between logged_out and the logout fallback",
   );
-  const branch = src.split('authState.data === "possibly_expired" ? (')[1] ?? "";
+  // Cut at the next branch marker first: a tail-wide match would hit the
+  // logged_in fallback's logout button and pass even without the stale one.
+  const branch = (
+    src.split('authState.data === "possibly_expired" ? (')[1] ?? ""
+  ).split(") : authState.status")[0];
   assert.match(
     branch,
     /重新登录/,
