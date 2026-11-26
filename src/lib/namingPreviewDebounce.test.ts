@@ -22,6 +22,11 @@ test("the naming preview waits out a 300ms quiet window", () => {
     /\}, 300\);/,
     "the quiet window is 300ms (same as the URL bar)",
   );
+  assert.match(
+    src,
+    /\}, \[template\]\);/,
+    "the effect must re-arm per template change; a [] deps array would freeze the preview forever",
+  );
 });
 
 test("a template change cancels the pending window and the stale result", () => {
