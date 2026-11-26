@@ -82,10 +82,13 @@ export function authChipView(state: LoadState<AuthStatus>): AuthChipView {
         disabled: false,
       };
     case "possibly_expired":
+      // A stale session is exactly when the user wants a fresh login: the
+      // chip re-logs-in directly. Logout stays on the settings row, which
+      // offers both actions in this state.
       return {
-        action: "logout",
-        label: "登出",
-        title: "登录可能过期 · 点击退出登录",
+        action: "login",
+        label: "重新登录",
+        title: "登录可能过期 · 点击重新登录",
         stateClass: "possibly_expired",
         disabled: false,
       };

@@ -45,6 +45,28 @@ export function AuthStatus({ onStatusChange }: AuthStatusProps) {
           >
             {loggingIn ? "登录中…" : "登录"}
           </button>
+        ) : authState.status === "ready" && authState.data === "possibly_expired" ? (
+          // A stale session offers both paths: a fresh login without
+          // throwing the old cookies away first, and the logout flow for
+          // when the user would rather start clean.
+          <>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void login()}
+              disabled={loggingIn}
+            >
+              {loggingIn ? "登录中…" : "重新登录"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={requestLogout}
+              disabled={loggingIn || loggingOut}
+            >
+              {loggingOut ? "登出中…" : "登出"}
+            </button>
+          </>
         ) : authState.status === "ready" ? (
           <button
             type="button"
