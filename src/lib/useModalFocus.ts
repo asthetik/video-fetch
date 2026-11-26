@@ -25,11 +25,14 @@ export function useModalFocus(
         ? document.activeElement
         : null;
     panelRef.current?.focus();
-    // Tab is trapped inside the panel while it is open: a modal is a focus
+    // Tab is trapped inside the modal while it is open: a modal is a focus
     // boundary — letting focus escape behind the backdrop leaves keyboard
-    // users operating an invisible page. Both ends wrap: Tab from the last
-    // control returns to the first; Shift+Tab from the first (or from the
-    // panel itself, whose index is -1) lands on the last.
+    // users operating an invisible page. The listener rides on document,
+    // not the panel: a busy dialog disables the focused button, the browser
+    // drops focus onto body, and a body-targeted Tab would never bubble
+    // through the panel. Focus outside the panel (body, or the tabIndex=-1
+    // panel itself) counts as index -1, so Tab pulls it back to the first
+    // control and Shift+Tab to the last. Both ends wrap.
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Tab") {
         return;
@@ -42,22 +45,32 @@ export function useModalFocus(
         panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
       ).filter((el) => el.offsetParent !== null);
       if (focusables.length === 0) {
+        // A busy modal can have every control disabled; pin focus on the
+        // panel itself instead of letting Tab traverse the hidden page.
+        panel.focus();
         e.preventDefault();
         return;
       }
       const current = document.activeElement;
-      const index = focusables.indexOf(current as HTMLElement);
+      const index =
+        current instanceof HTMLElement && panel.contains(current)
+          ? focusables.indexOf(current)
+          : -1;
       const next = e.shiftKey
         ? focusables[(index <= 0 ? focusables.length : index) - 1]
         : focusables[(index + 1) % focusables.length];
       next.focus();
       e.preventDefault();
     };
-    const panelEl = panelRef.current;
-    panelEl?.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
-      panelEl?.removeEventListener("keydown", onKeyDown);
-      previous?.focus();
+      document.removeEventListener("keydown", onKeyDown);
+      // A tab switch can have hidden the trigger (hidden+inert home subtree)
+      // while the dialog was open; restoring focus there would fail
+      // silently and leave it on body.
+      if (previous && previous.isConnected && previous.offsetParent !== null) {
+        previous.focus();
+      }
     };
   }, [open, panelRef]);
 }
