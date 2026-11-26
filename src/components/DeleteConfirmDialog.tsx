@@ -1,5 +1,5 @@
 import { createPortal } from "react-dom";
-import { useRef } from "react";
+import { useId, useRef } from "react";
 import { useModalFocus } from "../lib/useModalFocus";
 
 export type DeleteChoice = "cancel" | "record" | "record_and_file";
@@ -21,6 +21,7 @@ export function DeleteConfirmDialog({
   note,
   onChoose,
 }: DeleteConfirmDialogProps) {
+  const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   useModalFocus(open, panelRef);
 
@@ -49,12 +50,12 @@ export function DeleteConfirmDialog({
         className="modal"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="delete-dialog-title"
+        aria-labelledby={titleId}
         tabIndex={-1}
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="delete-dialog-title">删除任务</h3>
+        <h3 id={titleId}>删除任务</h3>
 
         {canDeleteFile && filePath ? (
           <>

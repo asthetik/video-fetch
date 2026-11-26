@@ -72,11 +72,13 @@ function jobLabel(job: DownloadJob): string {
 interface DownloadQueueProps {
   refreshToken: number;
   onOpenHistory: () => void;
+  active: boolean;
 }
 
 export function DownloadQueue({
   refreshToken,
   onOpenHistory,
+  active,
 }: DownloadQueueProps) {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +135,17 @@ export function DownloadQueue({
       setPendingCancel(null);
     }
   }, [jobs, pendingCancel]);
+
+  // A tab switch hides the dialogs via their `open={... && active}` gates.
+  // Clear the flags too so returning to the page does not silently re-open a
+  // dialog the user left behind (same pattern as SpaceListView).
+  useEffect(() => {
+    if (!active) {
+      setPendingDelete(null);
+      setPendingCancel(null);
+      setConfirmCancelAll(false);
+    }
+  }, [active]);
 
   async function handleCancel(id: string) {
     try {
@@ -247,9 +260,9 @@ export function DownloadQueue({
     setConfirmCancelAll(false);
   }
 
-  const { active, recentFailed, failedTotal, doneFallback } =
+  const { active: activeJobs, recentFailed, failedTotal, doneFallback } =
     partitionQueueJobs(jobs);
-  const cancellableCount = active.length;
+  const cancellableCount = activeJobs.length;
   const pausableCount = jobs.filter(
     (j) => j.status === "pending" || j.status === "running",
   ).length;
@@ -426,14 +439,14 @@ export function DownloadQueue({
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
       {!loading &&
-        active.length === 0 &&
+        activeJobs.length === 0 &&
         recentFailed.length === 0 &&
         !doneFallback?.length && (
           <p className="queue-empty">暂无下载任务</p>
         )}
-      {active.length > 0 && (
+      {activeJobs.length > 0 && (
         <ul className="queue-list">
-          <AnimatePresence initial={false}>{active.map(renderJobItem)}</AnimatePresence>
+          <AnimatePresence initial={false}>{activeJobs.map(renderJobItem)}</AnimatePresence>
         </ul>
       )}
       {recentFailed.length > 0 && (
@@ -463,7 +476,7 @@ export function DownloadQueue({
       )}
 
       <ConfirmDialog
-        open={confirmCancelAll}
+        open={confirmCancelAll && active}
         title="取消全部下载"
         message={`将取消 ${cancellableCount} 个未完成的任务（含暂停中的）；未完成任务的已下载部分会被删除，已保存到本地的成品不受影响。`}
         confirmLabel="全部取消"
@@ -476,7 +489,7 @@ export function DownloadQueue({
       />
 
       <ConfirmDialog
-        open={pendingCancel !== null && cancelCopy !== null}
+        open={pendingCancel !== null && cancelCopy !== null && active}
         title={cancelCopy?.title ?? ""}
         message={cancelCopy?.message ?? ""}
         confirmLabel={cancelCopy?.confirmLabel ?? "取消任务"}
@@ -493,7 +506,7 @@ export function DownloadQueue({
       />
 
       <DeleteConfirmDialog
-        open={pendingDelete !== null}
+        open={pendingDelete !== null && active}
         jobTitle={pendingDelete ? jobLabel(pendingDelete) : ""}
         filePath={pendingDelete?.output_path}
         note={
