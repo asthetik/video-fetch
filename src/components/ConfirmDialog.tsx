@@ -21,7 +21,7 @@ export function ConfirmDialog({
   title,
   message,
   confirmLabel,
-  cancelLabel = "取消",
+  cancelLabel = "关闭",
   danger = false,
   busy = false,
   onCancel,
@@ -60,6 +60,17 @@ export function ConfirmDialog({
         tabIndex={-1}
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // Native Enter already clicks a focused button; this branch covers
+          // the focused panel itself — where useModalFocus lands on open —
+          // so Enter confirms without tabbing to a control first. A bubbling
+          // Enter from a real control keeps target !== currentTarget and
+          // still takes the native click path.
+          if (e.key === "Enter" && e.target === e.currentTarget && !busy) {
+            e.preventDefault();
+            onConfirm();
+          }
+        }}
       >
         <h3 id={titleId}>{title}</h3>
         <p className="modal-desc">{message}</p>

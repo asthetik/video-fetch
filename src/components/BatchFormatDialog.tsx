@@ -132,7 +132,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
             )}
             <div className="modal-actions">
               <button type="button" className="btn" onClick={onCancel}>
-                取消
+                关闭
               </button>
               <button type="button" className="btn btn-primary" data-action="batch-submit" onClick={handleSubmit}>
                 添加 {count} 个任务
@@ -148,7 +148,6 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
         title="确认批量下载"
         message={`将添加 ${count} 个下载任务，确认继续？`}
         confirmLabel="继续"
-        cancelLabel="取消"
         busy={false}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={() => {
