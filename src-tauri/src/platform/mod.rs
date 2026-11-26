@@ -19,7 +19,7 @@ pub fn detect_platform(url: &str) -> Option<&'static str> {
 pub fn require_supported(url: &str) -> Result<String, &'static str> {
     let canonical = canonicalize_video_url(url);
     if detect_platform(&canonical).is_none() {
-        return Err("暂不支持该链接，最小可行产品仅支持 B 站");
+        return Err("暂不支持该链接，当前版本仅支持 B 站");
     }
     Ok(canonical)
 }
@@ -55,5 +55,21 @@ mod tests {
                 "should have been refused: {url}"
             );
         }
+    }
+
+    /// The rejection surfaces verbatim in the UI, so it must speak user
+    /// language; "MVP" is development jargon a downloader user should never
+    /// have to parse.
+    #[test]
+    fn the_rejection_message_speaks_user_language() {
+        let message = require_supported("https://example.com/video").unwrap_err();
+        assert!(
+            message.contains("当前版本"),
+            "rejection must name the current version, got: {message}"
+        );
+        assert!(
+            !message.contains("最小可行产品"),
+            "dev jargon leaked into user copy: {message}"
+        );
     }
 }
