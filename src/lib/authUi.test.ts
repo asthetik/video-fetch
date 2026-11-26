@@ -82,6 +82,15 @@ test("authChipView maps known statuses to login/logout actions", () => {
   assert.equal(inn.stateClass, "logged_in");
 
   const expired = authChipView({ status: "ready", data: "possibly_expired" });
-  assert.equal(expired.action, "logout");
+  assert.equal(expired.action, "login");
   assert.equal(expired.stateClass, "possibly_expired");
+});
+
+test("a possibly-expired read offers re-login, not just logout", () => {
+  const view = authChipView({ status: "ready", data: "possibly_expired" });
+  assert.equal(view.action, "login");
+  assert.equal(view.label, "重新登录");
+  assert.match(view.title, /重新登录/);
+  // The stale dot styling stays so the user still sees the degraded state.
+  assert.equal(view.stateClass, "possibly_expired");
 });
