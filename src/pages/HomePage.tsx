@@ -290,7 +290,11 @@ export function HomePage({
         )
       )}
 
-      <DownloadQueue refreshToken={queueRefresh} onOpenHistory={onOpenHistory} />
+      <DownloadQueue
+        refreshToken={queueRefresh}
+        onOpenHistory={onOpenHistory}
+        active={active}
+      />
     </div>
   );
 }
