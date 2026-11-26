@@ -71,7 +71,7 @@ export function DeleteConfirmDialog({
                 className="btn"
                 onClick={() => onChoose("cancel")}
               >
-                取消
+                关闭
               </button>
               <button
                 type="button"
@@ -102,7 +102,7 @@ export function DeleteConfirmDialog({
                 className="btn"
                 onClick={() => onChoose("cancel")}
               >
-                取消
+                关闭
               </button>
               <button
                 type="button"

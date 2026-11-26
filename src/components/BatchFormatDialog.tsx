@@ -148,7 +148,6 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
         title="确认批量下载"
         message={`将添加 ${count} 个下载任务，确认继续？`}
         confirmLabel="继续"
-        cancelLabel="取消"
         busy={false}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={() => {
