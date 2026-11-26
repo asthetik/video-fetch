@@ -2693,12 +2693,15 @@ mod tests {
         assert!(!cache.contains_key(&0), "the oldest entry is evicted first");
         assert!(cache.contains_key(&999));
         // Re-inserting an existing mid refreshes in place: nothing evicted.
-        cache_space_name(&mut cache, 1, "updated", t0 + Duration::from_millis(500));
+        // The refreshed mid is deliberately not the oldest — with the
+        // contains_key guard dropped, a defective implementation would
+        // evict the oldest entry (mid 1) here and this would catch it.
+        cache_space_name(&mut cache, 40, "updated", t0 + Duration::from_millis(500));
         assert_eq!(cache.len(), 64);
-        assert_eq!(cache.get(&1).unwrap().0, "updated");
+        assert_eq!(cache.get(&40).unwrap().0, "updated");
         assert!(
-            cache.contains_key(&63),
-            "an in-place refresh must not evict the second-oldest entry"
+            cache.contains_key(&1),
+            "the oldest entry must survive an in-place refresh of another mid"
         );
     }
 
