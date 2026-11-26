@@ -1630,8 +1630,6 @@ async fn clear_webview_session(win: &tauri::WebviewWindow) {
     tracing::warn!(target: "core", "auth: 放弃等待浏览数据清理，继续导航");
 }
 
-/// Open an embedded Bilibili login WebView, poll for SESSDATA, and return auth status.
-///
 /// How the login poll ended: a captured status, or the user closing the
 /// login window before anything was captured.
 enum PollOutcome {
@@ -1651,6 +1649,8 @@ fn login_outcome(outcome: PollOutcome) -> AppResult<AuthStatus> {
     }
 }
 
+/// Open an embedded Bilibili login WebView, poll for SESSDATA, and return auth status.
+///
 /// Waits until cookies are captured, the login window is closed, or a timeout elapses.
 /// Cookie scraping via WebView APIs is best-effort on some platforms; if status stays
 /// logged out, use Settings → Advanced → import Netscape `cookies.txt`.
@@ -1732,6 +1732,11 @@ pub async fn start_bilibili_login(
                 // Window closed before we captured cookies: the user said
                 // "not now". Distinct from the timeout so the frontend can
                 // stay silent instead of nagging about a choice it made.
+                // Accepted narrow race: a login completing inside the 1.2s
+                // poll gap followed by an immediate close reads as
+                // cancelled (incognito cookies die with the window) and
+                // stays silent.
+                tracing::info!(target: "core", "auth: 登录窗口被用户关闭");
                 if let Some(tx) = tx_poll.lock().ok().and_then(|mut g| g.take()) {
                     let _ = tx.send(PollOutcome::Cancelled);
                 }
