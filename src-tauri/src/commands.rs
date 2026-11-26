@@ -829,6 +829,30 @@ pub async fn space_list_videos(
     }
 }
 
+/// Insert into the per-mid space-name cache, evicting the oldest entry
+/// when the cap is reached. The cache is keyed by visited space mid and
+/// otherwise only ever grows; entries carry their read time, so the
+/// oldest is the natural eviction victim. Updating an existing mid
+/// refreshes in place without evicting anyone.
+fn cache_space_name(
+    cache: &mut std::collections::HashMap<u64, (String, std::time::Instant)>,
+    mid: u64,
+    name: &str,
+    now: std::time::Instant,
+) {
+    const CAP: usize = 64;
+    if cache.len() >= CAP
+        && !cache.contains_key(&mid)
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (_, at))| *at)
+            .map(|(mid, _)| *mid)
+    {
+        cache.remove(&oldest);
+    }
+    cache.insert(mid, (name.to_string(), now));
+}
+
 #[tauri::command]
 pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<models::SpaceInfo> {
     const TTL: std::time::Duration = std::time::Duration::from_secs(600);
@@ -862,7 +886,7 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
             if !name.is_empty()
                 && let Ok(mut cache) = state.space_info_cache.lock()
             {
-                cache.insert(mid, (name.clone(), std::time::Instant::now()));
+                cache_space_name(&mut cache, mid, &name, std::time::Instant::now());
             }
             Ok(models::SpaceInfo { name })
         }
@@ -2647,6 +2671,37 @@ mod tests {
         assert!(
             impl_body.contains("恢复失败：{e}"),
             "the failure must surface as Chinese user copy, not a raw SQLite string"
+        );
+    }
+
+    #[test]
+    fn the_space_name_cache_evicts_its_oldest_entry_at_the_cap() {
+        use std::time::Duration;
+        let mut cache = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        for i in 0..64u64 {
+            cache_space_name(
+                &mut cache,
+                i,
+                &format!("s{i}"),
+                t0 + Duration::from_millis(i),
+            );
+        }
+        assert_eq!(cache.len(), 64);
+        cache_space_name(&mut cache, 999, "new", t0 + Duration::from_millis(999));
+        assert_eq!(cache.len(), 64, "the cap holds");
+        assert!(!cache.contains_key(&0), "the oldest entry is evicted first");
+        assert!(cache.contains_key(&999));
+        // Re-inserting an existing mid refreshes in place: nothing evicted.
+        // The refreshed mid is deliberately not the oldest — with the
+        // contains_key guard dropped, a defective implementation would
+        // evict the oldest entry (mid 1) here and this would catch it.
+        cache_space_name(&mut cache, 40, "updated", t0 + Duration::from_millis(500));
+        assert_eq!(cache.len(), 64);
+        assert_eq!(cache.get(&40).unwrap().0, "updated");
+        assert!(
+            cache.contains_key(&1),
+            "the oldest entry must survive an in-place refresh of another mid"
         );
     }
 
