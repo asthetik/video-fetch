@@ -1,18 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
-import { FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDownToLine, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "../lib/tauri";
 import { withToast } from "../lib/asyncAction";
+import { formatBytes } from "../lib/format";
 import { parseLogLine } from "../lib/activityLog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { IconButton } from "../components/IconButton";
 import type { LogFileInfo } from "../types";
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
 
 export function LogsPage() {
   const [dir, setDir] = useState("");
@@ -23,6 +18,8 @@ export function LogsPage() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
+  const logViewRef = useRef<HTMLDivElement>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -42,6 +39,32 @@ export function LogsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // The jump button floats over the log tail; recompute on scroll and again
+  // whenever the line list changes, or a refresh would leave a stale button.
+  const SCROLL_BOTTOM_THRESHOLD_PX = 96;
+  const updateJumpVisibility = useCallback(() => {
+    const el = logViewRef.current;
+    if (!el) {
+      return;
+    }
+    setShowJumpToBottom(
+      el.scrollHeight - el.scrollTop - el.clientHeight > SCROLL_BOTTOM_THRESHOLD_PX,
+    );
+  }, []);
+
+  useEffect(() => {
+    updateJumpVisibility();
+  }, [lines, updateJumpVisibility]);
+
+  function scrollToBottom() {
+    const el = logViewRef.current;
+    if (!el) {
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
+    setShowJumpToBottom(false);
+  }
 
   useEffect(() => {
     if (!selected) {
@@ -129,7 +152,7 @@ export function LogsPage() {
             />
           </div>
         </div>
-        <div className="log-view">
+        <div className="log-view" ref={logViewRef} onScroll={updateJumpVisibility}>
           {lines.length === 0 ? (
             <p className="logs-viewer-empty">
               {selected ? "该文件暂无内容" : "暂无日志"}
@@ -157,6 +180,17 @@ export function LogsPage() {
             })
           )}
         </div>
+        {showJumpToBottom && (
+          <button
+            type="button"
+            className="btn btn-sm logs-jump-bottom"
+            data-action="logs-jump-bottom"
+            onClick={scrollToBottom}
+          >
+            <ArrowDownToLine size={14} strokeWidth={2} />
+            回到底部
+          </button>
+        )}
       </section>
       <ConfirmDialog
         open={confirmOpen}

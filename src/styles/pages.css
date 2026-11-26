@@ -611,6 +611,7 @@
 }
 
 .logs-viewer {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -668,6 +669,13 @@
   min-height: 240px;
   background: var(--ctl-bg);
   border-radius: 0 0 var(--radius-card) var(--radius-card);
+}
+
+.logs-jump-bottom {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  box-shadow: var(--surface-shadow);
 }
 
 .logs-viewer-empty {
