@@ -73,14 +73,18 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const [confirmClear, setConfirmClear] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadJobs = useCallback(async () => {
     try {
       const list = await api.listJobs();
       // Keep backend order (created_at DESC); no done/failed filtering here.
       setAllJobs(list);
+      setLoadError(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      // The persistent error state below replaces the old transient toast: a
+      // failed load must not masquerade as an empty history.
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -350,7 +354,17 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
 
       {loading && <p className="queue-empty">加载中…</p>}
 
-      {!loading && visibleJobs.length === 0 && (
+      {!loading && loadError && (
+        <EmptyState
+          icon={HistoryIcon}
+          title="历史加载失败"
+          desc={loadError}
+          actionLabel="重试"
+          onAction={() => void loadJobs()}
+        />
+      )}
+
+      {!loading && visibleJobs.length === 0 && !loadError && (
         <EmptyState
           icon={HistoryIcon}
           title="还没有下载记录"

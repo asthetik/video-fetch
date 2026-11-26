@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { createListenerBag } from "../lib/listenerBag";
+import { EmptyState } from "./EmptyState";
 import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -87,13 +88,17 @@ export function DownloadQueue({
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadJobs = useCallback(async () => {
     try {
       const list = await api.listJobs();
       setJobs(sortJobs(list));
+      setLoadError(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      // The persistent error state below replaces the old transient toast: a
+      // failed load must not masquerade as an empty queue.
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -438,10 +443,20 @@ export function DownloadQueue({
         </div>
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
+      {!loading && loadError && (
+        <EmptyState
+          icon={Download}
+          title="队列加载失败"
+          desc={loadError}
+          actionLabel="重试"
+          onAction={() => void loadJobs()}
+        />
+      )}
       {!loading &&
         activeJobs.length === 0 &&
         recentFailed.length === 0 &&
-        !doneFallback?.length && (
+        !doneFallback?.length &&
+        !loadError && (
           <p className="queue-empty">暂无下载任务</p>
         )}
       {activeJobs.length > 0 && (
