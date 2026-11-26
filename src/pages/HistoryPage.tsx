@@ -249,7 +249,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       <div className="history-row" key={job.id}>
         <ThumbTile job={job} />
         <div className="history-row-main">
-          <p className="history-row-title">{jobLabel(job)}</p>
+          <p className="history-row-title" title={jobLabel(job)}>{jobLabel(job)}</p>
           <p className="history-row-sub">
             {job.audio_format && (
               <span className="tag fmt">{job.audio_format.toUpperCase()}</span>
