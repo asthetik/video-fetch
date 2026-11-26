@@ -108,6 +108,13 @@ export function DownloadQueue({
     void loadJobs();
   }, [loadJobs, refreshToken]);
 
+  // Retry resets the loading spinner first: clicks cannot stack concurrent
+  // listJobs calls, and the error block hides while the retry is in flight.
+  const retryLoadJobs = useCallback(() => {
+    setLoading(true);
+    void loadJobs();
+  }, [loadJobs]);
+
   useEffect(() => {
     const listeners = createListenerBag();
 
@@ -443,15 +450,30 @@ export function DownloadQueue({
         </div>
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
-      {!loading && loadError && (
-        <EmptyState
-          icon={Download}
-          title="队列加载失败"
-          desc={loadError}
-          actionLabel="重试"
-          onAction={() => void loadJobs()}
-        />
-      )}
+      {!loading && loadError &&
+        (activeJobs.length === 0 &&
+        recentFailed.length === 0 &&
+        !doneFallback?.length ? (
+          <EmptyState
+            icon={Download}
+            title="队列加载失败"
+            desc={loadError}
+            actionLabel="重试"
+            onAction={retryLoadJobs}
+          />
+        ) : (
+          <div className="queue-refresh-error">
+            <p className="queue-error">列表刷新失败：{loadError}</p>
+            <button
+              type="button"
+              className="btn-text queue-section-link"
+              data-action="retry-load"
+              onClick={retryLoadJobs}
+            >
+              重试
+            </button>
+          </div>
+        ))}
       {!loading &&
         activeJobs.length === 0 &&
         recentFailed.length === 0 &&

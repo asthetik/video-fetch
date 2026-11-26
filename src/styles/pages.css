@@ -288,6 +288,16 @@
   color: var(--text);
 }
 
+.queue-refresh-error {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.queue-refresh-error .queue-error {
+  margin: 0;
+}
+
 .queue-section-link {
   flex-shrink: 0;
   font-size: 0.75rem;

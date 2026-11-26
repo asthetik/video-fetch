@@ -31,8 +31,8 @@ test("the queue renders a persistent load-error state with retry", () => {
   );
   assert.match(
     queue,
-    /!loading && loadError && \(/,
-    "the error state must show whenever a load failed and loading has settled",
+    /!loading && loadError &&\n        \(/,
+    "the error block must show whenever a load failed and loading has settled",
   );
 });
 
@@ -62,15 +62,51 @@ test("history renders a persistent load-error state with retry", () => {
   );
 });
 
-test("both load paths clear the error on success", () => {
+test("both load paths clear the error right where the load succeeds", () => {
+  assert.match(
+    queue,
+    /setJobs\(sortJobs\(list\)\);\n      setLoadError\(null\);/,
+    "the queue must clear the error on the success path itself, not in some retry handler",
+  );
+  assert.match(
+    history,
+    /setAllJobs\(list\);\n      setLoadError\(null\);/,
+    "history must clear the error on the success path itself, not in some retry handler",
+  );
+});
+
+test("with data on screen a failed refresh degrades to a banner, not a fake page", () => {
   for (const [name, src] of [
     ["queue", queue],
     ["history", history],
   ] as const) {
     assert.match(
       src,
-      /setLoadError\(null\)/,
-      `${name} must clear the load error when a load succeeds`,
+      /列表刷新失败：\{loadError\}/,
+      `${name} must show a slim refresh banner when data is already on screen`,
+    );
+    assert.match(
+      src,
+      /data-action="retry-load"\n\s+onClick=\{retryLoadJobs\}/,
+      `${name}'s banner retry must be wired to the retry callback`,
+    );
+    assert.match(
+      src,
+      /const retryLoadJobs = useCallback\(\(\) => \{\n    setLoading\(true\);\n    void loadJobs\(\);/,
+      `${name}'s retry must reset loading first so clicks cannot stack concurrent loads`,
+    );
+    assert.match(
+      src,
+      /onAction=\{retryLoadJobs\}/,
+      `${name}'s empty-state retry must be wired to the retry callback`,
     );
   }
+});
+
+test("the filter empty state does not masquerade over a failed refresh", () => {
+  assert.match(
+    history,
+    /\{!loading &&\n        visibleJobs\.length > 0 &&\n        !loadError &&\n        !showActive &&\n        groups\.length === 0 && \(/,
+    "没有匹配的记录 must carry the !loadError guard in its own condition",
+  );
 });

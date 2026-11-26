@@ -94,6 +94,13 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     void loadJobs();
   }, [loadJobs]);
 
+  // Retry resets the loading spinner first: clicks cannot stack concurrent
+  // listJobs calls, and the error block hides while the retry is in flight.
+  const retryLoadJobs = useCallback(() => {
+    setLoading(true);
+    void loadJobs();
+  }, [loadJobs]);
+
   // Live progress keeps the pinned in-progress group current while the page is
   // open; terminal events also trigger a reload so completed rows pick up
   // persisted metadata (file size) that the event payload doesn't carry.
@@ -354,15 +361,28 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
 
       {loading && <p className="queue-empty">加载中…</p>}
 
-      {!loading && loadError && (
-        <EmptyState
-          icon={HistoryIcon}
-          title="历史加载失败"
-          desc={loadError}
-          actionLabel="重试"
-          onAction={() => void loadJobs()}
-        />
-      )}
+      {!loading && loadError &&
+        (visibleJobs.length === 0 ? (
+          <EmptyState
+            icon={HistoryIcon}
+            title="历史加载失败"
+            desc={loadError}
+            actionLabel="重试"
+            onAction={retryLoadJobs}
+          />
+        ) : (
+          <div className="queue-refresh-error">
+            <p className="queue-error">列表刷新失败：{loadError}</p>
+            <button
+              type="button"
+              className="btn-text queue-section-link"
+              data-action="retry-load"
+              onClick={retryLoadJobs}
+            >
+              重试
+            </button>
+          </div>
+        ))}
 
       {!loading && visibleJobs.length === 0 && !loadError && (
         <EmptyState
@@ -374,7 +394,11 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         />
       )}
 
-      {!loading && visibleJobs.length > 0 && !showActive && groups.length === 0 && (
+      {!loading &&
+        visibleJobs.length > 0 &&
+        !loadError &&
+        !showActive &&
+        groups.length === 0 && (
         <EmptyState icon={Search} title="没有匹配的记录" desc="换个关键词或清除筛选" />
       )}
 
