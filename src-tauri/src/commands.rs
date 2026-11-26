@@ -2901,6 +2901,30 @@ mod openable_roots_delete_tests {
     }
 
     #[tokio::test]
+    async fn record_only_delete_then_restore_roundtrips_the_row() {
+        let (_root, state) = stray_output_job();
+        delete_job_impl(&state, "job-1", false).await.unwrap();
+        assert!(state.downloads.list().unwrap().is_empty());
+        let restored = restore_deleted_job_impl(&state, "job-1").await.unwrap();
+        assert_eq!(restored.id, "job-1");
+        let rows = state.downloads.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "job-1");
+        // Consumed: a second undo of the same id finds nothing.
+        assert!(restore_deleted_job_impl(&state, "job-1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn file_deletes_are_not_undoable() {
+        let (_root, state) = stray_output_job();
+        delete_job_impl(&state, "job-1", true).await.unwrap();
+        assert!(
+            restore_deleted_job_impl(&state, "job-1").await.is_err(),
+            "a delete that removed the file must not leave an undo behind"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_job_invalidates_openable_roots_cache() {
         let (_root, state) = stray_output_job();
         let computes = std::cell::Cell::new(0usize);
