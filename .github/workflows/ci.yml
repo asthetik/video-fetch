@@ -116,7 +116,7 @@ jobs:
         with:
           workspaces: src-tauri -> target
           # Image-segmented bucket, so no cache entry can cross images; the
-          # name is the one `lint` explains.
+          # name is the one `lint` explains (its bucket, shared here).
           shared-key: src-tauri-${{ matrix.os }}
       - name: Install Tauri Linux deps
         if: runner.os == 'Linux'
@@ -176,7 +176,7 @@ jobs:
         with:
           workspaces: src-tauri -> target
           # Image-segmented bucket, the one `lint` explains; shared with
-          # `unit` on the same image.
+          # `unit` (and `lint` itself) on the same image.
           shared-key: src-tauri-ubuntu-22.04
       - name: Install Tauri Linux deps
         run: |
@@ -196,7 +196,10 @@ jobs:
       - name: Soak drive (short)
         env:
           SOAK_MINUTES: "2"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test soak -- --ignored
+        # --include-ignored, not --ignored: the file also holds plain tests
+        # (the SOAK_* parse guards) that only this target compiles; the churn
+        # test itself is ignored and runs either way.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features test-utils --test soak -- --include-ignored
 
   release-smoke:
     # The release profile is read by `npx tauri build` and by nothing else, and
