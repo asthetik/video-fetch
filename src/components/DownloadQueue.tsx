@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { createListenerBag } from "../lib/listenerBag";
+import { EmptyState } from "./EmptyState";
 import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -87,13 +88,17 @@ export function DownloadQueue({
   const [confirmCancelAll, setConfirmCancelAll] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkBusyRef = useRef(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadJobs = useCallback(async () => {
     try {
       const list = await api.listJobs();
       setJobs(sortJobs(list));
+      setLoadError(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      // The persistent error state below replaces the old transient toast: a
+      // failed load must not masquerade as an empty queue.
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -102,6 +107,13 @@ export function DownloadQueue({
   useEffect(() => {
     void loadJobs();
   }, [loadJobs, refreshToken]);
+
+  // Retry resets the loading spinner first: clicks cannot stack concurrent
+  // listJobs calls, and the error block hides while the retry is in flight.
+  const retryLoadJobs = useCallback(() => {
+    setLoading(true);
+    void loadJobs();
+  }, [loadJobs]);
 
   useEffect(() => {
     const listeners = createListenerBag();
@@ -438,10 +450,35 @@ export function DownloadQueue({
         </div>
       </div>
       {loading && <p className="queue-empty">加载中…</p>}
+      {!loading && loadError &&
+        (activeJobs.length === 0 &&
+        recentFailed.length === 0 &&
+        !doneFallback?.length ? (
+          <EmptyState
+            icon={Download}
+            title="队列加载失败"
+            desc={loadError}
+            actionLabel="重试"
+            onAction={retryLoadJobs}
+          />
+        ) : (
+          <div className="queue-refresh-error">
+            <p className="queue-error">列表刷新失败：{loadError}</p>
+            <button
+              type="button"
+              className="btn-text queue-section-link"
+              data-action="retry-load"
+              onClick={retryLoadJobs}
+            >
+              重试
+            </button>
+          </div>
+        ))}
       {!loading &&
         activeJobs.length === 0 &&
         recentFailed.length === 0 &&
-        !doneFallback?.length && (
+        !doneFallback?.length &&
+        !loadError && (
           <p className="queue-empty">暂无下载任务</p>
         )}
       {activeJobs.length > 0 && (
