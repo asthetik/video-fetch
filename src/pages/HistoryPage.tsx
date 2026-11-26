@@ -121,6 +121,12 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       }
     }).then(listeners.track);
 
+    // An undo on one surface must refresh the other: restore emits this
+    // event instead of relying on the deleting page still being mounted.
+    void listen<string>("download://restored", () => {
+      void loadJobs();
+    }).then(listeners.track);
+
     return () => {
       listeners.dispose();
     };
@@ -248,9 +254,33 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     try {
       await api.deleteJob(job.id, choice === "record_and_file");
       setAllJobs((prev) => prev.filter((j) => j.id !== job.id));
+      if (
+        choice === "record" &&
+        (job.status === "done" || job.status === "failed")
+      ) {
+        // Only a record-only delete of a terminal row is undoable; the
+        // backend keeps the row for the undo window (RecentDeletedJobs,
+        // TTL 60s, session-only).
+        toast.success("已删除任务记录", {
+          description: "本地文件不受影响",
+          action: { label: "撤销", onClick: () => void undoDelete(job.id) },
+          duration: 8000,
+        });
+      }
       onJobsChanged?.();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+      await loadJobs();
+    }
+  }
+
+  async function undoDelete(id: string) {
+    try {
+      await api.restoreDeletedJob(id);
+      toast.success("已恢复任务记录");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
       await loadJobs();
     }
   }

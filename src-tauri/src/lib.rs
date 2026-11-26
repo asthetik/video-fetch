@@ -26,8 +26,8 @@ use commands::{
     get_cookie_notice, get_engine_versions, get_save_dir_notice, get_settings, import_cookies_path,
     list_jobs, list_log_files, log_ui_events, next_resolve_id, open_path, pause_all_jobs,
     pause_job, pick_cookies_file, pick_save_dir, preview_name, read_log_tail, resolve_url,
-    resume_all_jobs, resume_job, retry_job, save_settings, set_window_theme, space_enqueue_batch,
-    space_info, space_list_videos, start_bilibili_login,
+    restore_deleted_job, resume_all_jobs, resume_job, retry_job, save_settings, set_window_theme,
+    space_enqueue_batch, space_info, space_list_videos, start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -122,6 +122,7 @@ pub fn run() {
             pause_all_jobs,
             resume_all_jobs,
             delete_job,
+            restore_deleted_job,
             list_log_files,
             read_log_tail,
             log_ui_events,

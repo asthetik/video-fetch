@@ -90,6 +90,10 @@ pub struct AppState {
     /// Cached openable roots for `open_path`; invalidated on settings save
     /// and history deletes.
     pub openable_roots_cache: OpenableRootsCache,
+    /// Rows this session deleted record-only, kept for the undo action on
+    /// the delete toast. In-memory: a restart legitimately ends every undo
+    /// window.
+    pub recent_deleted_jobs: RecentDeletedJobs,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1282,6 +1286,62 @@ pub struct DeleteJobArgs {
     pub delete_file: bool,
 }
 
+/// Rows this session deleted record-only, kept so the delete toast's undo
+/// action can put them back. In-memory on purpose: an app restart
+/// legitimately ends every undo window, and a TTL + cap keep a delete
+/// storm bounded. `take` is the only way out — the frontend hands back an
+/// id and the backend restores what it remembers deleting, never a row
+/// the frontend supplies.
+pub(crate) struct RecentDeletedJobs {
+    entries: std::sync::Mutex<Vec<(String, DownloadJob, std::time::Instant)>>,
+}
+
+impl RecentDeletedJobs {
+    const CAP: usize = 16;
+    const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A record-only delete of a terminal row is undoable: with the file
+    /// already gone there is nothing to restore, and an active row would
+    /// come back as a phantom (its work dir is unrecoverable).
+    fn undoable_row(job: DownloadJob, delete_file: bool) -> Option<DownloadJob> {
+        if delete_file {
+            return None;
+        }
+        matches!(job.status, JobStatus::Done | JobStatus::Failed).then_some(job)
+    }
+
+    fn record(&self, job: DownloadJob, now: std::time::Instant) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.retain(|(_, _, at)| now.duration_since(*at) < Self::TTL);
+        entries.push((job.id.clone(), job, now));
+        if entries.len() > Self::CAP {
+            let excess = entries.len() - Self::CAP;
+            entries.drain(0..excess);
+        }
+    }
+
+    fn take(&self, id: &str, now: std::time::Instant) -> Option<DownloadJob> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pos = entries
+            .iter()
+            .position(|(entry_id, _, at)| entry_id == id && now.duration_since(*at) < Self::TTL)?;
+        let (_, job, _) = entries.remove(pos);
+        Some(job)
+    }
+}
+
 #[tauri::command]
 pub async fn delete_job(
     window: tauri::WebviewWindow,
@@ -1296,16 +1356,63 @@ pub async fn delete_job(
 /// a Tauri `State`.
 async fn delete_job_impl(state: &AppState, id: &str, delete_file: bool) -> AppResult<()> {
     tracing::info!(target: "core", "download: 删除 {}（含文件={}）", id, delete_file);
+    // Only terminal record-only rows are undoable (see undoable_row); read
+    // the row before the delete consumes it.
+    let undo_row = state
+        .downloads
+        .list()
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|job| job.id == id))
+        .and_then(|job| RecentDeletedJobs::undoable_row(job, delete_file));
     state
         .downloads
         .delete(id, delete_file)
         .await
         .inspect_err(|e| warn_cmd(&format!("download: 删除失败 {id}"), e))?;
+    if let Some(job) = undo_row {
+        state
+            .recent_deleted_jobs
+            .record(job, std::time::Instant::now());
+    }
     // The row is gone: its output directory must stop being an openable root.
     // Drop the cache so the next `open_path` recomputes from the surviving
     // history (same invalidate-on-write as `save_settings`).
     state.openable_roots_cache.invalidate();
     Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_deleted_job(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<DownloadJob> {
+    ensure_main_window_label(window.label())?;
+    let job = restore_deleted_job_impl(&state, &id).await?;
+    // Surfaces other than the undoing one reload on this event — the queue
+    // page's undo must reach an open history page and vice versa.
+    let _ = app.emit("download://restored", &id);
+    Ok(job)
+}
+
+/// [`restore_deleted_job`] body, split out so tests can drive the restore
+/// path without a Tauri `State`.
+async fn restore_deleted_job_impl(state: &AppState, id: &str) -> AppResult<DownloadJob> {
+    let job = state
+        .recent_deleted_jobs
+        .take(id, std::time::Instant::now())
+        .ok_or_else(|| AppError::Message("撤销窗口已过期，或该记录不是本次会话删除的".into()))?;
+    tracing::info!(target: "core", "download: 撤销删除 {}", id);
+    if let Err(e) = state.downloads.restore(job.clone()).await {
+        // A failed re-insert must not burn the undo window: put the row
+        // back so the user can retry.
+        state
+            .recent_deleted_jobs
+            .record(job, std::time::Instant::now());
+        return Err(AppError::Message(format!("恢复失败：{e}")));
+    }
+    Ok(job)
 }
 
 #[tauri::command]
@@ -2138,6 +2245,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         activity_log,
         window_theme: std::sync::Mutex::new(WindowTheme::System),
         openable_roots_cache: OpenableRootsCache::default(),
+        recent_deleted_jobs: RecentDeletedJobs::new(),
     })
 }
 
@@ -2487,10 +2595,38 @@ mod tests {
         assert!(ensure_main_window_label("").is_err());
     }
 
-    /// The wiring pin: six high-sensitivity commands must call the label
+    /// The wiring pin: the high-sensitivity commands must call the label
     /// guard. Counting the call sites in source (the file includes itself)
-    /// means deleting any one call — or wiring a seventh command and
+    /// means deleting any one call — or wiring a new command and
     /// forgetting the guard — changes the count and turns this red.
+    /// The undo's cross-surface refresh and its failure re-stash are wiring
+    /// the behavioral tests cannot reach (the emit needs an AppHandle), so
+    /// they are pinned in source: dropping either silently kills the
+    /// other page's refresh or the undo window on failure.
+    #[test]
+    fn restore_wires_the_restored_event_and_the_failure_restash() {
+        // Normalize CRLF first: Windows checkouts hand include_str a
+        // \r\n source and a \n needle would silently never match.
+        let src = include_str!("commands.rs").replace("\r\n", "\n");
+        assert!(
+            src.contains("app.emit(\"download://restored\", &id)"),
+            "restore must emit download://restored so the other surface reloads"
+        );
+        let impl_body = src
+            .split("async fn restore_deleted_job_impl")
+            .nth(1)
+            .expect("restore impl present")
+            .to_string();
+        assert!(
+            impl_body.contains("recent_deleted_jobs\n            .record(job"),
+            "a failed re-insert must re-stash the row instead of burning the undo window"
+        );
+        assert!(
+            impl_body.contains("恢复失败：{e}"),
+            "the failure must surface as Chinese user copy, not a raw SQLite string"
+        );
+    }
+
     #[test]
     fn high_sensitivity_commands_check_the_caller_window() {
         // Assembled at runtime so this test's own source does not match
@@ -2499,8 +2635,85 @@ mod tests {
         let src = include_str!("commands.rs");
         assert_eq!(
             src.matches(&needle).count(),
-            9,
-            "exactly nine commands must guard on the caller's window label"
+            10,
+            "exactly ten commands must guard on the caller's window label"
+        );
+    }
+
+    fn undo_sample(status: JobStatus) -> DownloadJob {
+        DownloadJob {
+            id: "u1".into(),
+            url: "https://www.bilibili.com/video/BV1xx".into(),
+            video_id: "BV1xx".into(),
+            page_index: 1,
+            format_id: "80".into(),
+            audio_format: None,
+            title: "demo".into(),
+            uploader: String::new(),
+            output_template: "%(title)s [%(id)s].%(ext)s".into(),
+            status,
+            progress: 1.0,
+            error: None,
+            output_path: None,
+            thumbnail_url: None,
+            duration_secs: None,
+            file_size: None,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn only_terminal_record_only_rows_are_undoable() {
+        assert!(RecentDeletedJobs::undoable_row(undo_sample(JobStatus::Done), false).is_some());
+        assert!(RecentDeletedJobs::undoable_row(undo_sample(JobStatus::Failed), false).is_some());
+        // The file is gone: nothing left to restore.
+        assert!(RecentDeletedJobs::undoable_row(undo_sample(JobStatus::Done), true).is_none());
+        // An active row would come back as a phantom (work dir unrecoverable).
+        for status in [JobStatus::Pending, JobStatus::Running, JobStatus::Paused] {
+            let row = undo_sample(status.clone());
+            assert!(
+                RecentDeletedJobs::undoable_row(row, false).is_none(),
+                "{status:?} rows must not be undoable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_graveyard_roundtrips_and_consumes() {
+        let graveyard = RecentDeletedJobs::new();
+        graveyard.record(undo_sample(JobStatus::Done), std::time::Instant::now());
+        let restored = graveyard.take("u1", std::time::Instant::now()).unwrap();
+        assert_eq!(restored.id, "u1");
+        // Consumed: a second undo of the same id finds nothing.
+        assert!(graveyard.take("u1", std::time::Instant::now()).is_none());
+        assert!(graveyard.take("other", std::time::Instant::now()).is_none());
+    }
+
+    #[test]
+    fn graveyard_entries_expire_and_cap() {
+        let graveyard = RecentDeletedJobs::new();
+        let t0 = std::time::Instant::now();
+        graveyard.record(undo_sample(JobStatus::Done), t0);
+        // TTL: an entry at/after its expiry is neither taken nor kept.
+        assert!(graveyard.take("u1", t0 + RecentDeletedJobs::TTL).is_none());
+        graveyard.record(undo_sample(JobStatus::Done), t0);
+        let mut second = undo_sample(JobStatus::Failed);
+        second.id = "u2".into();
+        graveyard.record(second, t0);
+        // Cap: the oldest entry is evicted when the map overflows.
+        for i in 0..RecentDeletedJobs::CAP {
+            let mut job = undo_sample(JobStatus::Done);
+            job.id = format!("x{i}");
+            graveyard.record(job, t0);
+        }
+        let entries = graveyard
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(entries.len() <= RecentDeletedJobs::CAP);
+        assert!(
+            !entries.iter().any(|(id, _, _)| id == "u1"),
+            "the oldest entry must be evicted first"
         );
     }
 
@@ -2712,6 +2925,7 @@ mod openable_roots_delete_tests {
             activity_log: crate::activity_log::ActivityLog::disabled(root.path().join("logs")),
             window_theme: Mutex::new(WindowTheme::System),
             openable_roots_cache: OpenableRootsCache::default(),
+            recent_deleted_jobs: RecentDeletedJobs::new(),
         };
         (root, state)
     }
@@ -2724,6 +2938,30 @@ mod openable_roots_delete_tests {
             std::fs::create_dir_all(&stray).unwrap();
             vec![finished_job("job-1", &stray.join("clip.mp4"))]
         })
+    }
+
+    #[tokio::test]
+    async fn record_only_delete_then_restore_roundtrips_the_row() {
+        let (_root, state) = stray_output_job();
+        delete_job_impl(&state, "job-1", false).await.unwrap();
+        assert!(state.downloads.list().unwrap().is_empty());
+        let restored = restore_deleted_job_impl(&state, "job-1").await.unwrap();
+        assert_eq!(restored.id, "job-1");
+        let rows = state.downloads.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "job-1");
+        // Consumed: a second undo of the same id finds nothing.
+        assert!(restore_deleted_job_impl(&state, "job-1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn file_deletes_are_not_undoable() {
+        let (_root, state) = stray_output_job();
+        delete_job_impl(&state, "job-1", true).await.unwrap();
+        assert!(
+            restore_deleted_job_impl(&state, "job-1").await.is_err(),
+            "a delete that removed the file must not leave an undo behind"
+        );
     }
 
     #[tokio::test]
@@ -3217,6 +3455,7 @@ mod restart_cookie_tests {
         .unwrap();
         let state = AppState {
             openable_roots_cache: Default::default(),
+            recent_deleted_jobs: RecentDeletedJobs::new(),
             save_dir_notice: None,
             cookie_notice: None,
             app_dir: root.path().to_path_buf(),

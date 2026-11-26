@@ -138,7 +138,7 @@ impl Db {
                 created_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                datetime('now'), datetime('now')
+                COALESCE(?17, datetime('now')), datetime('now')
             )",
             params![
                 job.id,
@@ -157,6 +157,7 @@ impl Db {
                 job.thumbnail_url,
                 job.duration_secs.map(|v| v as i64),
                 job.file_size.map(|v| v as i64),
+                job.created_at,
             ],
         )?;
         Ok(())
@@ -1065,6 +1066,21 @@ mod tests {
         loaded.progress = 0.5;
         db.update_job(&loaded).unwrap();
         assert_eq!(db.get_job("up-1").unwrap().uploader, "某UP主");
+    }
+
+    #[test]
+    fn insert_preserves_an_explicit_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let mut job = sample_job_for_db("ts-1");
+        job.created_at = Some("2026-01-02 03:04:05".into());
+        db.insert_job(&job).unwrap();
+        assert_eq!(
+            db.get_job("ts-1").unwrap().created_at.as_deref(),
+            Some("2026-01-02 03:04:05"),
+            "a restored row keeps its original timestamp; the graveyard \
+             promises timestamps survive the undo"
+        );
     }
 
     #[test]

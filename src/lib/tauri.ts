@@ -85,6 +85,8 @@ export const api = {
   resumeAllJobs: () => invoke<ResumeAllResult>("resume_all_jobs"),
   deleteJob: (id: string, deleteFile = false) =>
     invoke<void>("delete_job", { args: { id, deleteFile } }),
+  /** Undo a record-only delete from the toast action; only rows this session deleted qualify. */
+  restoreDeletedJob: (id: string) => invoke<DownloadJob>("restore_deleted_job", { id }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   /** Startup notice: set when the save dir was unusable and this session's downloads were redirected. */
   getSaveDirNotice: () => invoke<string | null>("get_save_dir_notice"),
