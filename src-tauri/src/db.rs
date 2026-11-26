@@ -1075,10 +1075,10 @@ mod tests {
         // Same-second created_at with insertion order opposite to id order:
         // without a tiebreaker SQLite walks insertion (rowid) order and the
         // later insert sorts first, which is arbitrary once rows are
-        // restored or updated. id DESC is the deterministic answer (ids are
-        // nanosecond-stamped, so id order = creation order within one
-        // second).
-        for id in ["u10", "u2"] {
+        // restored or updated. id DESC is the deterministic answer. Real
+        // ids are job-{19-digit nanos}-{seq}, so same-second ids share the
+        // nanos prefix and lexicographic DESC equals creation order.
+        for id in ["job-1764000000000000000-1", "job-1764000000000000000-2"] {
             let mut job = sample_job_for_db(id);
             job.created_at = Some("2026-01-01 00:00:00".into());
             db.insert_job(&job).unwrap();
@@ -1089,7 +1089,10 @@ mod tests {
             .into_iter()
             .map(|job| job.id)
             .collect();
-        assert_eq!(ids, vec!["u2", "u10"]);
+        assert_eq!(
+            ids,
+            vec!["job-1764000000000000000-2", "job-1764000000000000000-1",]
+        );
     }
 
     #[test]
