@@ -12,21 +12,14 @@ const VIEW_URL: &str = "https://api.bilibili.com/x/web-interface/view";
 /// flags the default WKWebView/WebKitGTK UA as an outdated browser.
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const REFERER: &str = "https://www.bilibili.com/";
-const VIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Fetch title / pages / thumbnail from Bilibili view API (no WBI).
 ///
 /// Caller should pass an already-canonicalized URL when possible.
-pub async fn resolve_view(url: &str) -> AppResult<VideoMeta> {
+pub async fn resolve_view(url: &str, client: &Client) -> AppResult<VideoMeta> {
     let url = canonicalize_video_url(url);
     let bvid = resolve_cache::extract_bilibili_id(&url)
         .ok_or_else(|| AppError::Message("无法从链接解析 BV 号，跳过 view 快路径".into()))?;
-    let client = Client::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(VIEW_TIMEOUT)
-        .timeout(VIEW_TIMEOUT)
-        .build()
-        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
 
     let resp = client
         .get(VIEW_URL)

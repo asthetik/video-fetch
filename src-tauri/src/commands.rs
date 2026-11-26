@@ -582,19 +582,18 @@ pub async fn resolve_url(
     let log_bvid = resolve_cache::extract_bilibili_id(&url);
     tracing::info!(target: "core", "resolve: 开始 {}", log_bvid.as_deref().unwrap_or("未知"));
 
-    let client = reqwest::Client::builder()
-        .user_agent(bilibili_view::USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
+    // Same builder settings as the shared client (UA + 8s timeouts), so the
+    // clone is behavior-identical to the private build this used to do per
+    // resolve — one connection pool and DNS cache instead of fresh ones
+    // every call.
+    let client = state.http_client.clone();
     let cookie_header = stored_cookies
         .as_deref()
         .map(cookies::cookie_header_for_bilibili)
         .filter(|s| !s.is_empty());
 
     // Fast path: single-part videos resolve via view -> playurl; failures fall back to yt-dlp.
-    let view_meta = match bilibili_view::resolve_view(&url).await {
+    let view_meta = match bilibili_view::resolve_view(&url, &client).await {
         Ok(partial) if is_current() => {
             let _ = app.emit(
                 RESOLVE_PARTIAL_EVENT,
@@ -2650,6 +2649,47 @@ mod tests {
     /// the behavioral tests cannot reach (the emit needs an AppHandle), so
     /// they are pinned in source: dropping either silently kills the
     /// other page's refresh or the undo window on failure.
+    /// Every resolve used to build two throwaway reqwest clients per call
+    /// (connection pool + DNS cache discarded immediately). The shared
+    /// client carries the same UA and timeouts, so the pin holds the
+    /// single-builder invariant: exactly the one in build_app_state.
+    #[test]
+    fn resolve_reuses_the_shared_http_client() {
+        // Walk the whole src tree — a private builder hiding in wbi.rs,
+        // playurl.rs or space.rs leaks a pool per call just the same.
+        // CRLF-normalized: Windows checkouts hand file reads CRLF source.
+        // The needle is assembled at runtime so this test's own source does
+        // not match itself (the walk embeds this file, needles and all).
+        fn rs_sources(root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(root).expect("src dir readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rs_sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(
+                        std::fs::read_to_string(&path)
+                            .unwrap_or_default()
+                            .replace("\r\n", "\n"),
+                    );
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        rs_sources(std::path::Path::new("src"), &mut sources);
+        assert!(!sources.is_empty(), "the src tree must be walkable");
+        let needle = ["reqwest::", "Client::builder()"].concat();
+        let files_with_builder = sources.iter().filter(|src| src.contains(&needle)).count();
+        assert_eq!(
+            files_with_builder, 1,
+            "exactly one file may build a reqwest client: build_app_state's shared one"
+        );
+        let hits: usize = sources.iter().map(|src| src.matches(&needle).count()).sum();
+        assert_eq!(
+            hits, 1,
+            "and exactly once — every other path must borrow the shared client"
+        );
+    }
+
     #[test]
     fn restore_wires_the_restored_event_and_the_failure_restash() {
         // Normalize CRLF first: Windows checkouts hand include_str a
