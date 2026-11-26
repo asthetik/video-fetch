@@ -132,7 +132,7 @@ export function BatchFormatDialog({ open, count, onCancel, onSubmit }: BatchForm
             )}
             <div className="modal-actions">
               <button type="button" className="btn" onClick={onCancel}>
-                取消
+                关闭
               </button>
               <button type="button" className="btn btn-primary" data-action="batch-submit" onClick={handleSubmit}>
                 添加 {count} 个任务

@@ -39,7 +39,10 @@ export function DeleteConfirmDialog({
       role="presentation"
       onClick={() => onChoose("cancel")}
       onKeyDown={(e) => {
-        // Same Escape contract as ConfirmDialog.
+        // Same Escape contract as ConfirmDialog. No Enter-to-confirm here:
+        // the dialog offers three outcomes, one of them destructive file
+        // deletion, so a default for a stray Enter would answer a three-way
+        // question the user never focused.
         e.stopPropagation();
         if (e.key === "Escape") {
           onChoose("cancel");

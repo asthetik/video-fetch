@@ -29,6 +29,14 @@ test("Enter on the focused panel confirms the dialog", () => {
   );
 });
 
+test("the Enter branch lives on the modal panel, not the backdrop", () => {
+  assert.match(
+    confirm,
+    /tabIndex=\{-1\}[\s\S]{0,600}e\.key === "Enter"/,
+    "the Enter branch must sit on the panel (reachable after its tabIndex={-1}); on the backdrop it would never match target===currentTarget and the feature would die silently",
+  );
+});
+
 test("every confirm dialog dismisses with 关闭", () => {
   assert.match(
     confirm,
@@ -48,5 +56,10 @@ test("every confirm dialog dismisses with 关闭", () => {
     batch,
     /cancelLabel="取消"/,
     "the batch dialog inherits the unified default instead of overriding it",
+  );
+  assert.doesNotMatch(
+    batch,
+    /\n\s+取消\n/,
+    "the batch dialog's own first-step dismiss button must read 关闭 too",
   );
 });
