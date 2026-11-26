@@ -621,6 +621,7 @@
 }
 
 .logs-viewer {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -673,11 +674,20 @@
 .log-view {
   margin: 0;
   padding: 0.5rem;
+  /* Room for the floating jump button over the tail lines. */
+  padding-bottom: 2.75rem;
   overflow: auto;
   flex: 1;
   min-height: 240px;
   background: var(--ctl-bg);
   border-radius: 0 0 var(--radius-card) var(--radius-card);
+}
+
+.logs-jump-bottom {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  box-shadow: var(--surface-shadow);
 }
 
 .logs-viewer-empty {
