@@ -74,57 +74,113 @@ fn create_private_logs_dir(logs_dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
+enum LogSink<T> {
+    /// The rotator opened: log to the file pipeline.
+    File(T),
+    /// The file pipeline failed: log to stderr only, carrying the reason.
+    Stderr(String),
+}
+
+/// Which subscriber a failed-or-successful file pipeline yields. Pure so the
+/// branch is unit-testable; `install` is one-shot per process and cannot be
+/// called twice to observe it.
+fn decide_sink<T>(pipeline: Result<T, AppError>) -> LogSink<T> {
+    match pipeline {
+        Ok(rotator) => LogSink::File(rotator),
+        Err(e) => LogSink::Stderr(e.to_string()),
+    }
+}
+
+fn tracing_filter() -> tracing_subscriber::EnvFilter {
+    // Release builds pin the filter to info (no verbose mode); debug builds
+    // keep RUST_LOG as a developer escape hatch.
+    #[cfg(debug_assertions)]
+    {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        tracing_subscriber::EnvFilter::new("info")
+    }
+}
+
+/// A stderr-only subscriber for the degraded path: without it, a failed log
+/// directory would silence EVERY tracing call for the whole session —
+/// including the startup-failure error in lib.rs and the panic hook's
+/// context. Telemetry survives, destination degraded.
+fn install_stderr_subscriber() {
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(true)
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+    tracing_subscriber::registry()
+        .with(tracing_filter())
+        .with(stderr_layer)
+        .init();
+}
+
 pub fn install(
     logs_dir: PathBuf,
     max_file_size: u64,
     retention_days: u32,
 ) -> AppResult<ActivityLog> {
-    create_private_logs_dir(&logs_dir)?;
+    // The panic hook is best-effort (it writes into logs_dir, which may be
+    // exactly what failed) and must exist before anything can panic.
     install_panic_hook(&logs_dir);
-    let today = chrono::Local::now().date_naive();
-    cleanup_old_logs(&logs_dir, retention_days, today)?;
 
-    let rotator = Rotator::open(logs_dir.clone(), max_file_size)?;
-    let (non_blocking, guard) = tracing_appender::non_blocking(rotator);
+    let pipeline = (|| -> AppResult<Rotator> {
+        // create_private_logs_dir also applies the private-dir permissions.
+        create_private_logs_dir(&logs_dir)?;
+        let today = chrono::Local::now().date_naive();
+        cleanup_old_logs(&logs_dir, retention_days, today)?;
+        Rotator::open(logs_dir.clone(), max_file_size)
+    })();
 
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_target(false)
-        .event_format(SanitizedFormatter);
-    // Release builds pin the filter to info (no verbose mode); debug builds
-    // keep RUST_LOG as a developer escape hatch.
-    #[cfg(debug_assertions)]
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    #[cfg(not(debug_assertions))]
-    let filter = tracing_subscriber::EnvFilter::new("info");
+    match decide_sink(pipeline) {
+        LogSink::File(rotator) => {
+            let (non_blocking, guard) = tracing_appender::non_blocking(rotator);
 
-    #[cfg(debug_assertions)]
-    {
-        let stderr_layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_ansi(true)
-            .with_target(false)
-            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(file_layer)
-            .with(stderr_layer)
-            .init();
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_target(false)
+                .event_format(SanitizedFormatter);
+            let filter = tracing_filter();
+
+            #[cfg(debug_assertions)]
+            {
+                let stderr_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(true)
+                    .with_target(false)
+                    .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(file_layer)
+                    .with(stderr_layer)
+                    .init();
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(file_layer)
+                    .init();
+            }
+
+            Ok(ActivityLog {
+                logs_dir,
+                guard: Mutex::new(Some(guard)),
+            })
+        }
+        LogSink::Stderr(reason) => {
+            install_stderr_subscriber();
+            eprintln!("videofetch: activity log unavailable: {reason}");
+            Err(AppError::Message(reason))
+        }
     }
-    #[cfg(not(debug_assertions))]
-    {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(file_layer)
-            .init();
-    }
-
-    Ok(ActivityLog {
-        logs_dir,
-        guard: Mutex::new(Some(guard)),
-    })
 }
 
 pub fn level_from_str(level: &str) -> tracing::Level {
@@ -504,6 +560,17 @@ pub fn read_log_tail(path: &Path, max_lines: usize, max_bytes: u64) -> AppResult
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decide_sink_routes_a_failed_pipeline_to_stderr() {
+        use super::{LogSink, decide_sink};
+        assert!(matches!(decide_sink::<u8>(Ok(7)), LogSink::File(7)));
+        let stderr = decide_sink::<u8>(Err(AppError::Message("dir gone".into())));
+        assert!(
+            matches!(stderr, LogSink::Stderr(ref m) if m == "dir gone"),
+            "the stderr branch must carry the reason for the eprintln"
+        );
+    }
+
     use super::*;
 
     fn dir() -> tempfile::TempDir {

@@ -53,8 +53,71 @@ pub struct Db {
 /// delete_job and download.rs's missing_job_err all speak it.
 pub(crate) const MISSING_JOB_MESSAGE: &str = "该任务已不存在，请刷新列表";
 
+/// Whether a db-open failure is file corruption (recoverable by quarantine)
+/// as opposed to permission/IO trouble (which a quarantine cannot help).
+fn is_corruption(e: &AppError) -> bool {
+    let AppError::Rusqlite(err) = e else {
+        return false;
+    };
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ffi::ErrorCode::NotADatabase
+                || code.code == rusqlite::ffi::ErrorCode::DatabaseCorrupt
+    )
+}
+
+/// How `Db::open_with_outcome` ended: opened as-is, or recovered from a
+/// quarantined corrupt file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenOutcome {
+    Opened,
+    Recovered,
+}
+
 impl Db {
+    /// Open, classifying the outcome for the startup notice: opened as-is,
+    /// or recovered from a quarantined corrupt file.
+    /// Test/harness convenience: same as `open_with_outcome`, discarding the
+    /// outcome. Production goes through `open_with_outcome` so a corrupt
+    /// file is quarantined and the session notices. Compiled only for test
+    /// builds — the only callers are the harness and in-crate tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg_attr(not(feature = "test-utils"), allow(dead_code))]
     pub fn open(path: &Path) -> AppResult<Self> {
+        Self::open_with_outcome(path).map(|(db, _)| db)
+    }
+
+    pub fn open_with_outcome(path: &Path) -> AppResult<(Self, OpenOutcome)> {
+        match Self::try_open(path) {
+            Ok(db) => Ok((db, OpenOutcome::Opened)),
+            Err(e) if is_corruption(&e) => {
+                // Quarantine the corrupt file for forensics; a stale WAL/SHM
+                // sidecar must go too, or replaying it into the fresh file
+                // would corrupt it again.
+                let bad = path.with_extension("bad");
+                let _ = std::fs::rename(path, &bad);
+                // OsString push, not display(): a non-UTF-8 path must keep
+                // its bytes or the stale sidecar survives and re-poisons.
+                let mut sidecar_wal = std::ffi::OsString::from(path.as_os_str());
+                sidecar_wal.push("-wal");
+                let mut sidecar_shm = std::ffi::OsString::from(path.as_os_str());
+                sidecar_shm.push("-shm");
+                let _ = std::fs::remove_file(&sidecar_wal);
+                let _ = std::fs::remove_file(&sidecar_shm);
+                tracing::warn!(
+                    target: "core",
+                    "db: 数据库文件损坏，已重置（原件保留为 {}）",
+                    bad.display()
+                );
+                let db = Self::try_open(path)?;
+                Ok((db, OpenOutcome::Recovered))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn try_open(path: &Path) -> AppResult<Self> {
         let conn = Connection::open(path)?;
         // WAL keeps every status write from paying the rollback journal's
         // create+fsync+delete cycle. synchronous=NORMAL trades the per-commit
@@ -510,6 +573,8 @@ fn status_from_str(s: &str) -> rusqlite::Result<JobStatus> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     /// WAL keeps every status write from paying the rollback journal's
     /// create+fsync+delete cycle; all access is serialized behind one
     /// Mutex<Db>, so the journal choice is the only write-amplification knob.
@@ -535,17 +600,19 @@ mod tests {
         let db_path = dir.path().join("t.db");
         // Create the schema while the directory is writable, then put the
         // database back on the rollback journal so the WAL switch has work.
-        drop(Db::open(&db_path).unwrap());
+        drop(Db::open_with_outcome(&db_path).unwrap());
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
         }
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
 
-        let result = Db::open(&db_path);
+        let result = Db::open_with_outcome(&db_path);
 
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let db = result.expect("a read-only data dir must not fail startup");
+        let db = result
+            .expect("a read-only data dir must not fail startup")
+            .0;
         let mode: String = db
             .conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
@@ -560,7 +627,7 @@ mod tests {
     #[test]
     fn db_opens_in_wal_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("t.db")).unwrap().0;
         let mode: String = db
             .conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
@@ -636,7 +703,7 @@ mod tests {
             .unwrap();
         }
 
-        let db = Db::open(&path).unwrap();
+        let db = Db::open_with_outcome(&path).unwrap().0;
         assert!(column_exists(&db.conn, "jobs", "audio_format").unwrap());
         // The migrated column must be usable end to end.
         let mut job = sample_job_for_db("migrated-job");
@@ -655,7 +722,7 @@ mod tests {
     fn open_purges_legacy_resolve_cache_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");
-        let db = Db::open(&path).unwrap();
+        let db = Db::open_with_outcome(&path).unwrap().0;
         let meta = sample_video_meta();
         db.upsert_resolve_cache("bilibili:bv1xx", &meta, 100)
             .unwrap();
@@ -667,7 +734,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let db2 = Db::open(&path).unwrap();
+        let db2 = Db::open_with_outcome(&path).unwrap().0;
         assert!(db2.get_resolve_cache("bilibili:bv1xx").unwrap().is_none());
         assert!(
             db2.get_resolve_cache("bilibili:bv1xx:guest")
@@ -689,7 +756,9 @@ mod tests {
     #[test]
     fn resolve_cache_roundtrip_and_overwrite() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let meta = sample_video_meta();
         db.upsert_resolve_cache("bilibili:bv1xx:guest_g3", &meta, 100)
             .unwrap();
@@ -714,7 +783,9 @@ mod tests {
     #[test]
     fn resolve_cache_corrupt_json_treated_as_miss() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         db.conn
             .execute(
                 "INSERT INTO resolve_cache (cache_key, meta_json, fetched_at) VALUES (?1, ?2, ?3)",
@@ -780,7 +851,9 @@ mod tests {
     #[test]
     fn find_job_conflict_detects_done_job() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
             db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
@@ -791,7 +864,9 @@ mod tests {
     #[test]
     fn find_job_conflict_distinguishes_audio_containers() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut m4a = sample_job("bestaudio");
         m4a.audio_format = Some("m4a".into());
         db.insert_job(&m4a).unwrap();
@@ -815,7 +890,9 @@ mod tests {
     #[test]
     fn has_active_job_distinguishes_video_and_audio() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
 
         let mut audio = sample_job_for_db("audio-1");
         audio.audio_format = Some("m4a".into());
@@ -836,7 +913,9 @@ mod tests {
     #[test]
     fn find_job_conflict_none_for_different_format() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
             db.find_job_conflict("BV1xx", 1, "64", None).unwrap(),
@@ -847,7 +926,9 @@ mod tests {
     #[test]
     fn find_job_conflict_prefers_active_over_done() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         db.insert_job(&sample_job("80")).unwrap();
         assert_eq!(
             db.find_job_conflict("BV1xx", 1, "80", None).unwrap(),
@@ -869,7 +950,9 @@ mod tests {
     #[test]
     fn insert_update_and_list_jobs() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut job = sample_job("80");
         job.status = JobStatus::Pending;
         job.progress = 0.0;
@@ -888,7 +971,9 @@ mod tests {
     #[test]
     fn delete_finished_jobs_removes_done_and_failed_keeps_pending_running_paused() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
 
         let mut pending = sample_job_for_db("p1");
         pending.status = JobStatus::Pending;
@@ -929,7 +1014,9 @@ mod tests {
     #[test]
     fn job_metadata_columns_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut job = sample_job_for_db("meta-job");
         job.thumbnail_url = Some("https://i0.hdslb.com/bfs/archive/cover.jpg".into());
         job.duration_secs = Some(269);
@@ -966,7 +1053,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = Db::open(&db_path).unwrap(); // migration runs here
+        let db = Db::open_with_outcome(&db_path).unwrap().0; // migration runs here
         let mut job = sample_job_for_db("legacy-meta-job");
         job.thumbnail_url = None;
         db.insert_job(&job).unwrap();
@@ -1005,7 +1092,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = Db::open(&db_path).unwrap();
+        let db = Db::open_with_outcome(&db_path).unwrap().0;
 
         for (col, kind) in [
             ("thumbnail_url", "TEXT"),
@@ -1028,7 +1115,9 @@ mod tests {
     #[test]
     fn exact_output_path_roundtrips_raw_bytes_and_clears() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut job = sample_job_for_db("exact-1");
         let raw = b"/save/bad-\xff-name.mp4";
         let display = String::from_utf8_lossy(raw).into_owned();
@@ -1048,14 +1137,18 @@ mod tests {
     #[test]
     fn exact_output_path_write_reports_a_vanished_row() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         assert!(db.set_output_path_exact("missing", Some(b"x")).is_err());
     }
 
     #[test]
     fn job_roundtrips_uploader_through_the_db() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut job = sample_job_for_db("up-1");
         job.uploader = "某UP主".into();
         db.insert_job(&job).unwrap();
@@ -1071,7 +1164,9 @@ mod tests {
     #[test]
     fn same_second_rows_order_by_id_desc() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         // Same-second created_at with insertion order opposite to id order:
         // without a tiebreaker SQLite walks insertion (rowid) order and the
         // later insert sorts first, which is arbitrary once rows are
@@ -1096,9 +1191,60 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_database_is_quarantined_and_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        std::fs::write(&path, b"definitely not a sqlite database header at all").unwrap();
+        // The stale WAL sidecar must be removed with the quarantine, or it
+        // would poison the fresh file.
+        std::fs::write(
+            PathBuf::from(format!("{}-wal", path.display())),
+            b"stale wal bytes",
+        )
+        .unwrap();
+
+        let (db, outcome) = Db::open_with_outcome(&path).unwrap();
+        assert_eq!(outcome, OpenOutcome::Recovered);
+        // with_extension("bad") replaces ".db": the quarantine file is
+        // jobs.bad. The stale WAL sidecar is removed before the fresh open
+        // — not directly observable (the fresh connection recreates a
+        // -wal), but a leftover stale WAL would be replayed into the fresh
+        // file and corrupt it, failing the insert below.
+        let quarantined = path.with_extension("bad");
+        assert!(quarantined.exists(), "the corrupt file must be quarantined");
+        // The fresh database actually works.
+        let mut job = sample_job_for_db("fresh-1");
+        job.created_at = None;
+        db.insert_job(&job).unwrap();
+        assert_eq!(db.get_job("fresh-1").unwrap().id, "fresh-1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_error_is_not_treated_as_corruption() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        std::fs::write(&path, b"real sqlite would live here").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let Err(err) = Db::open_with_outcome(&path) else {
+            panic!("a permission failure must not open");
+        };
+        assert!(
+            !is_corruption(&err),
+            "a permission failure must surface loudly, not reset the database"
+        );
+        assert!(path.exists());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
     fn insert_preserves_an_explicit_created_at() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut job = sample_job_for_db("ts-1");
         job.created_at = Some("2026-01-02 03:04:05".into());
         db.insert_job(&job).unwrap();
@@ -1113,7 +1259,9 @@ mod tests {
     #[test]
     fn legacy_null_uploader_reads_back_as_empty_string() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         // Rows written before the uploader column existed carry NULL in it
         // (a fresh DB builds the column via CREATE TABLE; only upgrades run
         // the ALTER, both leave the cell nullable). Insert via raw SQL

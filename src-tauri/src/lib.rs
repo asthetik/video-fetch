@@ -1,4 +1,8 @@
-mod activity_log;
+/// Exposed for the degraded-install probe binary
+/// (`src/bin/degraded-install-probe.rs`) that a unit test runs in a
+/// subprocess; hidden from docs — not part of the library's real API.
+#[doc(hidden)]
+pub mod activity_log;
 mod auth;
 mod bilibili_view;
 #[cfg(test)]
@@ -23,11 +27,11 @@ mod ytdlp;
 use commands::{
     build_app_state, cancel_all_jobs, cancel_job, check_download_conflict, clear_auth,
     clear_finished_jobs, clear_logs, delete_job, detect_url, enqueue_download, get_auth_status,
-    get_cookie_notice, get_engine_versions, get_save_dir_notice, get_settings, import_cookies_path,
-    list_jobs, list_log_files, log_ui_events, next_resolve_id, open_path, pause_all_jobs,
-    pause_job, pick_cookies_file, pick_save_dir, preview_name, read_log_tail, resolve_url,
-    restore_deleted_job, resume_all_jobs, resume_job, retry_job, save_settings, set_window_theme,
-    space_enqueue_batch, space_info, space_list_videos, start_bilibili_login,
+    get_cookie_notice, get_db_notice, get_engine_versions, get_save_dir_notice, get_settings,
+    import_cookies_path, list_jobs, list_log_files, log_ui_events, next_resolve_id, open_path,
+    pause_all_jobs, pause_job, pick_cookies_file, pick_save_dir, preview_name, read_log_tail,
+    resolve_url, restore_deleted_job, resume_all_jobs, resume_job, retry_job, save_settings,
+    set_window_theme, space_enqueue_batch, space_info, space_list_videos, start_bilibili_login,
 };
 use tauri::Manager;
 
@@ -129,6 +133,7 @@ pub fn run() {
             get_settings,
             get_save_dir_notice,
             get_cookie_notice,
+            get_db_notice,
             get_engine_versions,
             save_settings,
             get_auth_status,
@@ -287,6 +292,7 @@ mod startup_silence_guard {
     fn healthy_startup_call_sites_stay_anomaly_only() {
         let lib = include_str!("lib.rs");
         let commands = include_str!("commands.rs");
+        let download = include_str!("download.rs");
         let run_body = fn_body(lib, "\npub fn run()");
         let state_body = fn_body(commands, "\npub fn build_app_state");
 
@@ -304,31 +310,42 @@ mod startup_silence_guard {
         assert!(run_body.contains("tracing::error!"));
         assert!(run_body.contains("app: 启动失败"));
 
+        // B9 re-pin: the orphan sweep's info line moved off build_app_state
+        // onto the background maintenance (off the startup path). It must
+        // stay on spawn_startup_maintenance and anomaly-gated (> 0).
+        let maintenance_body = fn_body(download, "\n    pub fn spawn_startup_maintenance");
+        assert!(
+            maintenance_body.contains("app: 清理孤儿工作目录"),
+            "the orphan-cleanup info line must stay on spawn_startup_maintenance"
+        );
+        assert!(
+            maintenance_body.contains("if removed > 0"),
+            "the orphan-cleanup line must stay anomaly-gated (> 0)"
+        );
+
         // build_app_state(): exactly the two anomaly-gated maintenance lines
         // plus the anomaly-gated save_dir fallback warn. The cookie
         // materialization failure warn moved into `startup_cookie_notice`
         // (pinned below) so the same path can record the UI notice.
+        // B9 moved the orphan sweep off the startup path (disk-bound, before
+        // the window): it now runs on a background thread from
+        // DownloadManager::spawn_startup_maintenance, and its info line is
+        // re-pinned there (see the download.rs assertion below).
         let state_sites = log_sites(state_body);
         assert_eq!(
-            state_sites, 3,
+            state_sites, 2,
             "healthy startup must produce zero log lines (product decision 2026-09-15): \
              `build_app_state` has {state_sites} log call sites (fully-qualified or \
-             bare), only the two anomaly-gated maintenance lines (orphans / interrupted \
-             rows) and the anomaly-gated save_dir fallback warn are allowed; the cookie \
-             materialization warn is pinned on `startup_cookie_notice`. Extend this \
-             test deliberately for new anomaly/error paths."
+             bare), only the anomaly-gated interrupted-rows line and the anomaly-gated \
+             save_dir fallback warn are allowed; the orphan-cleanup info line moved to \
+             DownloadManager::spawn_startup_maintenance and the cookie materialization \
+             warn is pinned on `startup_cookie_notice`. Extend this test deliberately \
+             for new anomaly/error paths."
         );
         assert!(state_body.contains("tracing::info!"));
         assert!(state_body.contains("tracing::warn!"));
-        assert!(state_body.contains("app: 清理孤儿工作目录"));
         assert!(state_body.contains("app: 中断的下载已转为暂停"));
         assert!(state_body.contains("app: 保存目录不可用"));
-        // Both sites must stay gated on a non-empty recovery batch: on a
-        // healthy startup both counters are 0 and neither line may fire.
-        assert!(
-            state_body.contains("if removed_orphans > 0"),
-            "the orphan-cleanup line must stay anomaly-gated (> 0)"
-        );
         assert!(
             state_body.contains("if reconciled > 0"),
             "the interrupted-runs line must stay anomaly-gated (> 0)"
@@ -442,6 +459,7 @@ mod startup_silence_guard {
         // silent.
         quiet_names.push("spawn_digest_verification".to_string());
         quiet_names.push("ensure_digest_ok".to_string());
+
         for line in prod.lines() {
             let trimmed = line.trim_start();
             let trimmed = trimmed

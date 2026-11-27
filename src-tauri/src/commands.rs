@@ -12,10 +12,7 @@ use url::Url;
 use crate::auth::AuthManager;
 use crate::bilibili_view;
 use crate::cookies::{self, Cookie};
-use crate::download::{
-    DownloadManager, DownloadProgressEvent, PROGRESS_EVENT, ProgressEmitter,
-    cleanup_orphan_work_dirs, work_dir_keep_ids,
-};
+use crate::download::{DownloadManager, DownloadProgressEvent, PROGRESS_EVENT, ProgressEmitter};
 use crate::error::{AppError, AppResult};
 use crate::models;
 use crate::models::{
@@ -73,6 +70,9 @@ pub struct AppState {
     /// not be materialized at launch (the cookie store still reads logged in,
     /// but `cookies.txt` is missing so downloads cannot carry the session).
     pub cookie_notice: Option<String>,
+    /// Set when the startup found (and quarantined) a corrupt jobs.db and
+    /// reset history; surfaces once as a startup toast.
+    pub db_notice: Option<String>,
     pub ytdlp: YtDlpConfig,
     pub wbi_keys: wbi::WbiKeyCache,
     /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
@@ -1479,6 +1479,11 @@ pub fn get_cookie_notice(state: State<'_, AppState>) -> Option<String> {
 }
 
 #[tauri::command]
+pub fn get_db_notice(state: State<'_, AppState>) -> Option<String> {
+    state.db_notice.clone()
+}
+
+#[tauri::command]
 pub fn save_settings(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -2216,16 +2221,19 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         crate::activity_log::DEFAULT_RETENTION_DAYS,
     ) {
         Ok(activity_log) => activity_log,
-        Err(e) => {
+        Err(_e) => {
             // Logging is best-effort infrastructure: never block app launch on
             // a log-directory failure. The viewer commands still work and will
-            // surface the missing files in the UI.
-            eprintln!("videofetch: activity log unavailable: {e}");
+            // surface the missing files in the UI; install already printed
+            // the reason and installed a stderr-only subscriber, so nothing
+            // here needs its own eprintln.
             crate::activity_log::ActivityLog::disabled(logs_dir)
         }
     };
     // Open the DB only after the subscriber exists so migration records land.
-    let db = crate::db::Db::open(&app_dir.join("jobs.db"))?;
+    let (db, db_outcome) = crate::db::Db::open_with_outcome(&app_dir.join("jobs.db"))?;
+    let db_notice = (db_outcome == crate::db::OpenOutcome::Recovered)
+        .then(|| "数据库文件已损坏，历史记录已重置；原件保留为 jobs.bad。".to_string());
     let auth = AuthManager::new(cache_dir);
     // A locked/ACL'd cookies.txt must not block launch, but the failure is not
     // swallowed either: the UI notice is recorded here (and the failure logged),
@@ -2261,16 +2269,19 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         );
     }
 
-    let active_ids = work_dir_keep_ids(&downloads.list()?);
-    let removed_orphans = cleanup_orphan_work_dirs(&work_root, &active_ids);
-    if removed_orphans > 0 {
-        tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed_orphans} 个");
-    }
     // A row left Running by the previous session has no runner: surface it as
     // Paused so the UI offers resume instead of a frozen "downloading" bar.
     let reconciled = downloads.reconcile_interrupted_runs()?;
     if reconciled > 0 {
         tracing::info!(target: "core", "app: 中断的下载已转为暂停 {reconciled} 个");
+    }
+    // The orphan sweep moved off the startup path (disk-bound, before the
+    // window): it runs on a background thread behind a latch spawn_runner
+    // takes before its first spill. A recovered (reset) session skips the
+    // sweep — its keep set is empty and it would delete every interrupted
+    // .part work dir; the next healthy launch cleans them.
+    if db_outcome != crate::db::OpenOutcome::Recovered {
+        downloads.spawn_startup_maintenance();
     }
 
     let http_client = reqwest::Client::builder()
@@ -2287,6 +2298,7 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         settings: std::sync::Mutex::new(settings),
         save_dir_notice: save_dir_plan.notice,
         cookie_notice,
+        db_notice,
         ytdlp,
         wbi_keys: wbi::WbiKeyCache::new(),
         http_client,
@@ -3022,7 +3034,9 @@ mod openable_roots_delete_tests {
         make_jobs: impl FnOnce(&Path) -> Vec<DownloadJob>,
     ) -> (tempfile::TempDir, AppState) {
         let root = tempfile::tempdir().unwrap();
-        let db = Db::open(&root.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&root.path().join("jobs.db"))
+            .unwrap()
+            .0;
         for job in make_jobs(root.path()) {
             db.insert_job(&job).unwrap();
         }
@@ -3047,6 +3061,7 @@ mod openable_roots_delete_tests {
             settings: Mutex::new(settings),
             save_dir_notice: None,
             cookie_notice: None,
+            db_notice: None,
             ytdlp: YtDlpConfig {
                 yt_dlp_path: root.path().join("yt-dlp"),
                 ffmpeg_path: None,
@@ -3569,7 +3584,9 @@ mod restart_cookie_tests {
             fail,
             scratch: tempfile::tempdir().unwrap(),
         });
-        let db = crate::db::Db::open(&root.path().join("jobs.db")).unwrap();
+        let db = crate::db::Db::open_with_outcome(&root.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let (emitter, _rx) = ChannelProgressEmitter::new();
         let settings = AppSettings {
             save_dir: save_dir.to_string_lossy().into(),
@@ -3591,6 +3608,7 @@ mod restart_cookie_tests {
             recent_deleted_jobs: RecentDeletedJobs::new(),
             save_dir_notice: None,
             cookie_notice: None,
+            db_notice: None,
             app_dir: root.path().to_path_buf(),
             auth: AuthManager::new(cache_dir),
             downloads,

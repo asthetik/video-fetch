@@ -92,6 +92,7 @@ export const api = {
   getSaveDirNotice: () => invoke<string | null>("get_save_dir_notice"),
   /** Startup notice: set when login cookies could not be materialized at launch. */
   getCookieNotice: () => invoke<string | null>("get_cookie_notice"),
+  getDbNotice: () => invoke<string | null>("get_db_notice"),
   getEngineVersions: () => invoke<EngineVersions>("get_engine_versions"),
   saveSettings: (settings: AppSettings) => invoke<void>("save_settings", { settings }),
   getAuthStatus: () => invoke<AuthStatus>("get_auth_status"),

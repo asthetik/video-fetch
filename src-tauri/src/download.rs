@@ -401,6 +401,10 @@ pub struct DownloadManager {
     runner_tokens: RunnerTokens,
     /// Source of runner tokens; starts at zero so no token is ever `0`.
     next_token: Arc<AtomicU64>,
+    /// Serializes startup orphan cleanup against the first runner spawn:
+    /// the maintenance thread holds it while sweeping, `spawn_runner` takes
+    /// it before spilling any runner, so no runner races the sweep.
+    startup_maintenance: Arc<std::sync::Mutex<()>>,
 }
 
 /// Structured outcome of one enqueue attempt. The single-video command maps
@@ -462,6 +466,7 @@ impl DownloadManager {
             stop_flags,
             runner_tokens: Arc::new(Mutex::new(HashMap::new())),
             next_token: Arc::new(AtomicU64::new(0)),
+            startup_maintenance: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -1185,7 +1190,40 @@ impl DownloadManager {
         None
     }
 
+    /// Startup orphan cleanup, off the window-reveal path: the sweep is
+    /// disk-bound and the app must not wait on it before showing the UI.
+    /// Holds the maintenance lock while sweeping; `spawn_runner` takes the
+    /// same lock before spilling any runner, so a resumed job's work dir
+    /// never races the sweep. B9: a session recovered from a corrupt
+    /// database skips this entirely — its keep set is empty and sweeping
+    /// would delete every interrupted .part work dir; the next healthy
+    /// launch cleans them.
+    pub fn spawn_startup_maintenance(&self) {
+        let this = self.clone();
+        let gate = self.startup_maintenance.clone();
+        std::thread::spawn(move || {
+            let _maintenance = gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let jobs = match this.list() {
+                Ok(jobs) => jobs,
+                Err(_) => return, // cannot build a keep set; skip, not evict
+            };
+            let active_ids = work_dir_keep_ids(&jobs);
+            let removed = cleanup_orphan_work_dirs(&this.work_root, &active_ids);
+            if removed > 0 {
+                tracing::info!(target: "core", "app: 清理孤儿工作目录 {removed} 个");
+            }
+        });
+    }
+
     fn spawn_runner(&self, job_id: String) {
+        // The first runner waits for the startup maintenance sweep to
+        // finish (a resumed job's work dir must not race the sweep).
+        let _maintenance_gate = self
+            .startup_maintenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let token = self.mint_runner_token(&job_id);
         let this = self.clone();
         let task_id = job_id.clone();
@@ -2151,7 +2189,9 @@ mod tests {
         let raw = b"/save/bad-\xff-name.mp4";
         let display = String::from_utf8_lossy(raw).into_owned();
         {
-            let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+            let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+                .unwrap()
+                .0;
             let mut job = sample_job("exact-glue");
             job.output_path = Some(display.clone());
             db.insert_job(&job).unwrap();
@@ -2214,7 +2254,9 @@ mod tests {
         let expected_display = expected.to_string_lossy().into_owned();
         assert_eq!(display, expected_display.as_str());
 
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let exact = db.exact_output_path_for(display).unwrap();
         assert_eq!(
             exact.map(|bytes| fsutil::path_from_record_bytes(&bytes)),
@@ -2267,7 +2309,7 @@ mod tests {
         DownloadManager,
         tokio::sync::mpsc::UnboundedReceiver<DownloadProgressEvent>,
     ) {
-        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&save_dir.join("jobs.db")).unwrap().0;
         let (emitter, rx) = ChannelProgressEmitter::new();
         let manager = DownloadManager::new(
             db,
@@ -2868,7 +2910,9 @@ mod tests {
             children: Arc::clone(&children),
             pid: Arc::clone(&pid),
         }) as Arc<dyn Downloader>;
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let (emitter, _rx) = ChannelProgressEmitter::new();
         let manager = DownloadManager::new(
             db,
@@ -2955,7 +2999,9 @@ mod tests {
             children: Arc::clone(&children),
             pid: Arc::clone(&pid),
         }) as Arc<dyn Downloader>;
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let (emitter, _rx) = ChannelProgressEmitter::new();
         let manager = DownloadManager::new(
             db,
@@ -3053,7 +3099,9 @@ mod tests {
             stop_flags: Arc::clone(&stop_flags),
             pid: Arc::clone(&pid),
         }) as Arc<dyn Downloader>;
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let (emitter, _rx) = ChannelProgressEmitter::new();
         let manager = DownloadManager::new_with_stop_flags(
             db,
@@ -3203,7 +3251,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("jobs.db");
         {
-            let db = Db::open(&db_path).unwrap();
+            let db = Db::open_with_outcome(&db_path).unwrap().0;
             let mut done = sample_job("done-keep");
             done.video_id = "BV-done".into();
             done.status = JobStatus::Done;
@@ -3368,7 +3416,9 @@ mod tests {
         std::fs::write(&file_path, b"data").unwrap();
 
         {
-            let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+            let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+                .unwrap()
+                .0;
             let mut pending = sample_job("pending-1");
             pending.status = JobStatus::Pending;
             db.insert_job(&pending).unwrap();
@@ -3519,7 +3569,9 @@ mod tests {
         let file_path = dir.path().join("demo [BV1xx].mp4");
         std::fs::write(&file_path, b"x").unwrap();
 
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut done = sample_job("done-1");
         done.status = JobStatus::Done;
         done.progress = 1.0;
@@ -3722,7 +3774,9 @@ mod tests {
     #[tokio::test]
     async fn allows_redownload_when_done_record_but_file_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut done = sample_job("done-1");
         done.status = JobStatus::Done;
         done.progress = 1.0;
@@ -3768,7 +3822,9 @@ mod tests {
     #[tokio::test]
     async fn force_enqueue_allows_done_duplicate() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut done = sample_job("done-1");
         done.status = JobStatus::Done;
         done.progress = 1.0;
@@ -3843,7 +3899,9 @@ mod tests {
     #[tokio::test]
     async fn check_conflict_reports_downloading_and_exists() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let mut done = sample_job("done-1");
         done.status = JobStatus::Done;
         done.page_index = 1;
@@ -3962,7 +4020,7 @@ mod tests {
             }
         }
 
-        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&save_dir.join("jobs.db")).unwrap().0;
         let mut failed = sample_job(job_id);
         failed.status = JobStatus::Failed;
         failed.error = Some("搬迁到保存目录失败: mock".into());
@@ -4023,7 +4081,7 @@ mod tests {
             }
         }
 
-        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&save_dir.join("jobs.db")).unwrap().0;
         let mut failed = sample_job(job_id);
         failed.status = JobStatus::Failed;
         failed.error =
@@ -4757,7 +4815,9 @@ mod tests {
         settings.save_dir = missing.to_string_lossy().into();
         let (emitter, _rx) = ChannelProgressEmitter::new();
         let manager = DownloadManager::new(
-            Db::open(&dir.path().join("jobs.db")).unwrap(),
+            Db::open_with_outcome(&dir.path().join("jobs.db"))
+                .unwrap()
+                .0,
             settings.clone(),
             Arc::new(MockDownloader::success(1.0)),
             Arc::new(emitter),
@@ -4797,7 +4857,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let save_dir = dir.path().join("videos");
         std::fs::create_dir_all(&save_dir).unwrap();
-        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&save_dir.join("jobs.db")).unwrap().0;
 
         // Pre-seed a Pending job with the same video/page: the second enqueue must report DuplicateActive.
         let mut active = sample_job("job-active");
@@ -4939,7 +4999,7 @@ mod tests {
         downloader: Arc<dyn Downloader>,
         stop_flags: StopFlags,
     ) -> DownloadManager {
-        let db = Db::open(&dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.join("jobs.db")).unwrap().0;
         let (emitter, _rx) = ChannelProgressEmitter::new();
         DownloadManager::new_with_stop_flags(
             db,
@@ -5713,7 +5773,7 @@ mod tests {
             }
         }
 
-        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&save_dir.join("jobs.db")).unwrap().0;
         let mut failed = sample_job(job_id);
         failed.status = JobStatus::Failed;
         failed.error = Some("用户暂停下载".into());
@@ -5797,7 +5857,7 @@ mod tests {
             }
         }
 
-        let db = Db::open(&save_dir.join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&save_dir.join("jobs.db")).unwrap().0;
         let mut failed = sample_job(job_id);
         failed.status = JobStatus::Failed;
         failed.error = Some("用户暂停下载".into());
@@ -6853,7 +6913,9 @@ mod tests {
 
         // Built by hand rather than with manager_for: the progress events are
         // part of what this test asserts, so their receiver has to stay alive.
-        let db = Db::open(&dir.path().join("jobs.db")).unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
         let (emitter, mut rx) = ChannelProgressEmitter::new();
         let manager = DownloadManager::new_with_stop_flags(
             db,
