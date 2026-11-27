@@ -2237,6 +2237,9 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     std::fs::create_dir_all(&work_root)?;
 
     let ytdlp = sidecar::resolve_ytdlp_config(app);
+    // Hash the resolved bundled binaries off the main thread; the download
+    // gate (`ensure_digest_ok`) waits for the verdict before the first spawn.
+    sidecar::spawn_digest_verification(&ytdlp.yt_dlp_path, ytdlp.ffmpeg_path.as_deref());
     let progress: Arc<dyn ProgressEmitter> = Arc::new(TauriProgressEmitter::new(app.clone()));
     let downloads = DownloadManager::with_ytdlp(
         db,

@@ -398,6 +398,10 @@ mod startup_silence_guard {
             "\npub fn resolve_yt_dlp_path",
             "\npub fn resolve_ffmpeg_path",
             "\npub fn resolve_ytdlp_config",
+            "\nfn expected_digest",
+            "\nfn digest_gate",
+            "\nfn digest_file",
+            "\nfn verdicts",
         ];
         for signature in quiet_fns {
             let body = fn_body(sidecar, signature);
@@ -433,6 +437,11 @@ mod startup_silence_guard {
             })
             .collect();
         quiet_names.push("resolve_with".to_string());
+        // The digest-verification pair: their logging is the pinned anomaly
+        // path (ffmpeg mismatch warn, hash-timeout warn) — enumerated, not
+        // silent.
+        quiet_names.push("spawn_digest_verification".to_string());
+        quiet_names.push("ensure_digest_ok".to_string());
         for line in prod.lines() {
             let trimmed = line.trim_start();
             let trimmed = trimmed

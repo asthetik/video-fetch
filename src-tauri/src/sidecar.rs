@@ -1,3 +1,4 @@
+use sha2::Sha256;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 
@@ -86,8 +87,137 @@ const ORIGIN_BUNDLED: &str = "内置";
 const ORIGIN_ENV: &str = "环境变量";
 const ORIGIN_SYSTEM: &str = "系统 PATH";
 
-const TOOL_YT_DLP: &str = "yt-dlp";
-const TOOL_FFMPEG: &str = "ffmpeg";
+pub(crate) const TOOL_YT_DLP: &str = "yt-dlp";
+pub(crate) const TOOL_FFMPEG: &str = "ffmpeg";
+
+// --- Runtime integrity ------------------------------------------------------
+//
+// `sidecar_pins.json` vouches for the shipped binary per target; build.rs
+// injects the current target's digest at compile time. A background thread
+// hashes the resolved binaries once at startup (tens of milliseconds, off
+// the main thread — the version probe's 3s startup cost was the reason a
+// probe-free resolution exists and hashing is an order of magnitude under
+// it), and the download path refuses to spawn a yt-dlp whose digest does
+// not match. ffmpeg is invoked by yt-dlp rather than by us, so a mismatch
+// there cannot be blocked — it is logged loudly and the merge failure is
+// already caught at the delivery point (`looks_unmerged`).
+//
+// Env/PATH origins are exempt by design: they are dev-only overrides (a
+// release build refuses them) and a system binary was never ours to vouch
+// for.
+
+/// Placeholders written synchronously by `spawn_digest_verification` so a
+/// download racing the hash thread waits instead of running unverified.
+const VERIFYING: &str = "校验中";
+
+static DIGEST_VERDICTS: std::sync::Mutex<
+    Option<std::collections::HashMap<&'static str, Result<(), String>>>,
+> = std::sync::Mutex::new(None);
+
+fn expected_digest(tool: &str) -> Option<&'static str> {
+    match tool {
+        TOOL_YT_DLP => option_env!("SIDECAR_SHA256_YT_DLP"),
+        TOOL_FFMPEG => option_env!("SIDECAR_SHA256_FFMPEG"),
+        _ => None,
+    }
+}
+
+/// The gate decision, pure so every branch is unit-testable: nothing to
+/// vouch for (no pin compiled in) and nothing vouched for (verification
+/// never started — the test harness) both pass; only a started verification
+/// that failed blocks.
+fn digest_gate(expected: bool, verdict: Option<Result<(), String>>) -> Result<(), String> {
+    match (expected, verdict) {
+        (false, _) => Ok(()),
+        (true, None) => Ok(()),
+        (true, Some(Ok(()))) => Ok(()),
+        (true, Some(Err(e))) => Err(e),
+    }
+}
+
+fn digest_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verdicts() -> std::sync::MutexGuard<
+    'static,
+    Option<std::collections::HashMap<&'static str, Result<(), String>>>,
+> {
+    DIGEST_VERDICTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hash the resolved bundled binaries once, off the main thread, and record
+/// per-tool verdicts. Called from `build_app_state` before queued work can
+/// resume; the placeholders it writes synchronously make a racing download
+/// wait for the verdict instead of running an unverified binary.
+pub fn spawn_digest_verification(yt_dlp: &std::path::Path, ffmpeg: Option<&std::path::Path>) {
+    {
+        let mut verdicts = verdicts();
+        for tool in [TOOL_YT_DLP, TOOL_FFMPEG] {
+            verdicts
+                .get_or_insert_with(std::collections::HashMap::new)
+                .insert(tool, Err(VERIFYING.into()));
+        }
+    }
+    let yt_dlp = yt_dlp.to_path_buf();
+    let ffmpeg = ffmpeg.map(std::path::Path::to_path_buf);
+    std::thread::spawn(move || {
+        let mut verdicts = verdicts();
+        for (tool, path) in [(TOOL_YT_DLP, Some(yt_dlp)), (TOOL_FFMPEG, ffmpeg)] {
+            let verdict = match (expected_digest(tool), path) {
+                (Some(expected), Some(path)) => match digest_file(&path) {
+                    Ok(digest) if digest == expected => Ok(()),
+                    Ok(digest) => {
+                        let message = format!(
+                            "{tool} 完整性校验失败：SHA-256 不匹配（期望 {expected}，实际 {digest}）"
+                        );
+                        if tool == TOOL_FFMPEG {
+                            // yt-dlp spawns ffmpeg itself; the mismatch
+                            // cannot be blocked here. The merge failure is
+                            // already caught loudly at the delivery point.
+                            tracing::warn!(target: "core", "sidecar: {message}（合并失败会在交付点浮出）");
+                        }
+                        Err(message)
+                    }
+                    Err(e) => Err(format!("{tool} 完整性校验失败：无法读取（{e}）")),
+                },
+                _ => Ok(()),
+            };
+            if let Some(map) = verdicts.as_mut() {
+                map.insert(tool, verdict);
+            }
+        }
+    });
+}
+
+/// The download path's gate: refuse to spawn a yt-dlp whose digest failed
+/// verification. Waits (bounded) while the background hash is still running;
+/// a 5s timeout proceeds with a loud warning — hashing 130MB has never come
+/// close, and a permanently stalled hash thread must not brick downloads.
+pub fn ensure_digest_ok(tool: &str) -> Result<(), String> {
+    if expected_digest(tool).is_none() {
+        return Ok(());
+    }
+    for _ in 0..100 {
+        let snapshot = {
+            let verdicts = verdicts();
+            verdicts.as_ref().and_then(|m| m.get(tool).cloned())
+        };
+        match digest_gate(true, snapshot) {
+            Ok(()) => return Ok(()),
+            Err(e) if e == VERIFYING => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return Err(e),
+        }
+    }
+    tracing::warn!(target: "core", "sidecar: {tool} 完整性校验超时，本次执行放行");
+    Ok(())
+}
 
 /// ffmpeg answers `-version`. yt-dlp's parser reads that as `-v ersion` and
 /// exits 2, so a shared flag would reject every healthy yt-dlp.
@@ -169,13 +299,12 @@ fn resolve_candidates(spec: ToolCandidates) -> Option<PathBuf> {
 /// sits inside the Tauri `setup` hook, which blocks the main thread before the
 /// event loop pumps, so it lands directly on time-to-window.
 ///
-/// A single candidate is therefore taken as-is. Verification of the shipped
-/// binary belongs at build time, where `fetch_sidecars.py` already asserts the
-/// architecture and `sidecar_pins.json` pins its digest. What a broken binary
-/// costs at runtime is a later failure rather than a startup one: yt-dlp stops
-/// at its own spawn error, and ffmpeg lets the run finish and is caught at the
-/// delivery point by `looks_unmerged`. Both are loud, but both arrive during a
-/// download instead of before one starts.
+/// A single candidate is therefore taken as-is. The shipped binary's digest
+/// is verified off the main thread by `spawn_digest_verification` (against
+/// the compile-time-injected pin), and the download path refuses a yt-dlp
+/// whose verdict failed — see the runtime-integrity block above. ffmpeg is
+/// yt-dlp's to spawn, so its mismatch is logged and caught at the delivery
+/// point by `looks_unmerged`.
 fn resolve_with(
     spec: ToolCandidates,
     probe: impl Fn(&std::path::Path, &str) -> Result<(), String>,
@@ -270,6 +399,41 @@ mod tests {
     /// override in the environment would let anything that can set a variable
     /// choose the binary instead, and would put an unvetted yt-dlp — one that
     /// need not accept the flags `ytdlp.rs` passes — on the download path.
+    #[test]
+    fn digest_file_hashes_known_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        // NIST test vector for SHA-256("abc").
+        assert_eq!(
+            digest_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(digest_file(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn the_download_path_gates_on_the_digest_verdict() {
+        // CRLF-normalized: Windows checkouts hand include_str CRLF source.
+        let src = include_str!("ytdlp.rs").replace("\r\n", "\n");
+        let needle = ["crate::sidecar::ensure_digest_ok(crate::sidecar::TOOL_YT_DLP)"].concat();
+        assert!(
+            src.contains(&needle),
+            "the download path must gate on the digest verdict; without the gate a failed verification never blocks a spawn"
+        );
+    }
+
+    #[test]
+    fn digest_gate_blocks_only_a_failed_verdict() {
+        // No pin compiled in: everything passes, nothing can fail.
+        assert!(digest_gate(false, None).is_ok());
+        assert!(digest_gate(false, Some(Err("篡改".into()))).is_ok());
+        // Pin present: no verdict (harness) and a passing verdict pass.
+        assert!(digest_gate(true, None).is_ok());
+        assert!(digest_gate(true, Some(Ok(()))).is_ok());
+        assert!(digest_gate(true, Some(Err("校验失败".into()))).is_err());
+    }
+
     #[test]
     fn a_release_build_ignores_the_sidecar_override() {
         let file = std::env::current_exe()
