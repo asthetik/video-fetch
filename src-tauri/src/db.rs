@@ -78,6 +78,16 @@ pub enum OpenOutcome {
 impl Db {
     /// Open, classifying the outcome for the startup notice: opened as-is,
     /// or recovered from a quarantined corrupt file.
+    /// Test/harness convenience: same as `open_with_outcome`, discarding the
+    /// outcome. Production goes through `open_with_outcome` so a corrupt
+    /// file is quarantined and the session notices. Compiled only for test
+    /// builds — the only callers are the harness and in-crate tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg_attr(not(feature = "test-utils"), allow(dead_code))]
+    pub fn open(path: &Path) -> AppResult<Self> {
+        Self::open_with_outcome(path).map(|(db, _)| db)
+    }
+
     pub fn open_with_outcome(path: &Path) -> AppResult<(Self, OpenOutcome)> {
         match Self::try_open(path) {
             Ok(db) => Ok((db, OpenOutcome::Opened)),
