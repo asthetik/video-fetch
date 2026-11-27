@@ -23,9 +23,17 @@ pub(crate) fn restrict_private_file_perms(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt as _;
+        // icacls is a console-subsystem program: spawned bare from a
+        // windows-subsystem GUI process it flashes a black terminal window —
+        // and every logged-in resolve runs through write_netscape_file, so
+        // that would be on every resolve. Same CREATE_NO_WINDOW rule as the
+        // yt-dlp spawns.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let output = std::process::Command::new("icacls")
             .arg(path)
             .args(["/inheritance:r", "/grant:r", "*S-1-3-4:F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|e| std::io::Error::other(format!("cannot run icacls: {e}")))?;
         if !output.status.success() {
@@ -598,8 +606,10 @@ mod tests {
             .unwrap();
         assert!(out.status.success(), "icacls readback must succeed");
         let text = String::from_utf8_lossy(&out.stdout);
+        // Belt around the star-prefixed SID form: a rare environment may
+        // resolve OWNER_RIGHTS to its localized display name instead.
         assert!(
-            text.contains("*S-1-3-4"),
+            text.contains("*S-1-3-4") || text.to_uppercase().contains("OWNER RIGHTS"),
             "the owner grant must be present on the file: {text}"
         );
         for broad in ["S-1-1-0", "S-1-5-11", "S-1-5-18", "S-1-5-32-544"] {
