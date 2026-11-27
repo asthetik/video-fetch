@@ -899,9 +899,10 @@ mod tests {
     }
 
     /// B14: the TTL predicate is strict (`<`): a row exactly at the cutoff
-    /// stays and `is_fresh`'s `<=` still judges it fresh — the two boundaries
-    /// are complementary, so a just-expired row survives the sweep but reads
-    /// as stale. Pinned through the sweep's `now` seam with a fixed clock: a
+    /// stays, and at that same fixed clock `is_fresh`'s `<=` judges it fresh
+    /// — the sweep's delete boundary sits one second beyond the read's fresh
+    /// boundary, so nothing survives the sweep while reading stale. Pinned
+    /// through the sweep's `now` seam with a fixed clock: a
     /// reopen-based test cannot observe the exact boundary because the sweep
     /// recomputes the clock at open time.
     ///
