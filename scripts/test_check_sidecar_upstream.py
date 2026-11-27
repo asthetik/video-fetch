@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest import mock
 
 import check_sidecar_upstream as chk
+import fetch_sidecars as fs
 
 # A trimmed copy of martin-riedl's index page. The real one links one release
 # build and one nightly per target, and the split between them is the whole
@@ -145,3 +147,186 @@ class TestGithubHeaders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCollectFindingsNetworkLayer(unittest.TestCase):
+    """collect_findings driven end-to-end over a fake fetch_bytes: the real
+    URL set, the real headers, and the real finding logic — everything above
+    the socket."""
+
+    def setUp(self) -> None:
+        pins = mock.patch.object(
+            chk,
+            "load_pins",
+            return_value={
+                "downloads": [
+                    PINNED_LINUX64,
+                    "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip",
+                ]
+            },
+        )
+        ytdlp = mock.patch.object(chk, "load_ytdlp_version", return_value="2026.11.23")
+        macos = mock.patch.object(chk, "FFMPEG_MACOS_BUILD", "1789931890_9.0.2")
+        pins.start()
+        ytdlp.start()
+        macos.start()
+        self.addCleanup(pins.stop)
+        self.addCleanup(ytdlp.stop)
+        self.addCleanup(macos.stop)
+
+    @staticmethod
+    def fake_fetch(responses: dict[str, bytes]):
+        """A fetch_bytes stub keyed by URL substring, recording every call."""
+        calls: list[tuple[str, dict[str, str] | None]] = []
+
+        def fetch(url: str, headers: dict[str, str] | None = None) -> bytes:
+            calls.append((url, headers))
+            for key, body in responses.items():
+                if key in url:
+                    return body
+            raise AssertionError(f"unexpected fetch: {url}")
+
+        return fetch, calls
+
+    @staticmethod
+    def btbody(assets: list[str]) -> bytes:
+        # The API returns a release LIST, newest first; newest_autobuild
+        # picks the first autobuild- tagged entry.
+        return json.dumps(
+            [
+                {
+                    "tag_name": "autobuild-2026-11-24-12-41",
+                    "assets": [{"name": n} for n in assets],
+                }
+            ]
+        ).encode()
+
+    def test_all_current_lists_no_findings(self) -> None:
+        yt = json.dumps({"tag_name": "2026.11.23"}).encode()
+        fake, calls = self.fake_fetch(
+            {
+                "yt-dlp/yt-dlp/releases/latest": yt,
+                "BtBN/FFmpeg-Builds/releases?per_page": self.btbody(BTBN_ASSETS),
+                "martin-riedl": INDEX_PAGE.encode(),
+            }
+        )
+        with mock.patch.object(chk, "fetch_bytes", fake):
+            self.assertEqual(chk.collect_findings(), [])
+        self.assertEqual(len(calls), 3)
+        # Both GitHub API calls carry the headers; the plain index page does
+        # not.
+        for url, headers in calls[:2]:
+            self.assertIn("api.github.com", url)
+            self.assertIsNotNone(headers)
+            self.assertIn("Accept", headers)
+        self.assertIsNone(calls[2][1])
+
+    def test_every_outdated_surface_reports(self) -> None:
+        yt = json.dumps({"tag_name": "2026.12.01"}).encode()
+        moved = [
+            n.replace("n9.0.2-3-ga5923073bf", "n9.1.0-1-gdeadbeef")
+            for n in BTBN_ASSETS[:4]
+        ] + BTBN_ASSETS[4:]
+        newer_page = INDEX_PAGE.replace("1789931890_9.0.2", "1790000000_9.1.0")
+        fake, _ = self.fake_fetch(
+            {
+                "yt-dlp/yt-dlp/releases/latest": yt,
+                "BtBN/FFmpeg-Builds/releases?per_page": self.btbody(moved),
+                "martin-riedl": newer_page.encode(),
+            }
+        )
+        with mock.patch.object(chk, "fetch_bytes", fake):
+            findings = chk.collect_findings()
+        # yt-dlp, both pinned BtbN targets (linux64 + win64), and macOS.
+        self.assertEqual(len(findings), 4, findings)
+        self.assertIn("yt-dlp 2026.11.23 → 2026.12.01", findings)
+        self.assertEqual(
+            sum(1 for f in findings if "ffmpeg (Linux/Windows)" in f),
+            2,
+            "each pinned BtbN target reports its own difference",
+        )
+        self.assertTrue(any("ffmpeg (macOS)" in f for f in findings))
+
+    def test_github_token_rides_the_api_headers(self) -> None:
+        yt = json.dumps({"tag_name": "2026.11.23"}).encode()
+        seen: dict[str, dict[str, str] | None] = {}
+
+        def fetch(url: str, headers: dict[str, str] | None = None) -> bytes:
+            seen[url] = headers
+            for key, body in {
+                "yt-dlp/yt-dlp/releases/latest": yt,
+                "BtBN/FFmpeg-Builds/releases?per_page": self.btbody(BTBN_ASSETS),
+                "martin-riedl": INDEX_PAGE.encode(),
+            }.items():
+                if key in url:
+                    return body
+            raise AssertionError(f"unexpected fetch: {url}")
+
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t0k3n"}), mock.patch.object(
+            chk, "fetch_bytes", fetch
+        ):
+            chk.collect_findings()
+        for url, headers in seen.items():
+            if "api.github.com" in url:
+                self.assertEqual(headers.get("Authorization"), "Bearer t0k3n")
+
+
+class TestFetchBytesLoopback(unittest.TestCase):
+    """fetch_bytes against a real localhost server: the only layer that
+    exercises the actual urllib path (headers, status handling) end to end."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/ok":
+                    body = b"hello upstream"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == "/auth":
+                    body = (
+                        b"ok"
+                        if self.headers.get("Authorization") == "Bearer t0k3n"
+                        else b"no"
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def test_fetch_bytes_roundtrips_bytes(self) -> None:
+        self.assertEqual(
+            fs.fetch_bytes(f"{self.base}/ok"), b"hello upstream"
+        )
+
+    def test_fetch_bytes_carries_headers(self) -> None:
+        body = fs.fetch_bytes(f"{self.base}/auth", {"Authorization": "Bearer t0k3n"})
+        self.assertEqual(body, b"ok")
+
+    def test_http_error_exits_instead_of_returning(self) -> None:
+        # die() over a failed fetch must exit the job, not return garbage.
+        with self.assertRaises(SystemExit):
+            fs.fetch_bytes(f"{self.base}/missing")
