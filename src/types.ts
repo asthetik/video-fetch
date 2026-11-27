@@ -1,6 +1,12 @@
 export type JobStatus = "pending" | "running" | "done" | "failed" | "paused";
 export type AuthStatus = "logged_out" | "logged_in" | "possibly_expired";
 
+export interface DownloadConflict {
+  downloading: boolean;
+  exists: boolean;
+  file_exists: boolean;
+}
+
 export interface PageItem {
   index: number;
   title: string;

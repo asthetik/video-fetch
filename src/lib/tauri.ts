@@ -14,8 +14,7 @@ import type {
   BatchEnqueueResult,
   EngineVersions,
   PauseAllResult,
-  ResumeAllResult,
-} from "../types";
+  ResumeAllResult, DownloadConflict } from "../types";
 
 export interface EnqueueArgs {
   url: string;
@@ -42,12 +41,6 @@ export interface CheckConflictArgs {
   title?: string;
   uploader?: string;
   audio_format?: string | null;
-}
-
-export interface DownloadConflict {
-  downloading: boolean;
-  exists: boolean;
-  file_exists: boolean;
 }
 
 export interface ResolveMetaEvent {
