@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "../lib/tauri";
-import { withToast } from "../lib/asyncAction";
+import { withToast, toErrorMessage } from "../lib/asyncAction";
 import { formatBytes } from "../lib/format";
 import { parseLogLine } from "../lib/activityLog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -32,7 +32,7 @@ export function LogsPage() {
       setRefreshTick((t) => t + 1);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(toErrorMessage(err));
     }
   }, []);
 
@@ -90,7 +90,7 @@ export function LogsPage() {
         if (!cancelled) setLines(next);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setError(toErrorMessage(err));
       });
     return () => {
       cancelled = true;
@@ -104,7 +104,7 @@ export function LogsPage() {
       setConfirmOpen(false);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(toErrorMessage(err));
     } finally {
       setClearing(false);
     }

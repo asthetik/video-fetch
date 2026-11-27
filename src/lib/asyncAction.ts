@@ -5,18 +5,45 @@
  * escaping as unhandledrejection events.
  */
 
-/** Convert an unknown rejection value into a user-facing message. */
-export function toErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === "string") return err;
+/**
+ * Structured kinds the backend marks on errors the frontend must branch on
+ * (B20): cancelled surfaces stay silent, io/db carry mapped Chinese copy.
+ * Generic errors arrive as bare strings (no kind).
+ */
+export type ApiErrorKind = "cancelled" | "db" | "io";
+
+export interface ApiError {
+  message: string;
+  kind?: ApiErrorKind;
+}
+
+/**
+ * Convert an unknown rejection value into its user-facing message plus the
+ * structured kind, if the backend annotated one (B20). Tolerates every
+ * historical shape: Error instances, bare strings (the generic wire shape
+ * and tauri-internal rejections), {message} objects, and full envelopes.
+ */
+export function toApiError(err: unknown): ApiError {
+  if (err instanceof Error) return { message: err.message };
+  if (typeof err === "string") return { message: err };
   if (
     typeof err === "object" &&
     err !== null &&
     typeof (err as { message?: unknown }).message === "string"
   ) {
-    return (err as { message: string }).message;
+    const raw = err as { message?: unknown; kind?: unknown };
+    const kind =
+      raw.kind === "cancelled" || raw.kind === "db" || raw.kind === "io"
+        ? (raw.kind as ApiErrorKind)
+        : undefined;
+    return { message: raw.message as string, kind };
   }
-  return String(err);
+  return { message: String(err) };
+}
+
+/** Convert an unknown rejection value into a user-facing message. */
+export function toErrorMessage(err: unknown): string {
+  return toApiError(err).message;
 }
 
 /**

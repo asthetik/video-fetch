@@ -122,6 +122,10 @@
     "logged_in",
     "possibly_expired"
   ],
+  "ErrorEnvelope": {
+    "kind": "cancelled",
+    "message": "登录已取消"
+  },
   "EngineVersions": {
     "ytDlp": "2026.11.23",
     "ffmpeg": "9.0.2"

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toErrorMessage } from "../lib/asyncAction";
 import { Search } from "lucide-react";
 import { formatDate, formatDuration, formatPlayCount } from "../lib/spaceFormat";
 import { selectionAfterFilterChange } from "../lib/spaceSelection";
@@ -57,7 +58,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
       } catch (err) {
         if (requestIdRef.current !== requestId) return;
         failedReqRef.current = { pn, append };
-        setError(err instanceof Error ? err.message : String(err));
+        setError(toErrorMessage(err));
       } finally {
         if (requestIdRef.current === requestId) {
           setLoading(false);
@@ -159,7 +160,7 @@ export function SpaceListView({ mid, active = true, onEnqueued }: SpaceListViewP
       setSelected(new Map());
       onEnqueued(result.enqueued);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(toErrorMessage(err));
     }
   }
 

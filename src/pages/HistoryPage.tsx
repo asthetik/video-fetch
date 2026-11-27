@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toErrorMessage } from "../lib/asyncAction";
 import { createListenerBag } from "../lib/listenerBag";
 import { loadJobsFromStore } from "../lib/jobListLoader";
 import { toast } from "sonner";
@@ -96,7 +97,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       } catch (err) {
         // The persistent error state below replaces the old transient toast:
         // a failed load must not masquerade as an empty history.
-        setLoadError(err instanceof Error ? err.message : String(err));
+        setLoadError(toErrorMessage(err));
       } finally {
         setLoading(false);
       }
@@ -238,7 +239,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
         prev.map((j) => (j.id === updated.id ? updated : j)),
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     }
   }
 
@@ -253,7 +254,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       toast.success(`已重新入队：${jobLabel(job)}`);
       onJobsChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     }
   }
 
@@ -274,7 +275,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       onJobsChanged?.();
     } catch (err) {
       setConfirmClear(false);
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     } finally {
       bulkBusyRef.current = false;
       setBulkBusy(false);
@@ -305,7 +306,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       }
       onJobsChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
       await loadJobs({ force: true });
     }
   }
@@ -315,7 +316,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       await api.restoreDeletedJob(id);
       toast.success("已恢复任务记录");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     } finally {
       await loadJobs({ force: true });
     }
