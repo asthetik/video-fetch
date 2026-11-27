@@ -592,7 +592,11 @@ async fn run_resolve(task: ResolveTask<'_>) -> AppResult<VideoMeta> {
         request_id,
         now,
     } = task;
-    let scope = platform.cache_scope(ctx.cookie_header.is_some());
+    // The scope input is the materialized jar path, not the cookie header:
+    // a logged-in session whose jar write failed resolves under the guest
+    // scope (pre-B21 behavior — the header alone does not make the store
+    // authed).
+    let scope = platform.cache_scope(cookies_path.is_some());
 
     if !force {
         for key in platform.cache_lookup_keys(&url, scope) {
