@@ -53,12 +53,30 @@ test("after settling, the next call refetches fresh data", async () => {
   assert.equal(second[0].id, "gen-2", "no staleness cache: settle frees the slot");
 });
 
+test("a forced load bypasses the in-flight slot", async () => {
+  resetJobListLoaderForTests();
+  const counting = { calls: 0 };
+  const slow = makeDelayedFetch(10, counting);
+
+  const coalesced = loadJobsFromStore(slow);
+  const forced = await loadJobsFromStore(slow, { force: true });
+
+  assert.equal(counting.calls, 2, "a forced load must issue its own request, not attach to the in-flight snapshot");
+  const settled = await coalesced;
+  assert.equal(settled.length, 1);
+});
+
 test("a failed load rejects every waiter and frees the slot", async () => {
   resetJobListLoaderForTests();
   const failing = async () => {
     throw new Error("db locked");
   };
-  await assert.rejects(loadJobsFromStore(failing), /db locked/);
+  const [r1, r2] = [
+    loadJobsFromStore(failing),
+    loadJobsFromStore(failing),
+  ];
+  await assert.rejects(r1, /db locked/);
+  await assert.rejects(r2, /db locked/, "every concurrent waiter shares the rejection");
   // The slot must clear on failure too — the next attempt retries.
   const retry = await loadJobsFromStore(async () => [{ id: "retry-ok" }]);
   assert.equal(retry.length, 1);
@@ -68,7 +86,7 @@ test("both surfaces route their reloads through the shared loader", () => {
   for (const [name, src] of [["queue", queue], ["history", history]] as const) {
     assert.match(
       src,
-      /loadJobsFromStore\(async \(\) => api\.listJobs\(\)\)/,
+      /loadJobsFromStore\(\s*async \(\) => api\.listJobs\(\),?[\s\S]{0,40}?options,?\s*\)/,
       `${name} must inject api.listJobs into the shared loader (its only listJobs path)`,
     );
   }

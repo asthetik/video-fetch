@@ -91,21 +91,29 @@ export function DownloadQueue({
   const bulkBusyRef = useRef(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadJobs = useCallback(async () => {
-    try {
-      // The shared loader merges concurrent reloads (terminal-event storms)
-      // into one list_jobs call; the queue keeps its own sort.
-      const list = await loadJobsFromStore(async () => api.listJobs());
-      setJobs(sortJobs(list));
-      setLoadError(null);
-    } catch (err) {
-      // The persistent error state below replaces the old transient toast: a
-      // failed load must not masquerade as an empty queue.
-      setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const loadJobs = useCallback(
+    async (options: { force?: boolean } = {}) => {
+      try {
+        // The shared loader merges concurrent reloads (terminal-event
+        // storms) into one list_jobs call; the queue keeps its own sort.
+        // Mutations pass force: true — a coalesced snapshot taken before
+        // the mutation would resurrect deleted rows.
+        const list = await loadJobsFromStore(
+          async () => api.listJobs(),
+          options,
+        );
+        setJobs(sortJobs(list));
+        setLoadError(null);
+      } catch (err) {
+        // The persistent error state below replaces the old transient toast:
+        // a failed load must not masquerade as an empty queue.
+        setLoadError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     void loadJobs();
@@ -279,7 +287,7 @@ export function DownloadQueue({
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
-      await loadJobs();
+      await loadJobs({ force: true });
     }
   }
 
