@@ -3,20 +3,40 @@ use std::path::{Path, PathBuf};
 
 use crate::naming::{AUDIO_OUTPUT_EXTS, OUTPUT_EXTS};
 
-/// Restrict a private file to owner-only on Unix (0600).
+/// Restrict a private file to owner-only: mode 0600 on Unix; on Windows the
+/// DACL is rewritten to the owner only (the B11 analogue of 0600).
 ///
-/// The failure is returned rather than dropped: on a filesystem that carries
-/// no Unix modes the restriction does not happen, and a caller that ignored
-/// that went on to report the file as private. Elsewhere this is a no-op —
-/// Windows files inherit the per-user ACL of the profile directory they are
-/// created under, and nothing here tightens them further.
+/// The failure is returned rather than dropped: a caller that ignored a
+/// failed restriction went on to report the file as private. On Windows the
+/// rewrite is one `icacls` call — `/inheritance:r` drops the inherited
+/// profile-directory ACEs and `/grant:r *S-1-3-4:F` grants full control to
+/// the file's owner (the well-known OWNER_RIGHTS SID, so no localized group
+/// names and no environment lookups); icacls composes both into a single
+/// security descriptor, so there is no "inheritance dropped, grant missing"
+/// intermediate state. Failing the write leaves the file unpublished — the
+/// same fail-closed verdict as a chmod failure on Unix.
 pub(crate) fn restrict_private_file_perms(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/inheritance:r", "/grant:r", "*S-1-3-4:F"])
+            .output()
+            .map_err(|e| std::io::Error::other(format!("cannot run icacls: {e}")))?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "icacls restricted nothing: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Ok(())
@@ -24,7 +44,10 @@ pub(crate) fn restrict_private_file_perms(path: &Path) -> std::io::Result<()> {
 }
 
 /// Restrict a private directory to owner-only on Unix (0700). Same reporting
-/// and the same non-Unix no-op as [`restrict_private_file_perms`].
+/// as [`restrict_private_file_perms`]. Windows stays a no-op on purpose: the
+/// only caller guards the logs directory, whose lines are sanitized (no
+/// cookie values), and rewriting a directory the user may browse themselves
+/// is not worth the icacls churn.
 pub(crate) fn restrict_private_dir_perms(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -550,6 +573,41 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    /// B11 (Windows): after the restriction only the owner may access the
+    /// file. icacls prints well-known SIDs unresolved and locale-independent,
+    /// so the assertion reads SIDs, not localized group names: the owner
+    /// grant (*S-1-3-4, OWNER_RIGHTS) must be present and no broad ACE —
+    /// Everyone (S-1-1-0), Authenticated Users (S-1-5-11), SYSTEM
+    /// (S-1-5-18), Administrators (S-1-5-32-544) — may survive
+    /// /inheritance:r. This test is also the mutation witness: removing the
+    /// icacls call turns it red on the Windows CI lane.
+    #[cfg(windows)]
+    #[test]
+    fn restrict_private_file_perms_windows_leaves_only_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.json");
+        fs::write(&path, b"{}").unwrap();
+
+        restrict_private_file_perms(&path).unwrap();
+
+        let out = std::process::Command::new("icacls")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls readback must succeed");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("*S-1-3-4"),
+            "the owner grant must be present on the file: {text}"
+        );
+        for broad in ["S-1-1-0", "S-1-5-11", "S-1-5-18", "S-1-5-32-544"] {
+            assert!(
+                !text.contains(broad),
+                "broad ACE {broad} must not survive the restriction: {text}"
+            );
+        }
     }
 
     #[cfg(unix)]

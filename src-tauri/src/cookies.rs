@@ -244,6 +244,14 @@ pub fn write_netscape_file(path: &Path, cookies: &[Cookie]) -> AppResult<()> {
     let write = (|| -> AppResult<()> {
         let (staging, mut file) = open_staging(path)?;
         tmp = Some(staging);
+        // B11: tighten the scratch file before the first cookie byte lands.
+        // A crash mid-write then strands a sibling that is either empty or
+        // already owner-only — never one holding SESSDATA under the
+        // inherited profile-directory ACL. A failed restriction errors the
+        // write, and the cleanup below removes this staging file.
+        crate::fsutil::restrict_private_file_perms(
+            tmp.as_deref().expect("staging path set one line above"),
+        )?;
         #[cfg(test)]
         staging_hook::fire(path);
         writeln!(file, "# Netscape HTTP Cookie File")?;
