@@ -309,6 +309,25 @@ impl Db {
         Ok(())
     }
 
+    /// B13: the progress tick's single write — one narrow UPDATE whose WHERE
+    /// clause carries the guard the old read-modify-write performed
+    /// (`status IN ('pending', 'running')`), replacing the per-tick full-row
+    /// SELECT + full-row UPDATE under the db lock. `false` means the row is
+    /// gone, terminal, or no longer runnable (pause/cancel landed): the tick
+    /// must not resurrect it. A pending row is promoted to running, the same
+    /// thing the old tick write did.
+    pub fn update_job_progress(&self, id: &str, progress: f64) -> AppResult<bool> {
+        let updated = self.conn.execute(
+            "UPDATE jobs SET
+                progress = ?2,
+                status = ?3,
+                updated_at = datetime('now')
+            WHERE id = ?1 AND status IN ('pending', 'running')",
+            params![id, progress, status_to_str(&JobStatus::Running)],
+        )?;
+        Ok(updated > 0)
+    }
+
     pub fn list_jobs(&self) -> AppResult<Vec<DownloadJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT
@@ -946,6 +965,54 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "a fresh row must survive the sweep"
+        );
+    }
+
+    /// B13: the progress tick's narrow write promotes pending→running, but
+    /// never resurrects a paused row or a vanished id.
+    ///
+    /// Value: protects=the WHERE status guard in update_job_progress;
+    /// fails_when=a tick flips a paused row back to running or overwrites
+    /// its progress; why_new=the tick write merged the read+guard+write into
+    /// one statement (B13); seam=none
+    #[test]
+    fn update_job_progress_promotes_pending_and_skips_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
+        let mut job = sample_job_for_db("job-1");
+        job.status = JobStatus::Pending;
+        job.progress = 0.0;
+        db.insert_job(&job).unwrap();
+
+        assert!(
+            db.update_job_progress("job-1", 0.25).unwrap(),
+            "a pending row is promoted to running by the first tick"
+        );
+        let promoted = db.get_job("job-1").unwrap();
+        assert_eq!(promoted.status, JobStatus::Running);
+        assert!((promoted.progress - 0.25).abs() < 1e-9);
+
+        // A pause lands between ticks: the next tick must not resurrect the
+        // row, and the paused row's progress must survive untouched.
+        let mut paused = promoted;
+        paused.status = JobStatus::Paused;
+        db.update_job(&paused).unwrap();
+        assert!(
+            !db.update_job_progress("job-1", 0.5).unwrap(),
+            "a paused row must reject the tick write"
+        );
+        let after = db.get_job("job-1").unwrap();
+        assert_eq!(after.status, JobStatus::Paused);
+        assert!(
+            (after.progress - 0.25).abs() < 1e-9,
+            "the rejected tick must not write"
+        );
+
+        assert!(
+            !db.update_job_progress("job-missing", 0.5).unwrap(),
+            "a vanished id is a no-op, not an error"
         );
     }
 

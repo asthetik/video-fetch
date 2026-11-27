@@ -1423,6 +1423,12 @@ impl DownloadManager {
         let runner_tokens = Arc::clone(&self.runner_tokens);
         let progress_gate: Arc<Mutex<Option<(f64, std::time::Instant)>>> =
             Arc::new(Mutex::new(None));
+        // The tick events carry the start-of-run row's error/output_path:
+        // the start section read the row fresh, and while the runner owns
+        // the token only terminal writes (which the tick guard excludes) can
+        // change those fields — so the snapshot is the row's truth for the
+        // whole Running phase, and the per-tick full-row SELECT is gone.
+        let running_for_events = running.clone();
         let on_progress = {
             let job_id = job_id.clone();
             let progress_gate = Arc::clone(&progress_gate);
@@ -1436,37 +1442,44 @@ impl DownloadManager {
                     *gate = Some((update.percent, now));
                 }
                 let db = db.lock().unwrap_or_else(|e| e.into_inner());
-                if let Ok(mut current) = db.get_job(&job_id) {
-                    // The stop and ownership checks belong in the same critical
-                    // section as the write they guard (the start section's
-                    // rule): a pause/resume completing between an earlier check
-                    // and this lock would let a superseded runner's tick put the
-                    // row back to Running and stall the runner that owns it.
-                    // Nor may a late tick resurrect a cancelled/failed/done job.
-                    if stop_kind_of(&stop_flags, &job_id).is_some()
-                        || !owns_job(&runner_tokens, &job_id, token)
-                        || (current.status != JobStatus::Running
-                            && current.status != JobStatus::Pending)
-                    {
-                        return;
-                    }
-                    current.progress = update.percent / 100.0;
-                    current.status = JobStatus::Running;
-                    if let Err(e) = db.update_job(&current) {
-                        tracing::debug!(target: "core", "download: 状态写入失败 {}: {e}", current.id);
-                    }
-                    progress.emit_progress(DownloadProgressEvent {
-                        id: current.id.clone(),
-                        progress: current.progress,
-                        status: current.status.clone(),
-                        error: current.error.clone(),
-                        output_path: current.output_path.clone(),
-                        speed: update.speed,
-                        eta: update.eta,
-                        downloaded_bytes: update.downloaded_bytes,
-                        total_bytes: update.total_bytes,
-                    });
+                // The stop and ownership checks belong in the same critical
+                // section as the write they guard (the start section's
+                // rule): a pause/resume completing between an earlier check
+                // and this lock would let a superseded runner's tick put the
+                // row back to Running and stall the runner that owns it.
+                // Nor may a late tick resurrect a cancelled/failed/done
+                // job — update_job_progress's WHERE clause carries that
+                // status guard.
+                if stop_kind_of(&stop_flags, &job_id).is_some()
+                    || !owns_job(&runner_tokens, &job_id, token)
+                {
+                    return;
                 }
+                // B13: one narrow write replaces the per-tick full-row
+                // SELECT + full-row UPDATE. The emit stays under this lock
+                // on purpose: the event says "running", and releasing the
+                // lock between the write and the emit could let a pause's
+                // event land first and order the two backwards in the UI.
+                let written = db
+                    .update_job_progress(&job_id, update.percent / 100.0)
+                    .unwrap_or_else(|e| {
+                        tracing::debug!(target: "core", "download: 状态写入失败 {job_id}: {e}");
+                        false
+                    });
+                if !written {
+                    return;
+                }
+                progress.emit_progress(DownloadProgressEvent {
+                    id: job_id.clone(),
+                    progress: update.percent / 100.0,
+                    status: JobStatus::Running,
+                    error: running_for_events.error.clone(),
+                    output_path: running_for_events.output_path.clone(),
+                    speed: update.speed,
+                    eta: update.eta,
+                    downloaded_bytes: update.downloaded_bytes,
+                    total_bytes: update.total_bytes,
+                });
             }) as Box<dyn Fn(ProgressUpdate) + Send>
         };
 
