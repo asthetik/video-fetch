@@ -90,12 +90,14 @@ impl AuthStore for FileStore {
                 opts.mode(0o600);
             }
             let mut file = opts.open(&tmp)?;
+            // Tightened before the first byte (B11): a crash mid-write then
+            // strands a sibling that is empty or already owner-only, never
+            // one holding the session cookies under the inherited
+            // profile-directory ACL (Windows). Propagated, not warned: a
+            // store that cannot be made private should not be published.
+            restrict_private_file_perms(&tmp)?;
             file.write_all(value.as_bytes())?;
             file.sync_all()?;
-            // Propagated, not warned: this temp file is about to be renamed
-            // into place carrying the session cookies, and a store that
-            // cannot be made private should not be published.
-            restrict_private_file_perms(&tmp)?;
             fs::rename(&tmp, &self.file_path)?;
             Ok(())
         })();
