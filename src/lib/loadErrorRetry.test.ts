@@ -65,12 +65,12 @@ test("history renders a persistent load-error state with retry", () => {
 test("both load paths clear the error right where the load succeeds", () => {
   assert.match(
     queue,
-    /setJobs\(sortJobs\(list\)\);\n      setLoadError\(null\);/,
+    /setJobs\(sortJobs\(list\)\);\n\s+setLoadError\(null\);/,
     "the queue must clear the error on the success path itself, not in some retry handler",
   );
   assert.match(
     history,
-    /setAllJobs\(list\);\n      setLoadError\(null\);/,
+    /setAllJobs\(list\);\n\s+setLoadError\(null\);/,
     "history must clear the error on the success path itself, not in some retry handler",
   );
 });

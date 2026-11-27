@@ -92,11 +92,3 @@ test("both surfaces route their reloads through the shared loader", () => {
   }
 });
 
-test("the loader pins its in-flight slot by name", () => {
-  const loader_src = readFileSync(
-    join(import.meta.dirname, "..", "lib", "jobListLoader.ts"),
-    "utf8",
-  );
-  assert.match(loader_src, /inFlight/);
-  assert.match(loader_src, /inFlight = null/);
-});

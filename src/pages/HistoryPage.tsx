@@ -138,7 +138,8 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     // An undo on one surface must refresh the other: restore emits this
     // event instead of relying on the deleting page still being mounted.
     void listen<string>("download://restored", () => {
-      void loadJobs();
+      // A restore is a mutation (a row came back): force a fresh fetch.
+      void loadJobs({ force: true });
     }).then(listeners.track);
 
     return () => {
@@ -305,7 +306,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       onJobsChanged?.();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-      await loadJobs();
+      await loadJobs({ force: true });
     }
   }
 

@@ -116,7 +116,9 @@ export function DownloadQueue({
   );
 
   useEffect(() => {
-    void loadJobs();
+    // The refresh token bumps only after a mutation elsewhere (history
+    // deletes, restores): the reload must not attach to a stale snapshot.
+    void loadJobs({ force: true });
   }, [loadJobs, refreshToken]);
 
   // Retry resets the loading spinner first: clicks cannot stack concurrent
@@ -144,7 +146,8 @@ export function DownloadQueue({
     // An undo on one surface must refresh the other: restore emits this
     // event instead of relying on the deleting page still being mounted.
     void listen<string>("download://restored", () => {
-      void loadJobs();
+      // A restore is a mutation (a row came back): force a fresh fetch.
+      void loadJobs({ force: true });
     }).then(listeners.track);
 
     return () => {
@@ -231,7 +234,9 @@ export function DownloadQueue({
       if (result.errors && result.errors.length > 0) {
         toast.warning(warning(result));
       }
-      await loadJobs();
+      // A bulk op is a mutation: the reload must not attach to a snapshot
+      // taken before it ran.
+      await loadJobs({ force: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -273,10 +278,12 @@ export function DownloadQueue({
           duration: 8000,
         });
       }
-      await loadJobs();
+      // A delete is a mutation: force a fresh fetch instead of attaching to
+      // a snapshot that may predate the delete.
+      await loadJobs({ force: true });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-      await loadJobs();
+      await loadJobs({ force: true });
     }
   }
 
