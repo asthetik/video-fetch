@@ -56,6 +56,9 @@ function jobLabel(job: DownloadJob): string {
   return job.page_index > 1 ? `${job.title} · P${job.page_index}` : job.title;
 }
 
+/// Rows per render batch for the finished list; 显示更多 widens by 200.
+const HISTORY_RENDER_BATCH = 100;
+
 interface HistoryPageProps {
   onJobsChanged?: () => void;
   onGoHome?: () => void;
@@ -168,13 +171,17 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   // The finished list can hold thousands of rows; render it in bounded
   // batches and let 显示更多 widen the window. Counts and segmented totals
   // above still read the full filtered list.
-  const HISTORY_RENDER_BATCH = 100;
   const [renderLimit, setRenderLimit] = useState(HISTORY_RENDER_BATCH);
 
-  // A filter change re-scopes the list from scratch; the window resets too.
-  useEffect(() => {
+  // A filter change re-scopes the list from scratch; the window resets
+  // during render — not in a late effect — so a keystroke after widening
+  // never paints the full list again.
+  const filterScope = `${query}\u0000${statusFilter}`;
+  const prevScopeRef = useRef(filterScope);
+  if (prevScopeRef.current !== filterScope) {
+    prevScopeRef.current = filterScope;
     setRenderLimit(HISTORY_RENDER_BATCH);
-  }, [query, statusFilter]);
+  }
 
   const shownFinished = useMemo(
     () => finished.slice(0, renderLimit),

@@ -910,7 +910,8 @@
 
 .history-toolbar {
   position: sticky;
-  top: 0;
+  /* Below the app header (both sticky); the token lives in tokens.css. */
+  top: var(--header-h);
   z-index: 5;
   background: var(--surface);
   border-bottom: 1px solid var(--hairline);
@@ -918,6 +919,11 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.history-load-more {
+  margin-top: 0.25rem;
+  align-self: center;
 }
 
 .history-search {

@@ -45,6 +45,7 @@
   --surface-shadow: 0 1px 3px rgba(34, 31, 38, 0.07);
   --ctl-bg: #ffffff;
   --hairline: #e6dfd5;
+  --header-h: 3.25rem;
   --header-bg: rgba(255, 255, 255, 0.92);
 
   --text: #221f26;
@@ -138,6 +139,7 @@ html[data-theme="dark"] {
   --surface-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   --ctl-bg: #211e27;
   --hairline: #2b2e36;
+  --header-h: 3.25rem;
   --header-bg: #1d1a22;
 
   --text: #f3efe8;

@@ -42,19 +42,19 @@ test("the finished list renders in bounded batches", () => {
   );
 });
 
-test("changing the filter scope resets the window", () => {
+test("changing the filter scope resets the window during render", () => {
   assert.match(
     page,
-    /useEffect\(\(\) => \{\s*setRenderLimit\(HISTORY_RENDER_BATCH\);\s*\}, \[query, statusFilter\]\);/,
-    "a narrowed or widened filter must start from the first batch again",
+    /const prevScopeRef = useRef\(filterScope\);\n  if \(prevScopeRef\.current !== filterScope\) \{\n    prevScopeRef\.current = filterScope;\n    setRenderLimit\(HISTORY_RENDER_BATCH\);\n  \}/,
+    "the reset must happen during render (prev-value compare): a late effect would paint the full list for a frame after the window was widened",
   );
 });
 
 test("the history toolbar sticks to the viewport", () => {
   assert.match(
     css,
-    /\.history-toolbar \{[\s\S]{0,400}?position: sticky;\n\s*top: 0;/,
-    "the toolbar must pin to the viewport top while the list scrolls",
+    /\.history-toolbar \{[\s\S]{0,400}?top: var\(--header-h\);/,
+    "the toolbar must pin below the app header, not under it",
   );
   assert.match(
     css,
