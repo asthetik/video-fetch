@@ -1076,6 +1076,14 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// B22: the shared settings storage, handed to AppState so IPC reads
+    /// (`get_settings`, the enqueue paths) and this pipeline observe one
+    /// copy. Every writer goes through `update_settings`, so the two
+    /// surfaces cannot diverge.
+    pub fn settings_handle(&self) -> Arc<Mutex<AppSettings>> {
+        Arc::clone(&self.settings)
+    }
+
     pub fn update_settings(&self, settings: AppSettings) -> AppResult<()> {
         // Same clamp as the save_settings boundary: a hand-edited
         // settings.json never sizes the semaphore past the documented max.
@@ -4756,6 +4764,39 @@ mod tests {
         settings.save_dir = dir.path().join("elsewhere").to_string_lossy().into();
         manager.update_settings(settings).unwrap();
         assert!(!manager.save_dir_override_active().unwrap());
+    }
+
+    /// B22: AppState.settings and the manager's settings are one shared Arc
+    /// — the handle exposed to the app state is the same storage
+    /// update_settings writes, so the IPC surface and the download pipeline
+    /// cannot diverge.
+    ///
+    /// Value: protects=settings_handle's Arc identity and write-through;
+    /// fails_when=the handle is fresh storage or misses an update;
+    /// why_new=two independent settings copies could split-brain between
+    /// IPC reads and the download pipeline (B22); seam=none
+    #[test]
+    fn the_settings_handle_is_the_same_storage_as_the_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _rx) = test_manager(
+            dir.path(),
+            &dir.path().join("work"),
+            Arc::new(MockDownloader::failure()),
+        );
+        let h1 = manager.settings_handle();
+        let h2 = manager.settings_handle();
+        assert!(
+            Arc::ptr_eq(&h1, &h2),
+            "every handle must name the same shared storage"
+        );
+        let picked = dir.path().join("picked");
+        manager.update_settings(test_settings(&picked)).unwrap();
+        let seen = h1.lock().unwrap();
+        assert_eq!(
+            seen.save_dir,
+            picked.to_string_lossy(),
+            "update_settings must write the same storage the handle exposes"
+        );
     }
 
     #[test]

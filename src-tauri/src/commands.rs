@@ -62,7 +62,11 @@ pub struct AppState {
     pub app_dir: PathBuf,
     pub auth: AuthManager,
     pub downloads: DownloadManager,
-    pub settings: std::sync::Mutex<AppSettings>,
+    /// B22: the same shared storage as `downloads.settings` — one copy for
+    /// IPC reads and the download pipeline (see
+    /// DownloadManager::settings_handle); save_settings applies every change
+    /// through the manager so the two surfaces cannot diverge.
+    pub settings: std::sync::Arc<std::sync::Mutex<AppSettings>>,
     /// Startup notice for the UI: set when this session's downloads were
     /// redirected because the configured save dir was unusable.
     pub save_dir_notice: Option<String>,
@@ -1532,10 +1536,10 @@ pub fn save_settings(
     }
     settings_store::save_settings(&state.app_dir, &settings)
         .inspect_err(|e| warn_cmd("settings: 保存失败", e))?;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| AppError::Message("settings lock poisoned".into()))? = settings.clone();
+    // B22: one shared copy — update_settings writes the same storage
+    // AppState.settings exposes, so the IPC surface and the download
+    // pipeline flip atomically; a failure here leaves both consistent on
+    // the old values instead of split-braining them.
     state
         .downloads
         .update_settings(settings)
@@ -2305,11 +2309,14 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         .build()
         .map_err(|e| AppError::Message(format!("创建 HTTP 客户端失败: {e}")))?;
 
+    // B22: one shared settings storage between AppState and the download
+    // pipeline; see AppState::settings.
+    let settings_handle = downloads.settings_handle();
     Ok(AppState {
         app_dir,
         auth,
         downloads,
-        settings: std::sync::Mutex::new(settings),
+        settings: settings_handle,
         save_dir_notice: save_dir_plan.notice,
         cookie_notice,
         db_notice,
@@ -2745,6 +2752,47 @@ mod tests {
     }
 
     #[test]
+    fn settings_flow_through_one_shared_copy() {
+        // Normalize CRLF first: Windows checkouts hand include_str a
+        // \r\n source and a \n needle would silently never match.
+        let src = include_str!("commands.rs").replace("\r\n", "\n");
+        // B22: AppState.settings must be the manager's shared Arc, and the
+        // save command must not keep a second write path to it.
+        assert!(
+            src.contains("pub settings: std::sync::Arc<std::sync::Mutex<AppSettings>>"),
+            "AppState.settings must alias the download pipeline's shared storage"
+        );
+        let build_literal = src
+            .split("Ok(AppState {")
+            .nth(1)
+            .expect("build_app_state's AppState literal present")
+            .split("\n}")
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            build_literal.contains("settings: settings_handle"),
+            "build_app_state must wire the manager's settings handle into AppState"
+        );
+        let save_body = src
+            .split("pub fn save_settings(")
+            .nth(1)
+            .expect("save_settings present")
+            .split("\n}")
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            save_body.contains("update_settings"),
+            "the save command must apply settings through the manager (override + semaphore side effects)"
+        );
+        assert!(
+            !save_body.contains("*state"),
+            "save_settings must not write a second settings copy directly — the manager's update_settings owns the single shared storage"
+        );
+    }
+
+    #[test]
     fn the_resolve_fallback_refuses_to_spawn_when_superseded() {
         // Normalize CRLF first: Windows checkouts hand include_str a
         // \r\n source and a \n needle would silently never match.
@@ -3093,11 +3141,12 @@ mod openable_roots_delete_tests {
             root.path().join("work"),
         )
         .unwrap();
+        let settings_handle = downloads.settings_handle();
         let state = AppState {
             app_dir: root.path().to_path_buf(),
             auth: AuthManager::new(root.path().join("cache")),
             downloads,
-            settings: Mutex::new(settings),
+            settings: settings_handle,
             save_dir_notice: None,
             cookie_notice: None,
             db_notice: None,
@@ -3642,6 +3691,7 @@ mod restart_cookie_tests {
             root.path().join("work"),
         )
         .unwrap();
+        let settings_handle = downloads.settings_handle();
         let state = AppState {
             openable_roots_cache: Default::default(),
             recent_deleted_jobs: RecentDeletedJobs::new(),
@@ -3651,7 +3701,7 @@ mod restart_cookie_tests {
             app_dir: root.path().to_path_buf(),
             auth: AuthManager::new(cache_dir),
             downloads,
-            settings: Mutex::new(settings),
+            settings: settings_handle,
             ytdlp: YtDlpConfig {
                 yt_dlp_path: root.path().join("yt-dlp"),
                 ffmpeg_path: None,
