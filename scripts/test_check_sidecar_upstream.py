@@ -205,17 +205,20 @@ class TestCollectFindingsNetworkLayer(unittest.TestCase):
         yt = json.dumps({"tag_name": "2026.11.23"}).encode()
         fake, calls = self.fake_fetch(
             {
-                "releases/latest": yt,
-                "releases?per_page": self.btbody(BTBN_ASSETS),
+                "yt-dlp/yt-dlp/releases/latest": yt,
+                "BtBN/FFmpeg-Builds/releases?per_page": self.btbody(BTBN_ASSETS),
                 "martin-riedl": INDEX_PAGE.encode(),
             }
         )
         with mock.patch.object(chk, "fetch_bytes", fake):
             self.assertEqual(chk.collect_findings(), [])
         self.assertEqual(len(calls), 3)
-        # The GitHub API calls carry the headers; the plain index page does not.
-        self.assertIsNotNone(calls[0][1])
-        self.assertIn("Accept", calls[0][1])
+        # Both GitHub API calls carry the headers; the plain index page does
+        # not.
+        for url, headers in calls[:2]:
+            self.assertIn("api.github.com", url)
+            self.assertIsNotNone(headers)
+            self.assertIn("Accept", headers)
         self.assertIsNone(calls[2][1])
 
     def test_every_outdated_surface_reports(self) -> None:
@@ -227,8 +230,8 @@ class TestCollectFindingsNetworkLayer(unittest.TestCase):
         newer_page = INDEX_PAGE.replace("1789931890_9.0.2", "1790000000_9.1.0")
         fake, _ = self.fake_fetch(
             {
-                "releases/latest": yt,
-                "releases?per_page": self.btbody(moved),
+                "yt-dlp/yt-dlp/releases/latest": yt,
+                "BtBN/FFmpeg-Builds/releases?per_page": self.btbody(moved),
                 "martin-riedl": newer_page.encode(),
             }
         )
@@ -251,8 +254,8 @@ class TestCollectFindingsNetworkLayer(unittest.TestCase):
         def fetch(url: str, headers: dict[str, str] | None = None) -> bytes:
             seen[url] = headers
             for key, body in {
-                "releases/latest": yt,
-                "releases?per_page": self.btbody(BTBN_ASSETS),
+                "yt-dlp/yt-dlp/releases/latest": yt,
+                "BtBN/FFmpeg-Builds/releases?per_page": self.btbody(BTBN_ASSETS),
                 "martin-riedl": INDEX_PAGE.encode(),
             }.items():
                 if key in url:
@@ -263,8 +266,9 @@ class TestCollectFindingsNetworkLayer(unittest.TestCase):
             chk, "fetch_bytes", fetch
         ):
             chk.collect_findings()
-        api_headers = next(h for u, h in seen.items() if "api.github.com" in u)
-        self.assertEqual(api_headers.get("Authorization"), "Bearer t0k3n")
+        for url, headers in seen.items():
+            if "api.github.com" in url:
+                self.assertEqual(headers.get("Authorization"), "Bearer t0k3n")
 
 
 class TestFetchBytesLoopback(unittest.TestCase):
@@ -310,6 +314,8 @@ class TestFetchBytesLoopback(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
 
     def test_fetch_bytes_roundtrips_bytes(self) -> None:
         self.assertEqual(
