@@ -1495,6 +1495,30 @@ pub(crate) fn register_child(
 /// Kill and unregister the child this run registered — same ownership rule as
 /// `take_child`, so a run that reacts to a stop cannot kill a process its
 /// successor registered meanwhile.
+/// Kill every in-flight resolve-registration child (keys `meta:resolve:*`).
+/// Called when a new resolve supersedes the in-flight one: the full yt-dlp
+/// parse is the most expensive call in the app, and letting a superseded
+/// request run to completion burns CPU/bandwidth for a result whose
+/// consumer is already gone. Token is always 0 for these registrations.
+pub(crate) async fn kill_stale_resolves(children: &DownloadChildren) -> usize {
+    let victims: Vec<RegisteredChild> = {
+        let Ok(mut guard) = children.lock() else {
+            return 0;
+        };
+        let keys: Vec<String> = guard
+            .keys()
+            .filter(|k| k.starts_with("meta:resolve:"))
+            .cloned()
+            .collect();
+        keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
+    };
+    let killed = victims.len();
+    for entry in victims {
+        kill_entry_async(entry).await;
+    }
+    killed
+}
+
 pub(crate) async fn kill_registered_child(
     children: &DownloadChildren,
     job_id: &str,
@@ -2438,6 +2462,67 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         let mut mine = take_child(&children, JOB_ID, OWNER).unwrap();
         let _ = mine.kill().await;
         assert!(children.lock().unwrap().is_empty());
+    }
+
+    /// B18: a group kill that lands reports the whole tree confirmed.
+    /// B12: a superseding resolve kills every in-flight `meta:resolve:*`
+    /// registration; unrelated registrations (downloads) stay put.
+    /// B12: a superseding resolve kills every in-flight `meta:resolve:*`
+    /// registration — as a full TREE (the resolve's own children, e.g. an
+    /// ffmpeg it spawned, must die too, not just the direct yt-dlp process,
+    /// which kill_on_drop already handles). Unrelated registrations
+    /// (downloads) stay put.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_stale_resolves_clears_only_resolve_registrations() {
+        let children: DownloadChildren = Arc::new(ChildRegistry::new());
+
+        // A shell wrapping a background grandchild: killing the direct
+        // child (sh) alone leaves the grandchild alive, while the tree kill
+        // takes the whole process group down. The observable difference is
+        // group liveness (`kill -0 -- -<pgid>`).
+        let mut resolve_child = tokio::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait $!"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pgid = resolve_child.id().expect("pid");
+        register_child(&children, "meta:resolve:1", 0, resolve_child)
+            .expect("resolve registration");
+
+        let download_child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        register_child(&children, "job-1", 7, download_child).expect("download registration");
+
+        let killed = kill_stale_resolves(&children).await;
+        assert_eq!(killed, 1, "exactly the resolve registration is killed");
+        assert!(
+            !children.lock().unwrap().contains_key("meta:resolve:1"),
+            "the superseded resolve registration must be removed"
+        );
+        assert!(
+            children.lock().unwrap().contains_key("job-1"),
+            "an unrelated download registration must stay put"
+        );
+        // Give the SIGKILL a moment to take the group down; then nothing in
+        // the process group may survive. pgrep -g filters by process group
+        // (portable across macOS/Linux); /bin/kill -0 rejects negative pids
+        // on macOS.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let group_alive = tokio::process::Command::new("pgrep")
+            .args(["-g", &pgid.to_string()])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            group_alive.stdout.is_empty(),
+            "the superseded resolve's whole process group must be dead — a drop-only kill would leave the grandchild alive; pgrep -g {pgid} found: {}",
+            String::from_utf8_lossy(&group_alive.stdout)
+        );
     }
 
     /// B18: a group kill that lands reports the whole tree confirmed.

@@ -576,6 +576,13 @@ pub async fn resolve_url(
 
     let request_id = request_id.unwrap_or_else(|| allocate_resolve_id(&state.active_resolve_id));
 
+    // A new resolve supersedes the in-flight one: kill its full yt-dlp parse
+    // instead of letting the most expensive call in the app run to
+    // completion for a consumer that is already gone. (The fast view/playurl
+    // path is HTTP-only and cheap; the is_current guards already discard its
+    // stale results.)
+    crate::ytdlp::kill_stale_resolves(state.downloads.child_registry()).await;
+
     let is_current =
         || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
 
