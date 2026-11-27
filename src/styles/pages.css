@@ -909,6 +909,11 @@
 }
 
 .history-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
   display: flex;
   align-items: center;
   gap: 8px;

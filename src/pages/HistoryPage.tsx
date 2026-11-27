@@ -164,7 +164,24 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       ),
     [allJobs, query, statusFilter],
   );
-  const groups = useMemo(() => groupHistoryByDate(finished), [finished]);
+
+  // The finished list can hold thousands of rows; render it in bounded
+  // batches and let 显示更多 widen the window. Counts and segmented totals
+  // above still read the full filtered list.
+  const HISTORY_RENDER_BATCH = 100;
+  const [renderLimit, setRenderLimit] = useState(HISTORY_RENDER_BATCH);
+
+  // A filter change re-scopes the list from scratch; the window resets too.
+  useEffect(() => {
+    setRenderLimit(HISTORY_RENDER_BATCH);
+  }, [query, statusFilter]);
+
+  const shownFinished = useMemo(
+    () => finished.slice(0, renderLimit),
+    [finished, renderLimit],
+  );
+  const hiddenCount = finished.length - shownFinished.length;
+  const groups = useMemo(() => groupHistoryByDate(shownFinished), [shownFinished]);
   const showActive = activeJobs.length > 0 && statusFilter === "all";
   // History never lists paused rows (see historyVisibleJobs), so a cancellable
   // row here is always pending or running and both share one confirm copy.
@@ -449,6 +466,17 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
           </div>
         </section>
       ))}
+
+      {!loading && hiddenCount > 0 && (
+        <button
+          type="button"
+          className="btn history-load-more"
+          data-action="history-load-more"
+          onClick={() => setRenderLimit((limit) => limit + 200)}
+        >
+          显示更多（还有 {hiddenCount} 条）
+        </button>
+      )}
 
       <ConfirmDialog
         open={confirmClear}
