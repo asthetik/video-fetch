@@ -84,6 +84,28 @@ function App() {
     };
   }, []);
 
+  // Startup-only notice: when the jobs database was found corrupt and had
+  // to be reset (history lost, original quarantined), say so once instead
+  // of letting the empty history read as "user cleared it".
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getDbNotice()
+      .then((notice) => {
+        if (!cancelled && notice) {
+          toast.warning(notice, {
+            description: "损坏的数据库原件已保留为 jobs.bad，可供排查",
+          });
+        }
+      })
+      .catch(() => {
+        // A notice failure must never block startup; downloads still run.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="app">
