@@ -167,6 +167,7 @@ impl Db {
             tracing::info!(target: "core", "db: 迁移 jobs 表（新增 {}）", migrated.join("、"));
         }
         Self::purge_legacy_resolve_cache(&conn)?;
+        Self::sweep_resolve_cache(&conn)?;
         Ok(Self { conn })
     }
 
@@ -188,6 +189,41 @@ impl Db {
         }
         if removed > 0 {
             tracing::debug!(target: "core", "resolve_cache: 清理旧版缓存 {removed} 条");
+        }
+        Ok(())
+    }
+
+    /// B14: resolve_cache rows used to live forever — the 7-day TTL was only
+    /// a read-time freshness check, and the only deletions were the startup
+    /// legacy-key purge and the read-time corrupt-row removal. Sweep expired
+    /// rows and cap the table at open, when nothing else touches it. Recency
+    /// is `fetched_at` (every upsert refreshes it), so the cap trims
+    /// LRU-by-write.
+    fn sweep_resolve_cache(conn: &Connection) -> AppResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let cutoff = now.saturating_sub(resolve_cache::RESOLVE_CACHE_TTL_SECS as i64);
+        let expired = conn.execute(
+            "DELETE FROM resolve_cache WHERE fetched_at < ?1",
+            params![cutoff],
+        )?;
+        if expired > 0 {
+            tracing::debug!(target: "core", "resolve_cache: 清理过期缓存 {expired} 条");
+        }
+        let cap = resolve_cache::RESOLVE_CACHE_MAX_ROWS as i64;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM resolve_cache", [], |r| r.get(0))?;
+        if count > cap {
+            conn.execute(
+                "DELETE FROM resolve_cache WHERE cache_key IN (
+                    SELECT cache_key FROM resolve_cache
+                    ORDER BY fetched_at DESC, cache_key DESC
+                    LIMIT -1 OFFSET ?1
+                )",
+                params![cap],
+            )?;
+            tracing::debug!(target: "core", "resolve_cache: 超容量修剪 {} 条", count - cap);
         }
         Ok(())
     }
@@ -724,13 +760,20 @@ mod tests {
         let path = dir.path().join("t.db");
         let db = Db::open_with_outcome(&path).unwrap().0;
         let meta = sample_video_meta();
-        db.upsert_resolve_cache("bilibili:bv1xx", &meta, 100)
+        // Fresh timestamps for every row: the B14 TTL sweep must not be the
+        // reason the legacy rows disappear — only the legacy-key predicate
+        // explains their removal, so this test keeps pinning that purge.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        db.upsert_resolve_cache("bilibili:bv1xx", &meta, now)
             .unwrap();
-        db.upsert_resolve_cache("bilibili:bv1xx:guest", &meta, 100)
+        db.upsert_resolve_cache("bilibili:bv1xx:guest", &meta, now)
             .unwrap();
-        db.upsert_resolve_cache("bilibili:bv1xx:guest_g2", &meta, 100)
+        db.upsert_resolve_cache("bilibili:bv1xx:guest_g2", &meta, now)
             .unwrap();
-        db.upsert_resolve_cache("bilibili:bv1xx:guest_g3", &meta, 100)
+        db.upsert_resolve_cache("bilibili:bv1xx:guest_g3", &meta, now)
             .unwrap();
         drop(db);
 
@@ -801,6 +844,146 @@ mod tests {
             db.get_resolve_cache("bilibili:bv1xx:guest")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// B14: resolve_cache rows used to live forever — the TTL was only a
+    /// read-time freshness check, so nothing ever deleted an expired row.
+    ///
+    /// Value: protects=try_open's expired-row sweep; fails_when=a row older
+    /// than RESOLVE_CACHE_TTL_SECS survives a reopen (fresh rows must stay);
+    /// why_new=the table only ever grew across launches (B14);
+    /// seam=none
+    #[test]
+    fn reopening_sweeps_expired_resolve_cache_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        // Anchor on the real clock: the sweep's cutoff is computed from
+        // SystemTime at open, so a hardcoded timestamp would drift in or out
+        // of the TTL window as wall-clock time passes.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let meta = sample_video_meta();
+        {
+            let db = Db::open_with_outcome(&path).unwrap().0;
+            db.upsert_resolve_cache(
+                "bilibili:old:guest_g3",
+                &meta,
+                now - resolve_cache::RESOLVE_CACHE_TTL_SECS as i64 - 60,
+            )
+            .unwrap();
+            // ==cutoff: the sweep is strict (<) while is_fresh judges <= —
+            // the same row must survive the sweep and still read fresh.
+            db.upsert_resolve_cache(
+                "bilibili:edge:guest_g3",
+                &meta,
+                now - resolve_cache::RESOLVE_CACHE_TTL_SECS as i64,
+            )
+            .unwrap();
+            db.upsert_resolve_cache("bilibili:fresh:guest_g3", &meta, now)
+                .unwrap();
+        }
+        let db = Db::open_with_outcome(&path).unwrap().0;
+        assert!(
+            db.get_resolve_cache("bilibili:old:guest_g3")
+                .unwrap()
+                .is_none(),
+            "an expired row must be swept at open"
+        );
+        assert!(
+            db.get_resolve_cache("bilibili:edge:guest_g3")
+                .unwrap()
+                .is_some(),
+            "a row exactly at the cutoff must survive the strict < sweep and read fresh"
+        );
+        assert!(
+            db.get_resolve_cache("bilibili:fresh:guest_g3")
+                .unwrap()
+                .is_some(),
+            "a fresh row must survive the sweep"
+        );
+    }
+
+    /// B14: the table is capped at RESOLVE_CACHE_MAX_ROWS at open — beyond
+    /// the TTL, an unbounded table was itself the risk (one serialized
+    /// VideoMeta per row, two rows per resolve).
+    ///
+    /// Value: protects=the startup cap trim; fails_when=more than
+    /// RESOLVE_CACHE_MAX_ROWS rows survive a reopen, or the trim keeps
+    /// stale rows over fresh ones (recency is fetched_at, LRU-by-write);
+    /// why_new=the table only ever grew across launches (B14);
+    /// seam=none
+    #[test]
+    fn reopening_trims_resolve_cache_to_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        let cap = resolve_cache::RESOLVE_CACHE_MAX_ROWS as i64;
+        let meta = sample_video_meta();
+        // Anchor on the real clock and keep every row in the past, well
+        // inside the TTL window: the trim must be the only thing deleting
+        // rows here — the TTL sweep must not eat into the count and mask a
+        // broken cap.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        {
+            let db = Db::open_with_outcome(&path).unwrap().0;
+            for i in 0..cap + 5 {
+                db.upsert_resolve_cache(
+                    &format!("bilibili:v{i}:guest_g3"),
+                    &meta,
+                    now - 60 - (cap + 5) + i,
+                )
+                .unwrap();
+            }
+        }
+        let db = Db::open_with_outcome(&path).unwrap().0;
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM resolve_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, cap, "the cap must hold after the startup trim");
+        assert!(
+            db.get_resolve_cache("bilibili:v0:guest_g3")
+                .unwrap()
+                .is_none(),
+            "the oldest rows must go first"
+        );
+        assert!(
+            db.get_resolve_cache(&format!("bilibili:v{}:guest_g3", cap + 4))
+                .unwrap()
+                .is_some(),
+            "the newest rows must survive the trim"
+        );
+        // ==cap: the trim must be a no-op at exactly the cap — an off-by-one
+        // in the comparison or the OFFSET would eat a row here.
+        let dir2 = tempfile::tempdir().unwrap();
+        let path2 = dir2.path().join("jobs.db");
+        {
+            let db = Db::open_with_outcome(&path2).unwrap().0;
+            for i in 0..cap {
+                db.upsert_resolve_cache(
+                    &format!("bilibili:e{i}:guest_g3"),
+                    &meta,
+                    now - 60 - (cap + 5) + i,
+                )
+                .unwrap();
+            }
+        }
+        let db = Db::open_with_outcome(&path2).unwrap().0;
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM resolve_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, cap, "exactly-cap tables must not be trimmed");
+        assert!(
+            db.get_resolve_cache("bilibili:e0:guest_g3")
+                .unwrap()
+                .is_some(),
+            "no row may go at exactly the cap"
         );
     }
 

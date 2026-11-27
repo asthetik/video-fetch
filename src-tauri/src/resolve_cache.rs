@@ -1,5 +1,11 @@
 pub const RESOLVE_CACHE_TTL_SECS: u64 = 7 * 24 * 3600;
 
+/// Startup sweep caps the table at this many rows, newest by fetched_at.
+/// Each row holds one serialized VideoMeta and two rows are written per
+/// resolve, so the cap bounds the table to a few MB worst case without ever
+/// being reachable in normal use.
+pub const RESOLVE_CACHE_MAX_ROWS: u64 = 256;
+
 /// Cache key generation (`*_g3`). Bump when cached `VideoMeta.formats` shape changes.
 pub const SCOPE_AUTHED: &str = "authed_g3";
 pub const SCOPE_GUEST: &str = "guest_g3";
