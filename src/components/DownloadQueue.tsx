@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { toErrorMessage } from "../lib/asyncAction";
 import {
   Download,
   FolderOpen,
@@ -107,7 +108,7 @@ export function DownloadQueue({
       } catch (err) {
         // The persistent error state below replaces the old transient toast:
         // a failed load must not masquerade as an empty queue.
-        setLoadError(err instanceof Error ? err.message : String(err));
+        setLoadError(toErrorMessage(err));
       } finally {
         setLoading(false);
       }
@@ -184,7 +185,7 @@ export function DownloadQueue({
       const updated = await api.cancelJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     }
   }
 
@@ -193,7 +194,7 @@ export function DownloadQueue({
       const updated = await api.retryJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     }
   }
 
@@ -205,7 +206,7 @@ export function DownloadQueue({
         toast.info("任务已结束，未执行暂停");
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     }
   }
 
@@ -214,7 +215,7 @@ export function DownloadQueue({
       const updated = await api.resumeJob(id);
       setJobs((prev) => upsertJob(prev, updated));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     }
   }
 
@@ -238,7 +239,7 @@ export function DownloadQueue({
       // taken before it ran.
       await loadJobs({ force: true });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     } finally {
       bulkBusyRef.current = false;
       setBulkBusy(false);
@@ -282,7 +283,7 @@ export function DownloadQueue({
       // a snapshot that may predate the delete.
       await loadJobs({ force: true });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
       await loadJobs({ force: true });
     }
   }
@@ -292,7 +293,7 @@ export function DownloadQueue({
       await api.restoreDeletedJob(id);
       toast.success("已恢复任务记录");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(toErrorMessage(err));
     } finally {
       await loadJobs({ force: true });
     }

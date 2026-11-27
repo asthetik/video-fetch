@@ -1,6 +1,18 @@
 export type JobStatus = "pending" | "running" | "done" | "failed" | "paused";
 export type AuthStatus = "logged_out" | "logged_in" | "possibly_expired";
 
+/**
+ * The structured error envelope the backend sends for errors the frontend
+ * must branch on (B20): cancelled surfaces stay silent, io/db carry mapped
+ * Chinese copy. Generic errors still arrive as bare strings.
+ */
+export type ApiErrorKind = "cancelled" | "db" | "io";
+
+export interface ErrorEnvelope {
+  kind: ApiErrorKind;
+  message: string;
+}
+
 export interface ResolveMetaEvent {
   request_id: number;
   meta: VideoMeta;

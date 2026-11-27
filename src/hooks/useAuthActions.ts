@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { api } from "../lib/tauri";
 import {
+  toApiError,
   toErrorMessage,
   toLoadState,
   type LoadState,
@@ -11,9 +12,6 @@ import type { AuthStatus as AuthStatusType } from "../types";
 
 const LOGIN_HINT =
   "未获取到登录凭证。请完成网页登录，或到设置 → 高级导入 cookies.txt。";
-
-/** Backend sentinel for "the user closed the login window" — see commands.rs. */
-const LOGIN_CANCELLED = "auth:login-cancelled";
 
 /**
  * Shared auth state + actions for auth controls: initial fetch,
@@ -85,10 +83,10 @@ export function useAuthActions(
         setHint(LOGIN_HINT);
       }
     } catch (err) {
-      const message = toErrorMessage(err);
+      const { message, kind } = toApiError(err);
       // A voluntary close is the user saying "not now" — stay silent
       // instead of nagging. Timeouts and real failures still surface.
-      if (message !== LOGIN_CANCELLED) {
+      if (kind !== "cancelled") {
         setHint(message);
       }
     } finally {

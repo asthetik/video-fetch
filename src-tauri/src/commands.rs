@@ -701,7 +701,10 @@ pub async fn resolve_url(
         // start a full parse nobody will consume — same verdict the killed
         // path below would reach, without burning the yt-dlp run.
         (_view_meta, _) if !is_current() => {
-            return Err(AppError::Message("解析已取消（有更新的请求）".into()));
+            return Err(AppError::with_kind(
+                crate::error::ErrorKind::Cancelled,
+                "解析已取消（有更新的请求）",
+            ));
         }
         (view_meta, _) => {
             // Fallback: the existing full yt-dlp path.
@@ -744,7 +747,10 @@ pub async fn resolve_url(
     };
 
     if !is_current() {
-        return Err(AppError::Message("解析已取消（有更新的请求）".into()));
+        return Err(AppError::with_kind(
+            crate::error::ErrorKind::Cancelled,
+            "解析已取消（有更新的请求）",
+        ));
     }
     for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
         finish_resolve_on_cache_write(
@@ -1683,15 +1689,16 @@ enum PollOutcome {
     Cancelled,
 }
 
-/// The sentinel the frontend matches to stay silent on a voluntary close
-/// (its own choice needs no toast). Stable marker; B20's structured error
-/// model will replace the string match.
-const LOGIN_CANCELLED: &str = "auth:login-cancelled";
-
+/// A voluntary close is the user's own choice: it reaches the frontend as
+/// the structured cancelled kind (B20), which stays silent instead of
+/// toasting — distinct from the timeout, which still surfaces.
 fn login_outcome(outcome: PollOutcome) -> AppResult<AuthStatus> {
     match outcome {
         PollOutcome::Status(status) => Ok(status),
-        PollOutcome::Cancelled => Err(AppError::Message(LOGIN_CANCELLED.into())),
+        PollOutcome::Cancelled => Err(crate::error::AppError::with_kind(
+            crate::error::ErrorKind::Cancelled,
+            "登录已取消",
+        )),
     }
 }
 
@@ -2185,7 +2192,10 @@ pub async fn pick_save_dir(app: AppHandle) -> AppResult<String> {
                 .map_err(|e| AppError::Message(format!("对话框路径无效: {e}")))?;
             picked_dir_to_string(dir)
         }
-        None => Err(AppError::Message("已取消选择目录".into())),
+        None => Err(AppError::with_kind(
+            crate::error::ErrorKind::Cancelled,
+            "已取消选择目录",
+        )),
     }
 }
 
@@ -2207,7 +2217,10 @@ pub async fn pick_cookies_file(app: AppHandle) -> AppResult<String> {
                 .map_err(|e| AppError::Message(format!("对话框路径无效: {e}")))?;
             picked_file_to_string(file)
         }
-        None => Err(AppError::Message("已取消选择文件".into())),
+        None => Err(AppError::with_kind(
+            crate::error::ErrorKind::Cancelled,
+            "已取消选择文件",
+        )),
     }
 }
 
@@ -2849,14 +2862,15 @@ mod tests {
     }
 
     #[test]
-    fn login_outcome_maps_cancelled_to_the_sentinel_error() {
+    fn login_outcome_maps_cancelled_to_the_cancelled_kind() {
         assert!(login_outcome(PollOutcome::Status(AuthStatus::LoggedIn)).is_ok());
         let cancelled = login_outcome(PollOutcome::Cancelled).unwrap_err();
+        let actual = serde_json::to_value(&cancelled).unwrap();
         assert_eq!(
-            cancelled.to_string(),
-            LOGIN_CANCELLED,
-            "the frontend matches this exact marker to stay silent on a voluntary close"
+            actual["kind"], "cancelled",
+            "the frontend branches on the structured cancelled kind to stay silent on a voluntary close"
         );
+        assert_eq!(actual["message"], "登录已取消");
     }
 
     #[test]

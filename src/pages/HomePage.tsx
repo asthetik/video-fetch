@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toErrorMessage } from "../lib/asyncAction";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import {
@@ -137,7 +138,7 @@ export function HomePage({
         // folds the message into formatsError (in-card retry), even when a card
         // is already rendered. Only the page-level error needs to know about
         // the card — without one, the URL bar is where the message is read.
-        const message = err instanceof Error ? err.message : String(err);
+        const message = toErrorMessage(err);
         setResolveStatus((s) =>
           reduceResolveStatus(s, {
             type: "resolve_rejected",

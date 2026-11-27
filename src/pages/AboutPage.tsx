@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toErrorMessage } from "../lib/asyncAction";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink } from "lucide-react";
@@ -15,7 +16,7 @@ async function openExternal(url: string) {
   try {
     await openUrl(url);
   } catch (err) {
-    logUi("about", `打开外部链接失败: ${err instanceof Error ? err.message : String(err)}`, "warn");
+    logUi("about", `打开外部链接失败: ${toErrorMessage(err)}`, "warn");
   }
 }
 
@@ -62,7 +63,7 @@ export function AboutPage() {
         if (!cancelled) setEngineVersions(v);
       })
       .catch((err) => {
-        logUi("about", `获取引擎版本失败: ${err instanceof Error ? err.message : String(err)}`, "warn");
+        logUi("about", `获取引擎版本失败: ${toErrorMessage(err)}`, "warn");
       });
     return () => {
       cancelled = true;

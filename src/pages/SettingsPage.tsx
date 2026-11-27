@@ -3,6 +3,7 @@ import { Download, FileCode2, FolderOpen, Palette, UserRound } from "lucide-reac
 import { toast } from "sonner";
 import { api } from "../lib/tauri";
 import {
+  toApiError,
   toErrorMessage,
   toLoadState,
   withToast,
@@ -146,9 +147,9 @@ export function SettingsPage() {
     } catch (err) {
       // Cancel stays silent; anything else (e.g. a path we cannot persist)
       // must surface so the user can pick another folder.
-      const msg = toErrorMessage(err);
-      if (!msg.includes("取消")) {
-        toast.error(msg);
+      const { message, kind } = toApiError(err);
+      if (kind !== "cancelled") {
+        toast.error(message);
       }
     }
   }
@@ -171,9 +172,9 @@ export function SettingsPage() {
       await api.importCookiesPath(path);
       toast.success("Cookies 已导入");
     } catch (err) {
-      const msg = toErrorMessage(err);
-      if (!msg.includes("取消")) {
-        toast.error(msg);
+      const { message, kind } = toApiError(err);
+      if (kind !== "cancelled") {
+        toast.error(message);
       }
     } finally {
       setImporting(false);

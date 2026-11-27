@@ -1,4 +1,5 @@
 import { Download as DownloadIcon, RefreshCw } from "lucide-react";
+import { toErrorMessage } from "../lib/asyncAction";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { logUi } from "../lib/activityLog";
 import { videoFormatsHint } from "../lib/videoFormatsHint";
@@ -213,7 +214,7 @@ export function VideoCard({
       });
       onEnqueued(pageIndexes.length);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(toErrorMessage(err));
     } finally {
       setDownloading(false);
     }
