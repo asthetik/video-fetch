@@ -1492,14 +1492,13 @@ pub(crate) fn register_child(
     Ok(())
 }
 
-/// Kill and unregister the child this run registered — same ownership rule as
-/// `take_child`, so a run that reacts to a stop cannot kill a process its
-/// successor registered meanwhile.
-/// Kill every in-flight resolve-registration child (keys `meta:resolve:*`).
-/// Called when a new resolve supersedes the in-flight one: the full yt-dlp
-/// parse is the most expensive call in the app, and letting a superseded
-/// request run to completion burns CPU/bandwidth for a result whose
-/// consumer is already gone. Token is always 0 for these registrations.
+/// Kill every in-flight resolve child registration — the whole `meta:*`
+/// family that `run_registered_output` registers (`meta:resolve:{seq}` full
+/// parses and `meta:probe:{seq}` page samplings). Called when a new resolve
+/// supersedes the in-flight one: the full yt-dlp parse is the most expensive
+/// call in the app, and letting a superseded request run to completion burns
+/// CPU/bandwidth for a result whose consumer is already gone. Token is
+/// always 0 for these registrations.
 pub(crate) async fn kill_stale_resolves(children: &DownloadChildren) -> usize {
     let victims: Vec<RegisteredChild> = {
         let Ok(mut guard) = children.lock() else {
@@ -1507,7 +1506,7 @@ pub(crate) async fn kill_stale_resolves(children: &DownloadChildren) -> usize {
         };
         let keys: Vec<String> = guard
             .keys()
-            .filter(|k| k.starts_with("meta:resolve:"))
+            .filter(|k| k.starts_with("meta:"))
             .cloned()
             .collect();
         keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
@@ -1519,6 +1518,9 @@ pub(crate) async fn kill_stale_resolves(children: &DownloadChildren) -> usize {
     killed
 }
 
+/// Kill and unregister the child this run registered — same ownership rule as
+/// `take_child`, so a run that reacts to a stop cannot kill a process its
+/// successor registered meanwhile.
 pub(crate) async fn kill_registered_child(
     children: &DownloadChildren,
     job_id: &str,
@@ -2465,13 +2467,11 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
     }
 
     /// B18: a group kill that lands reports the whole tree confirmed.
-    /// B12: a superseding resolve kills every in-flight `meta:resolve:*`
-    /// registration; unrelated registrations (downloads) stay put.
-    /// B12: a superseding resolve kills every in-flight `meta:resolve:*`
-    /// registration — as a full TREE (the resolve's own children, e.g. an
-    /// ffmpeg it spawned, must die too, not just the direct yt-dlp process,
-    /// which kill_on_drop already handles). Unrelated registrations
-    /// (downloads) stay put.
+    /// B12: a superseding resolve kills every in-flight `meta:*` resolve
+    /// registration (resolve and probe alike) — as a full TREE (the
+    /// resolve's own children, e.g. an ffmpeg it spawned, must die too, not
+    /// just the direct yt-dlp process, which kill_on_drop already handles).
+    /// Unrelated registrations (downloads) stay put.
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_stale_resolves_clears_only_resolve_registrations() {
@@ -2491,6 +2491,15 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         register_child(&children, "meta:resolve:1", 0, resolve_child)
             .expect("resolve registration");
 
+        // The probe phase of the same resolve flow registers under the same
+        // `meta:` family; a supersede must clear it too.
+        let probe_child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        register_child(&children, "meta:probe:1", 0, probe_child).expect("probe registration");
+
         let download_child = tokio::process::Command::new("sleep")
             .arg("30")
             .kill_on_drop(true)
@@ -2499,10 +2508,17 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         register_child(&children, "job-1", 7, download_child).expect("download registration");
 
         let killed = kill_stale_resolves(&children).await;
-        assert_eq!(killed, 1, "exactly the resolve registration is killed");
+        assert_eq!(
+            killed, 2,
+            "exactly the resolve-flow registrations (resolve + probe) are killed"
+        );
         assert!(
             !children.lock().unwrap().contains_key("meta:resolve:1"),
             "the superseded resolve registration must be removed"
+        );
+        assert!(
+            !children.lock().unwrap().contains_key("meta:probe:1"),
+            "the superseded probe registration must be removed too"
         );
         assert!(
             children.lock().unwrap().contains_key("job-1"),

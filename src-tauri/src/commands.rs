@@ -692,6 +692,13 @@ pub async fn resolve_url(
             view.audio_formats = audio_formats;
             view
         }
+        // Superseded between the sweep and this spawn (the HTTP fast path
+        // can take seconds): a newer resolve owns the flow now, so do not
+        // start a full parse nobody will consume — same verdict the killed
+        // path below would reach, without burning the yt-dlp run.
+        (_view_meta, _) if !is_current() => {
+            return Err(AppError::Message("解析已取消（有更新的请求）".into()));
+        }
         (view_meta, _) => {
             // Fallback: the existing full yt-dlp path.
             let ytdlp_cfg = state.ytdlp.clone();
@@ -2734,6 +2741,31 @@ mod tests {
         assert!(
             impl_body.contains("恢复失败：{e}"),
             "the failure must surface as Chinese user copy, not a raw SQLite string"
+        );
+    }
+
+    #[test]
+    fn the_resolve_fallback_refuses_to_spawn_when_superseded() {
+        // Normalize CRLF first: Windows checkouts hand include_str a
+        // \r\n source and a \n needle would silently never match.
+        let src = include_str!("commands.rs").replace("\r\n", "\n");
+        // B12: the stale-resolve sweep runs at id allocation, but the
+        // fallback yt-dlp spawn happens only after the HTTP fast path,
+        // which can take seconds. A resolve superseded inside that window
+        // would otherwise register afterwards and run a full parse to
+        // completion for a consumer that is gone: the spawn must be gated
+        // on is_current, and the gate must precede the spawn.
+        assert!(
+            src.contains("(_view_meta, _) if !is_current()"),
+            "the fallback yt-dlp spawn must be gated on is_current"
+        );
+        let before_spawn = src
+            .split("ytdlp::resolve_meta(")
+            .next()
+            .expect("the resolve_meta fallback call is present");
+        assert!(
+            before_spawn.contains("(_view_meta, _) if !is_current()"),
+            "the is_current gate must precede the ytdlp::resolve_meta spawn"
         );
     }
 
