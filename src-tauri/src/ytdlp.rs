@@ -2481,7 +2481,7 @@ WARNING: You have requested merging of multiple formats but ffmpeg is not instal
         // child (sh) alone leaves the grandchild alive, while the tree kill
         // takes the whole process group down. The observable difference is
         // group liveness (`kill -0 -- -<pgid>`).
-        let mut resolve_child = tokio::process::Command::new("sh")
+        let resolve_child = tokio::process::Command::new("sh")
             .args(["-c", "sleep 30 & wait $!"])
             .process_group(0)
             .kill_on_drop(true)
