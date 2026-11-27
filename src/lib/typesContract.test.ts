@@ -37,9 +37,40 @@ const ALLOWED_TS_EXTRAS: Record<string, Set<string>> = new Map([
   ["DownloadJob", new Set(["speed", "eta", "downloaded_bytes", "total_bytes"])],
 ]);
 
+const STRING_ENUMS: Record<string, string[]> = {
+  JobStatus: ["pending", "running", "done", "failed", "paused"],
+  AuthStatus: ["logged_out", "logged_in", "possibly_expired"],
+};
+
 for (const [struct, sample] of Object.entries(FIXTURE)) {
   if (struct === "UrlKind") {
     continue; // tagged union, checked separately below
+  }
+  if (struct in STRING_ENUMS) {
+    test(`types.ts ${struct} mirrors the string enum value set`, () => {
+      assert.deepEqual(
+        sample,
+        STRING_ENUMS[struct],
+        `${struct} value set drifted from the fixture`,
+      );
+      assert.match(
+        TYPES,
+        new RegExp(`export type ${struct} =${STRING_ENUMS[struct].map((v) => `\\s*"${v}"`).join(" |")}`),
+        `${struct} union literals must match the fixture order`,
+      );
+    });
+    continue;
+  }
+  if (struct === "ResolveMetaEvent") {
+    test(`types.ts ResolveMetaEvent mirrors the event envelope`, () => {
+      const fields = interfaceFields("ResolveMetaEvent");
+      assert.deepEqual(
+        [...fields],
+        Object.keys(sample),
+        "ResolveMetaEvent is the request_id + meta envelope; its inner shape is pinned by the VideoMeta section",
+      );
+    });
+    continue;
   }
   test(`types.ts ${struct} mirrors the wire fixture exactly`, () => {
     const fields = interfaceFields(struct);

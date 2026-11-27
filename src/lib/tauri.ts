@@ -14,7 +14,8 @@ import type {
   BatchEnqueueResult,
   EngineVersions,
   PauseAllResult,
-  ResumeAllResult, DownloadConflict } from "../types";
+  ResumeAllResult, DownloadConflict, ResolveMetaEvent } from "../types";
+export type { ResolveMetaEvent };
 
 export interface EnqueueArgs {
   url: string;
@@ -41,11 +42,6 @@ export interface CheckConflictArgs {
   title?: string;
   uploader?: string;
   audio_format?: string | null;
-}
-
-export interface ResolveMetaEvent {
-  request_id: number;
-  meta: VideoMeta;
 }
 
 export interface ResolveFormatsFailedEvent {

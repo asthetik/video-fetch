@@ -96,9 +96,89 @@
     "name": "某UP主"
   },
   "UrlKind": [
-    { "kind": "video" },
-    { "kind": "space", "mid": 12345 },
-    { "kind": "invalid_space" },
-    { "kind": "unknown" }
-  ]
+    {
+      "kind": "video"
+    },
+    {
+      "kind": "space",
+      "mid": 12345
+    },
+    {
+      "kind": "invalid_space"
+    },
+    {
+      "kind": "unknown"
+    }
+  ],
+  "JobStatus": [
+    "pending",
+    "running",
+    "done",
+    "failed",
+    "paused"
+  ],
+  "AuthStatus": [
+    "logged_out",
+    "logged_in",
+    "possibly_expired"
+  ],
+  "EngineVersions": {
+    "ytDlp": "2026.11.23",
+    "ffmpeg": "9.0.2"
+  },
+  "LogFileInfo": {
+    "name": "app.log",
+    "size": 104857600,
+    "modified_secs": 1764000000
+  },
+  "ResolveMetaEvent": {
+    "request_id": 7,
+    "meta": {
+      "id": "BV1xx411c7mD",
+      "title": "示例视频标题",
+      "uploader": "示例UP主",
+      "thumbnail": "https://i0.hdslb.com/bfs/archive/sample.jpg",
+      "duration_secs": 300,
+      "webpage_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+      "pages": [],
+      "formats": [],
+      "audio_formats": [],
+      "platform": "bilibili"
+    }
+  },
+  "BatchEnqueueItem": {
+    "bvid": "BV1xx411c7mD",
+    "title": "空间视频",
+    "cover": "https://i0.hdslb.com/bfs/archive/space.jpg",
+    "duration_secs": 300
+  },
+  "BatchEnqueueResult": {
+    "enqueued": 3,
+    "skipped_existing": 1,
+    "skipped_active": 0,
+    "failed": [
+      {
+        "bvid": "BV1bad",
+        "error": "无效的视频 ID"
+      }
+    ]
+  },
+  "CancelAllResult": {
+    "cancelled": 2,
+    "errors": [
+      "一个失败原因"
+    ]
+  },
+  "PauseAllResult": {
+    "paused": 2,
+    "errors": [
+      "一个失败原因"
+    ]
+  },
+  "ResumeAllResult": {
+    "resumed": 2,
+    "errors": [
+      "一个失败原因"
+    ]
+  }
 }

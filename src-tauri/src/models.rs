@@ -245,13 +245,19 @@ mod url_kind_tests {
 #[cfg(test)]
 mod wire_contract_tests {
     use super::*;
+    use crate::activity_log::LogFileInfo;
+    use crate::commands::{EngineVersions, ResolveMetaEvent};
 
-    /// B7 wire contract: every wire-facing struct is serialized here and
+    /// B7 wire contract: every wire-facing type is serialized here and
     /// compared against the golden fixture at src/types.contract.json — the
     /// same fixture the TS-side contract test (src/typesContract.test.ts)
-    /// validates `src/types.ts` against. A field rename, a new field, or a
-    /// dropped field on either side turns one of the two tests red. Update
-    /// the fixture deliberately if the wire format genuinely changed.
+    /// validates the TS mirrors against. Covers the snake_case domain
+    /// structs, the camelCase command-result/event shapes (the
+    /// `rename_all = "camelCase"` family — exactly the manual-sync drift
+    /// class), and the string enums' value sets. A field rename, a new
+    /// field, or a dropped field on either side turns one of the tests red.
+    /// Update the fixture deliberately if the wire format genuinely
+    /// changed.
     fn contract() -> serde_json::Value {
         serde_json::from_str(include_str!("../../src/types.contract.json"))
             .expect("src/types.contract.json must be valid JSON")
@@ -380,6 +386,116 @@ mod wire_contract_tests {
             serde_json::Value::Array(kinds),
             serde_json::Value::Array(fixture_kinds),
             "UrlKind variants drifted from the fixture"
+        );
+    }
+
+    #[test]
+    fn camelcase_command_shapes_match_the_golden_fixture() {
+        assert_matches_fixture(
+            "EngineVersions",
+            &EngineVersions {
+                yt_dlp: "2026.11.23".into(),
+                ffmpeg: "9.0.2".into(),
+            },
+        );
+        assert_matches_fixture(
+            "CancelAllResult",
+            &CancelAllResult {
+                cancelled: 2,
+                errors: vec!["一个失败原因".into()],
+            },
+        );
+        assert_matches_fixture(
+            "PauseAllResult",
+            &PauseAllResult {
+                paused: 2,
+                errors: vec!["一个失败原因".into()],
+            },
+        );
+        assert_matches_fixture(
+            "ResumeAllResult",
+            &ResumeAllResult {
+                resumed: 2,
+                errors: vec!["一个失败原因".into()],
+            },
+        );
+        assert_matches_fixture(
+            "BatchEnqueueResult",
+            &BatchEnqueueResult {
+                enqueued: 3,
+                skipped_existing: 1,
+                skipped_active: 0,
+                failed: vec![BatchEnqueueFailed {
+                    bvid: "BV1bad".into(),
+                    error: "无效的视频 ID".into(),
+                }],
+            },
+        );
+    }
+
+    #[test]
+    fn event_and_enum_shapes_match_the_golden_fixture() {
+        assert_matches_fixture(
+            "ResolveMetaEvent",
+            &ResolveMetaEvent {
+                request_id: 7,
+                meta: VideoMeta {
+                    id: "BV1xx411c7mD".into(),
+                    title: "示例视频标题".into(),
+                    uploader: Some("示例UP主".into()),
+                    thumbnail: Some("https://i0.hdslb.com/bfs/archive/sample.jpg".into()),
+                    duration_secs: Some(300),
+                    webpage_url: "https://www.bilibili.com/video/BV1xx411c7mD".into(),
+                    pages: Vec::new(),
+                    formats: Vec::new(),
+                    audio_formats: Vec::new(),
+                    platform: "bilibili".into(),
+                },
+            },
+        );
+        assert_matches_fixture(
+            "LogFileInfo",
+            &LogFileInfo {
+                name: "app.log".into(),
+                size: 104857600,
+                modified_secs: 1764000000,
+            },
+        );
+
+        // String enums: the value set itself is part of the wire contract.
+        let status_values: Vec<serde_json::Value> = [
+            JobStatus::Pending,
+            JobStatus::Running,
+            JobStatus::Done,
+            JobStatus::Failed,
+            JobStatus::Paused,
+        ]
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap())
+        .collect();
+        assert_eq!(
+            status_values,
+            contract()["JobStatus"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            "JobStatus value set drifted from the fixture"
+        );
+        let auth_values: Vec<serde_json::Value> = [
+            AuthStatus::LoggedOut,
+            AuthStatus::LoggedIn,
+            AuthStatus::PossiblyExpired,
+        ]
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap())
+        .collect();
+        assert_eq!(
+            auth_values,
+            contract()["AuthStatus"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            "AuthStatus value set drifted from the fixture"
         );
     }
 }
