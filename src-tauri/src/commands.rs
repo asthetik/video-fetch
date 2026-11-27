@@ -2236,7 +2236,11 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
     let work_root = app_dir.join("download-work");
     std::fs::create_dir_all(&work_root)?;
 
-    let ytdlp = sidecar::resolve_ytdlp_config(app);
+    let (ytdlp, digest_targets) = sidecar::resolve_ytdlp_config(app);
+    // Hash the resolved bundled binaries off the main thread; the download
+    // gate (`ensure_digest_ok`) waits for the verdict before the first
+    // spawn. Non-bundled origins (dev-only overrides, PATH) pass exempt.
+    sidecar::spawn_digest_verification(digest_targets);
     let progress: Arc<dyn ProgressEmitter> = Arc::new(TauriProgressEmitter::new(app.clone()));
     let downloads = DownloadManager::with_ytdlp(
         db,

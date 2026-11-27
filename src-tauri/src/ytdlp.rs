@@ -1175,6 +1175,11 @@ pub async fn download(
     req: DownloadRequest<'_>,
     on_progress: impl Fn(ProgressUpdate) + Send,
 ) -> AppResult<PathBuf> {
+    // Refuse to spawn a yt-dlp that failed the startup digest verification
+    // (see sidecar.rs): the pins vouch for the shipped binary, and a
+    // mismatch means whatever is on disk is not it.
+    crate::sidecar::ensure_digest_ok(crate::sidecar::TOOL_YT_DLP)
+        .map_err(crate::error::AppError::Message)?;
     let DownloadRequest {
         cfg,
         job_id,

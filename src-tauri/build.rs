@@ -12,6 +12,7 @@ fn main() {
     // must be declared explicitly or a Dependabot bump would not recompile.
     println!("cargo:rerun-if-changed=../scripts/requirements-sidecars.txt");
     println!("cargo:rerun-if-changed=../scripts/fetch_sidecars.py");
+    println!("cargo:rerun-if-changed=../scripts/sidecar_pins.json");
 
     let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts");
     let requirements = fs::read_to_string(scripts.join("requirements-sidecars.txt"))
@@ -24,6 +25,28 @@ fn main() {
 
     println!("cargo:rustc-env=SIDECAR_YTDLP_VERSION={ytdlp}");
     println!("cargo:rustc-env=SIDECAR_FFMPEG_VERSION={ffmpeg}");
+
+    // The per-target digests power the runtime integrity check in
+    // `sidecar.rs`: the resolved binary is hashed and compared against what
+    // the pins vouch for. Every supported target is pinned, so an absent
+    // entry is a schema regression and fails the build instead of shipping
+    // an unverifiable sidecar.
+    let pins_source = fs::read_to_string(scripts.join("sidecar_pins.json"))
+        .unwrap_or_else(|e| panic!("failed to read scripts/sidecar_pins.json: {e}"));
+    let target = std::env::var("TARGET")
+        .unwrap_or_else(|_| panic!("cargo did not set TARGET; cannot select the sidecar digest"));
+    for (tool, var) in [
+        ("yt-dlp", "SIDECAR_SHA256_YT_DLP"),
+        ("ffmpeg", "SIDECAR_SHA256_FFMPEG"),
+    ] {
+        let digest = build_pins::target_digest(&pins_source, tool, &target).unwrap_or_else(|| {
+            panic!(
+                "sidecar_pins.json has no digest for {tool} on {target}; \
+                     every shipped target must be pinned"
+            )
+        });
+        println!("cargo:rustc-env={var}={digest}");
+    }
 
     tauri_build::build()
 }

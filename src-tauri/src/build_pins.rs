@@ -57,6 +57,15 @@ fn is_x_y_z(value: &str) -> bool {
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// The SHA-256 digest pinned for one tool on one target triple, from the
+/// `binaries` section of sidecar_pins.json. `None` when the tool or the
+/// target is absent — the caller decides whether that is fatal.
+pub fn target_digest(source: &str, tool: &str, target: &str) -> Option<String> {
+    let pins: serde_json::Value =
+        serde_json::from_str(source).expect("scripts/sidecar_pins.json must be valid JSON");
+    pins["binaries"][tool][target].as_str().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +106,34 @@ mod tests {
     /// like `# falls back to "9.0.1"` becomes the injected version);
     /// why_new=the post-0.4.2 review flagged the unanchored quote scan;
     /// seam=none
+    const PINS_FIXTURE: &str = r#"
+    {
+      "binaries": {
+        "ffmpeg": {
+          "aarch64-apple-darwin": "aa11",
+          "x86_64-unknown-linux-gnu": "bb22"
+        },
+        "yt-dlp": {
+          "aarch64-apple-darwin": "cc33"
+        }
+      }
+    }
+    "#;
+
+    #[test]
+    fn target_digest_reads_the_pinned_binaries_section() {
+        assert_eq!(
+            target_digest(PINS_FIXTURE, "yt-dlp", "aarch64-apple-darwin").as_deref(),
+            Some("cc33")
+        );
+        assert_eq!(
+            target_digest(PINS_FIXTURE, "ffmpeg", "x86_64-unknown-linux-gnu").as_deref(),
+            Some("bb22")
+        );
+        assert!(target_digest(PINS_FIXTURE, "ffmpeg", "riscv64").is_none());
+        assert!(target_digest(PINS_FIXTURE, "deno", "aarch64-apple-darwin").is_none());
+    }
+
     #[test]
     fn a_computed_rhs_cannot_borrow_a_version_from_its_comment() {
         let source = concat!(
