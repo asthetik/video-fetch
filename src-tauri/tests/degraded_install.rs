@@ -1,18 +1,23 @@
 //! The degraded install claims the process-global tracing subscriber, so it
 //! runs as its own integration-test process: in-process it would silence
 //! every later capture-based test. CARGO_BIN_EXE_* locates the dedicated
-//! probe binary (a lib unit test target cannot see it — cargo only sets the
-//! variable for integration tests).
-
-use video_fetch_lib::activity_log;
+//! probe binary (this cargo version keeps the bin name's hyphens in the
+//! variable name). The variable is runtime-injected, so the path is read
+//! with std::env::var — a compile-time env! would break `cargo clippy
+//! --all-targets`, which checks this target without the bin in its env.
 
 #[test]
 fn install_reports_an_uncreatable_log_directory() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let blocker = dir.path().join("blocker");
-    std::fs::write(&blocker, b"x").expect("write blocker");
-    // A regular file where the logs directory should be: install returns
-    // Err (the caller degrades to disabled) — after having installed the
-    // stderr subscriber so telemetry survives.
-    assert!(activity_log::install(blocker.join("logs"), 1024, 7).is_err());
+    let probe = std::env::var("CARGO_BIN_EXE_degraded-install-probe")
+        .expect("cargo sets CARGO_BIN_EXE_* for integration tests");
+    let output = std::process::Command::new(probe)
+        .output()
+        .expect("probe binary built by cargo");
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("degraded install probe ok"),
+        "the subprocess probe must run the degraded install and pass: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
