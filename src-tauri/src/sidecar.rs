@@ -105,6 +105,11 @@ pub(crate) const TOOL_FFMPEG: &str = "ffmpeg";
 // Env/PATH origins are exempt by design: they are dev-only overrides (a
 // release build refuses them) and a system binary was never ours to vouch
 // for.
+//
+// Accepted TOCTOU window: a binary swapped after hashing but before the
+// first spawn still runs — hashing on every spawn would reintroduce the
+// per-invocation cost this resolution avoids. The hash targets disk rot
+// and installer corruption, which it covers.
 
 /// Placeholders written synchronously by `spawn_digest_verification` so a
 /// download racing the hash thread waits instead of running unverified.
@@ -156,40 +161,57 @@ fn verdicts() -> std::sync::MutexGuard<
 /// per-tool verdicts. Called from `build_app_state` before queued work can
 /// resume; the placeholders it writes synchronously make a racing download
 /// wait for the verdict instead of running an unverified binary.
-pub fn spawn_digest_verification(yt_dlp: &std::path::Path, ffmpeg: Option<&std::path::Path>) {
+/// One tool's resolved startup facts: path, origin, and the pair the digest
+/// verification consumes.
+pub type ResolvedTool = (&'static str, Option<PathBuf>, &'static str);
+
+pub fn spawn_digest_verification(tools: [ResolvedTool; 2]) {
     {
         let mut verdicts = verdicts();
-        for tool in [TOOL_YT_DLP, TOOL_FFMPEG] {
+        for (tool, _, _) in &tools {
             verdicts
                 .get_or_insert_with(std::collections::HashMap::new)
                 .insert(tool, Err(VERIFYING.into()));
         }
     }
-    let yt_dlp = yt_dlp.to_path_buf();
-    let ffmpeg = ffmpeg.map(std::path::Path::to_path_buf);
     std::thread::spawn(move || {
-        let mut verdicts = verdicts();
-        for (tool, path) in [(TOOL_YT_DLP, Some(yt_dlp)), (TOOL_FFMPEG, ffmpeg)] {
-            let verdict = match (expected_digest(tool), path) {
-                (Some(expected), Some(path)) => match digest_file(&path) {
-                    Ok(digest) if digest == expected => Ok(()),
-                    Ok(digest) => {
-                        let message = format!(
-                            "{tool} 完整性校验失败：SHA-256 不匹配（期望 {expected}，实际 {digest}）"
-                        );
-                        if tool == TOOL_FFMPEG {
-                            // yt-dlp spawns ffmpeg itself; the mismatch
-                            // cannot be blocked here. The merge failure is
-                            // already caught loudly at the delivery point.
-                            tracing::warn!(target: "core", "sidecar: {message}（合并失败会在交付点浮出）");
+        // Hash with no lock held: a 130MB binary can take seconds on a slow
+        // disk, and holding the verdict lock through it would turn the
+        // gate's bounded wait into an unbounded one. Write under a brief
+        // lock at the end.
+        let mut results = Vec::new();
+        for (tool, path, origin) in tools.into_iter() {
+            let verdict = if origin != ORIGIN_BUNDLED {
+                // Env/PATH origins are dev-only overrides and a system
+                // binary was never ours to vouch for: exempt.
+                Ok(())
+            } else {
+                match (expected_digest(tool), path) {
+                    (Some(expected), Some(path)) => match digest_file(&path) {
+                        Ok(digest) if digest == expected => Ok(()),
+                        Ok(digest) => {
+                            let message = format!(
+                                "{tool} 完整性校验失败：SHA-256 不匹配（期望 {expected}，实际 {digest}）"
+                            );
+                            if tool == TOOL_FFMPEG {
+                                // yt-dlp spawns ffmpeg itself; the mismatch
+                                // cannot be blocked here. The merge failure
+                                // is already caught loudly at the delivery
+                                // point.
+                                tracing::warn!(target: "core", "sidecar: {message}（合并失败会在交付点浮出）");
+                            }
+                            Err(message)
                         }
-                        Err(message)
-                    }
-                    Err(e) => Err(format!("{tool} 完整性校验失败：无法读取（{e}）")),
-                },
-                _ => Ok(()),
+                        Err(e) => Err(format!("{tool} 完整性校验失败：无法读取（{e}）")),
+                    },
+                    _ => Ok(()),
+                }
             };
-            if let Some(map) = verdicts.as_mut() {
+            results.push((tool, verdict));
+        }
+        let mut verdicts = verdicts();
+        if let Some(map) = verdicts.as_mut() {
+            for (tool, verdict) in results {
                 map.insert(tool, verdict);
             }
         }
@@ -284,7 +306,7 @@ fn probe_command(path: &std::path::Path, version_flag: &str) -> StdCommand {
 /// Walk the candidates in preference order and return the first that runs,
 /// naming the ones that exist but cannot. Skipping in silence is what kept a
 /// broken sidecar invisible until a download failed.
-fn resolve_candidates(spec: ToolCandidates) -> Option<PathBuf> {
+fn resolve_candidates(spec: ToolCandidates) -> Option<(PathBuf, &'static str)> {
     resolve_with(spec, probe)
 }
 
@@ -308,7 +330,7 @@ fn resolve_candidates(spec: ToolCandidates) -> Option<PathBuf> {
 fn resolve_with(
     spec: ToolCandidates,
     probe: impl Fn(&std::path::Path, &str) -> Result<(), String>,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, &'static str)> {
     let ToolCandidates {
         label,
         version_flag,
@@ -331,8 +353,8 @@ fn resolve_with(
     // Nothing to choose between: do not pay a spawn to confirm it. The walk
     // below logs as it goes; with a single candidate there is no degradation to
     // report, so this path stays as silent as a healthy bundled binary was.
-    if let [(_, only)] = present.as_slice() {
-        return Some(only.clone());
+    if let [(origin, only)] = present.as_slice() {
+        return Some((only.clone(), *origin));
     }
 
     // Candidates are probed lazily: a working bundled binary never spawns the
@@ -350,7 +372,7 @@ fn resolve_with(
                         path.display()
                     );
                 }
-                return Some(path);
+                return Some((path, origin));
             }
             Err(reason) => tracing::warn!(
                 target: "core",
@@ -363,7 +385,7 @@ fn resolve_with(
     None
 }
 
-pub fn resolve_yt_dlp_path(app: &AppHandle) -> PathBuf {
+pub fn resolve_yt_dlp_path(app: &AppHandle) -> Option<(PathBuf, &'static str)> {
     resolve_candidates(ToolCandidates {
         label: TOOL_YT_DLP,
         version_flag: YT_DLP_VERSION_FLAG,
@@ -371,10 +393,9 @@ pub fn resolve_yt_dlp_path(app: &AppHandle) -> PathBuf {
         from_env: path_from_env("YT_DLP_PATH"),
         from_system: system_candidate(TOOL_YT_DLP),
     })
-    .unwrap_or_default()
 }
 
-pub fn resolve_ffmpeg_path(app: &AppHandle) -> Option<PathBuf> {
+pub fn resolve_ffmpeg_path(app: &AppHandle) -> Option<(PathBuf, &'static str)> {
     resolve_candidates(ToolCandidates {
         label: TOOL_FFMPEG,
         version_flag: FFMPEG_VERSION_FLAG,
@@ -384,11 +405,28 @@ pub fn resolve_ffmpeg_path(app: &AppHandle) -> Option<PathBuf> {
     })
 }
 
-pub fn resolve_ytdlp_config(app: &AppHandle) -> crate::ytdlp::YtDlpConfig {
-    crate::ytdlp::YtDlpConfig {
-        yt_dlp_path: resolve_yt_dlp_path(app),
-        ffmpeg_path: resolve_ffmpeg_path(app),
-    }
+/// Resolve both tools for startup: the config the download path consumes,
+/// plus each tool's origin and resolved path so the digest verification can
+/// exempt everything that is not a bundled binary.
+pub fn resolve_ytdlp_config(app: &AppHandle) -> (crate::ytdlp::YtDlpConfig, [ResolvedTool; 2]) {
+    // Unresolved (None) falls to ORIGIN_SYSTEM: an absent binary is exempt
+    // from verification, which only ever applies to a bundled file.
+    let (yt_dlp_path, yt_origin) =
+        resolve_yt_dlp_path(app).unwrap_or_else(|| (PathBuf::default(), ORIGIN_SYSTEM));
+    let (ffmpeg_path, ffmpeg_origin) =
+        resolve_ffmpeg_path(app).unwrap_or_else(|| (PathBuf::default(), ORIGIN_SYSTEM));
+    let ffmpeg_path = Some(ffmpeg_path);
+    let config = crate::ytdlp::YtDlpConfig {
+        yt_dlp_path: yt_dlp_path.clone(),
+        ffmpeg_path: ffmpeg_path.clone(),
+    };
+    (
+        config,
+        [
+            (TOOL_YT_DLP, Some(yt_dlp_path), yt_origin),
+            (TOOL_FFMPEG, ffmpeg_path, ffmpeg_origin),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -510,7 +548,7 @@ mod tests {
         from_env: Option<&str>,
         from_system: Option<&str>,
         usable: &[&str],
-    ) -> Option<PathBuf> {
+    ) -> Option<(PathBuf, &'static str)> {
         let spec = ToolCandidates {
             label: TOOL_FFMPEG,
             version_flag: FFMPEG_VERSION_FLAG,
@@ -536,7 +574,7 @@ mod tests {
                 None,
                 &["/bundled/ffmpeg", "/env/ffmpeg"],
             ),
-            Some(PathBuf::from("/bundled/ffmpeg"))
+            Some((PathBuf::from("/bundled/ffmpeg"), ORIGIN_BUNDLED))
         );
     }
 
@@ -549,7 +587,7 @@ mod tests {
                 None,
                 &["/env/ffmpeg"],
             ),
-            Some(PathBuf::from("/env/ffmpeg"))
+            Some((PathBuf::from("/env/ffmpeg"), ORIGIN_ENV))
         );
     }
 
@@ -562,7 +600,7 @@ mod tests {
                 Some("/system/ffmpeg"),
                 &["/system/ffmpeg"],
             ),
-            Some(PathBuf::from("/system/ffmpeg"))
+            Some((PathBuf::from("/system/ffmpeg"), ORIGIN_SYSTEM))
         );
     }
 
@@ -586,7 +624,10 @@ mod tests {
             Ok(())
         });
 
-        assert_eq!(resolved, Some(PathBuf::from("/bundled/yt-dlp")));
+        assert_eq!(
+            resolved,
+            Some((PathBuf::from("/bundled/yt-dlp"), ORIGIN_BUNDLED))
+        );
         assert!(!spawned.get(), "a lone candidate must not be spawned");
     }
 
