@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { createListenerBag } from "../lib/listenerBag";
+import { loadJobsFromStore } from "../lib/jobListLoader";
 import { EmptyState } from "./EmptyState";
 import { toast } from "sonner";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -92,7 +93,9 @@ export function DownloadQueue({
 
   const loadJobs = useCallback(async () => {
     try {
-      const list = await api.listJobs();
+      // The shared loader merges concurrent reloads (terminal-event storms)
+      // into one list_jobs call; the queue keeps its own sort.
+      const list = await loadJobsFromStore(async () => api.listJobs());
       setJobs(sortJobs(list));
       setLoadError(null);
     } catch (err) {

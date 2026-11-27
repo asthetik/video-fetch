@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createListenerBag } from "../lib/listenerBag";
+import { loadJobsFromStore } from "../lib/jobListLoader";
 import { toast } from "sonner";
 import {
   FolderOpen,
@@ -80,7 +81,9 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
 
   const loadJobs = useCallback(async () => {
     try {
-      const list = await api.listJobs();
+      // The shared loader merges concurrent reloads (terminal-event storms)
+      // into one list_jobs call; history keeps backend order.
+      const list = await loadJobsFromStore(async () => api.listJobs());
       // Keep backend order (created_at DESC); no done/failed filtering here.
       setAllJobs(list);
       setLoadError(null);
