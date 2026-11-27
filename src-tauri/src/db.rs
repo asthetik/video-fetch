@@ -874,6 +874,14 @@ mod tests {
                 now - resolve_cache::RESOLVE_CACHE_TTL_SECS as i64 - 60,
             )
             .unwrap();
+            // ==cutoff: the sweep is strict (<) while is_fresh judges <= —
+            // the same row must survive the sweep and still read fresh.
+            db.upsert_resolve_cache(
+                "bilibili:edge:guest_g3",
+                &meta,
+                now - resolve_cache::RESOLVE_CACHE_TTL_SECS as i64,
+            )
+            .unwrap();
             db.upsert_resolve_cache("bilibili:fresh:guest_g3", &meta, now)
                 .unwrap();
         }
@@ -883,6 +891,12 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "an expired row must be swept at open"
+        );
+        assert!(
+            db.get_resolve_cache("bilibili:edge:guest_g3")
+                .unwrap()
+                .is_some(),
+            "a row exactly at the cutoff must survive the strict < sweep and read fresh"
         );
         assert!(
             db.get_resolve_cache("bilibili:fresh:guest_g3")
@@ -907,9 +921,10 @@ mod tests {
         let path = dir.path().join("jobs.db");
         let cap = resolve_cache::RESOLVE_CACHE_MAX_ROWS as i64;
         let meta = sample_video_meta();
-        // Anchor on the real clock and keep every row comfortably inside the
-        // TTL window: the trim must be the only thing deleting rows here —
-        // the TTL sweep must not eat into the count and mask a broken cap.
+        // Anchor on the real clock and keep every row in the past, well
+        // inside the TTL window: the trim must be the only thing deleting
+        // rows here — the TTL sweep must not eat into the count and mask a
+        // broken cap.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -917,8 +932,12 @@ mod tests {
         {
             let db = Db::open_with_outcome(&path).unwrap().0;
             for i in 0..cap + 5 {
-                db.upsert_resolve_cache(&format!("bilibili:v{i}:guest_g3"), &meta, now - 60 + i)
-                    .unwrap();
+                db.upsert_resolve_cache(
+                    &format!("bilibili:v{i}:guest_g3"),
+                    &meta,
+                    now - 60 - (cap + 5) + i,
+                )
+                .unwrap();
             }
         }
         let db = Db::open_with_outcome(&path).unwrap().0;
@@ -938,6 +957,33 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the newest rows must survive the trim"
+        );
+        // ==cap: the trim must be a no-op at exactly the cap — an off-by-one
+        // in the comparison or the OFFSET would eat a row here.
+        let dir2 = tempfile::tempdir().unwrap();
+        let path2 = dir2.path().join("jobs.db");
+        {
+            let db = Db::open_with_outcome(&path2).unwrap().0;
+            for i in 0..cap {
+                db.upsert_resolve_cache(
+                    &format!("bilibili:e{i}:guest_g3"),
+                    &meta,
+                    now - 60 - (cap + 5) + i,
+                )
+                .unwrap();
+            }
+        }
+        let db = Db::open_with_outcome(&path2).unwrap().0;
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM resolve_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, cap, "exactly-cap tables must not be trimmed");
+        assert!(
+            db.get_resolve_cache("bilibili:e0:guest_g3")
+                .unwrap()
+                .is_some(),
+            "no row may go at exactly the cap"
         );
     }
 
