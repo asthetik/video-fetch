@@ -32,18 +32,17 @@ pub fn path_is_audio_output(path: &Path) -> bool {
         .any(|e| e.eq_ignore_ascii_case(ext))
 }
 
-pub fn sanitize_filename_component(s: &str) -> String {
-    let out: String = s
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c => c,
-        })
-        .collect();
-    if out.is_empty() || out == "." || out == ".." {
+/// The app's own escape guard: a whole `.`, `..`, or empty segment is a
+/// template-escape attempt that yt-dlp cannot produce (validate rejects the
+/// literals, and substituted values cannot contain '/'), so it is folded to
+/// `_` before any other layer sees it. This deliberately diverges from
+/// yt-dlp, which resolves a `..` segment as a parent reference on Windows
+/// and leaves it on Unix — the app refuses to ever write one.
+fn guard_dot_segment(seg: &str) -> String {
+    if seg.is_empty() || seg == "." || seg == ".." {
         "_".into()
     } else {
-        out
+        seg.to_string()
     }
 }
 
@@ -238,32 +237,257 @@ pub fn preview_filename_at(
 ) -> String {
     let mut out = expand_datetime_tokens(template, when);
     let replacements = [
-        ("%(title)s", sanitize_filename_component(title)),
-        ("%(id)s", sanitize_filename_component(id)),
-        ("%(uploader)s", sanitize_filename_component(uploader)),
-        ("%(ext)s", sanitize_filename_component(ext)),
+        ("%(title)s", yt_dlp_value_sanitize(title)),
+        ("%(id)s", yt_dlp_value_sanitize(id)),
+        ("%(uploader)s", yt_dlp_value_sanitize(uploader)),
+        ("%(ext)s", yt_dlp_value_sanitize(ext)),
         ("%(playlist_index)s", playlist_index.to_string()),
         ("%(playlist_index)03d", format!("{:03}", playlist_index)),
     ];
     for (token, value) in replacements {
         out = out.replace(token, &value);
     }
-    // Keep '/' as directory separator from the template; sanitize each segment.
+    // Keep '/' as the directory separator from the template. Per segment:
+    // the app's escape guard first (a dot segment must never survive, on any
+    // platform, whatever the later layers would do with it), then yt-dlp's
+    // Windows path layer.
     out.split('/')
         .map(|seg| {
-            let cleaned = if seg.contains('%') {
+            if seg.contains('%') {
+                // Unexpanded template text (a preview of a template validate
+                // would reject): leave it visible instead of mangling it.
                 seg.to_string()
             } else {
-                sanitize_filename_component(seg)
-            };
-            if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
-                "_".into()
-            } else {
-                cleaned
+                yt_dlp_path_layer(&guard_dot_segment(seg))
             }
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The field-value sanitizer yt-dlp actually applies by default (pinned
+/// 2026.11.23, `YoutubeDL.prepare_filename`). Deliberately
+/// platform-dependent, because yt-dlp itself is:
+/// - non-Windows builds take the plain path — field values only get
+///   `/` → U+29F8 and NULs stripped; `?`, `"`, `:` etc. survive verbatim
+///   (they are legal on Unix filesystems), and `sanitize_path` is a no-op.
+/// - Windows builds run `sanitize_filename(value, restricted=False,
+///   is_id=NO_DEFAULT)` — the new rules that map `" * : < > ? | / \` to
+///   their full-width counterparts, turn `\n` into a space (via the NUL
+///   marker dance) and drop other control chars — and then fix each path
+///   segment up like `sanitize_path` does (trailing dot/space → `#`,
+///   ASCII-invalid → `#`).
+///
+/// Template literal text is never sanitized by yt-dlp and is left alone
+/// here too; the '%' guard in the caller keeps preview text visible.
+fn yt_dlp_value_sanitize(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        sanitize_filename_yt_dlp_windows(value)
+    }
+    #[cfg(not(windows))]
+    {
+        value.replace('/', "\u{29F8}").replace('\0', "")
+    }
+}
+
+/// Windows path layer: `_sanitize_path_parts`' per-segment rewrite — each
+/// of `/ < > : " \ | ? *` becomes `#`, and one trailing whitespace or dot
+/// becomes `#` (`asdf...` → `asdf..#`). The '.'/'..' segment drop/pop of
+/// that function is unreachable here: validate rejects literal dot
+/// segments, and substituted values cannot contain '/' (sanitized above).
+fn yt_dlp_path_layer(segment: &str) -> String {
+    #[cfg(windows)]
+    {
+        let mut out: String = segment
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*') {
+                    '#'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        // `[\s.]$`: a single trailing whitespace or dot becomes '#'.
+        let needs_fix = out
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_whitespace() || c == '.');
+        if needs_fix {
+            out.pop();
+            out.push('#');
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        segment.to_string()
+    }
+}
+
+/// Port of `yt_dlp.utils.sanitize_filename` (2026.11.23) with
+/// `restricted=False, is_id=NO_DEFAULT` — the new rules Windows applies to
+/// every substituted field value. Verified against the shipped wheel's own
+/// outputs (golden tests below). The `if not is_id` tail of the original
+/// (`__` collapse, `'_'` strip, `'.'` strip) does not run on this default
+/// path, so it is not ported.
+#[cfg(windows)]
+fn sanitize_filename_yt_dlp_windows(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let marked = collapse_timestamp_colons(s);
+    let mut marked: String = {
+        let mut out = String::with_capacity(marked.len() * 2);
+        for c in marked.chars() {
+            out.push_str(&replace_insane_windows(c));
+        }
+        out
+    };
+    marked = collapse_repeated_markers(&marked);
+    marked = strip_marker_edges(&marked);
+    let out = marked.replace('\0', "");
+    if out.is_empty() { "_".into() } else { out }
+}
+
+/// `re.sub(r'[0-9]+(?::[0-9]+)+', ...)` — colons inside digit:digit:digit
+/// timestamp runs become '_' (1:23:45 → 1_23_45), before the per-char pass.
+#[cfg(windows)]
+fn collapse_timestamp_colons(s: &str) -> String {
+    let b: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            let mut k = j;
+            let mut groups = 0;
+            while k < b.len() && b[k] == ':' {
+                let mut m = k + 1;
+                let mut digits = 0;
+                while m < b.len() && b[m].is_ascii_digit() {
+                    m += 1;
+                    digits += 1;
+                }
+                if digits == 0 {
+                    break;
+                }
+                k = m;
+                groups += 1;
+            }
+            if groups > 0 {
+                for &c in &b[start..k] {
+                    if c == ':' {
+                        out.push('_');
+                    } else {
+                        out.push(c);
+                    }
+                }
+                i = k;
+                continue;
+            }
+            for &c in &b[start..j] {
+                out.push(c);
+            }
+            i = j;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `replace_insane` for `restricted=False, is_id=NO_DEFAULT`: the full-width
+/// branch catches all of `" * : < > ? | / \` first, so the later `?`/`"`/
+/// `:`/`\/|*<>` branches are unreachable and only the control-char deletion
+/// after them still fires. `\n` becomes a NUL marker + space, which the
+/// marker phases below collapse and strip.
+#[cfg(windows)]
+fn replace_insane_windows(c: char) -> String {
+    if c == '\n' {
+        return "\0 ".into();
+    }
+    if matches!(c, '"' | '*' | ':' | '<' | '>' | '?' | '|' | '/' | '\\') {
+        return match c {
+            '/' => "\u{29F8}".into(),
+            '\\' => "\u{29F9}".into(),
+            other => char::from_u32(other as u32 + 0xFEE0)
+                .map(String::from)
+                .unwrap_or_else(|| other.to_string()),
+        };
+    }
+    if (c as u32) < 32 || (c as u32) == 127 {
+        return String::new();
+    }
+    c.to_string()
+}
+
+/// `re.sub(r'(\0.)(?:(?=\1)..)+', r'\1')` — a run of identical NUL+char
+/// marker pairs collapses to its first pair.
+#[cfg(windows)]
+fn collapse_repeated_markers(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\0' && i + 1 < chars.len() {
+            let (a, b) = (chars[i], chars[i + 1]);
+            out.push(a);
+            out.push(b);
+            i += 2;
+            while i + 1 < chars.len() && chars[i] == a && chars[i + 1] == b {
+                i += 2;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `re.sub(r'^\0.{STRIP_RE}|{STRIP_RE}\0.$', '')` with
+/// `STRIP_RE = (?:\0.|[ _-])*` — marker pairs and plain `[ _-]` runs are
+/// stripped from the ends, behind (or ahead of) a marker pair.
+#[cfg(windows)]
+fn strip_marker_edges(s: &str) -> String {
+    let mut chars: Vec<char> = s.chars().collect();
+    if chars.len() >= 2 && chars[0] == '\0' {
+        let mut i = 2;
+        loop {
+            if i + 1 < chars.len() && chars[i] == '\0' {
+                i += 2;
+            } else if i < chars.len() && (chars[i] == ' ' || chars[i] == '_' || chars[i] == '-') {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        chars.drain(..i);
+    }
+    let n = chars.len();
+    if n >= 2 && chars[n - 2] == '\0' {
+        let mut end = n - 2;
+        loop {
+            if end >= 2 && chars[end - 2] == '\0' {
+                end -= 2;
+            } else if end > 0
+                && (chars[end - 1] == ' ' || chars[end - 1] == '_' || chars[end - 1] == '-')
+            {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        chars.truncate(end);
+    }
+    chars.into_iter().collect()
 }
 
 /// Insert ` (n)` before `.%(ext)s`, or append ` (n)` if that token is absent.
@@ -419,16 +643,96 @@ mod tests {
         assert_eq!(tmpl, "%(title)s [%(id)s].%(ext)s");
     }
 
+    /// B16: the old nine-character mapping is gone. This pins the new
+    /// prediction for an illegal-char title end to end (platform-split:
+    /// unix keeps them verbatim, Windows maps to full-width twins — the
+    /// char-level golden tests pin the layers).
+    #[cfg(not(windows))]
     #[test]
     fn strips_illegal_path_chars() {
-        assert_eq!(sanitize_filename_component("a/b:c*d?.mp4"), "a_b_c_d_.mp4");
+        let name = preview_filename_at(
+            "%(title)s.mp4",
+            "a/b:c*d?.mp4",
+            "BV1xx",
+            "UP",
+            "mp4",
+            1,
+            &sample_local(),
+        );
+        assert_eq!(name, "a\u{29F8}b:c*d?.mp4.mp4");
     }
 
     #[test]
-    fn sanitize_rejects_dot_segments() {
-        assert_eq!(sanitize_filename_component(".."), "_");
-        assert_eq!(sanitize_filename_component("."), "_");
-        assert_eq!(sanitize_filename_component(""), "_");
+    fn guard_dot_segment_neutralizes_escape_segments() {
+        assert_eq!(guard_dot_segment(".."), "_");
+        assert_eq!(guard_dot_segment("."), "_");
+        assert_eq!(guard_dot_segment(""), "_");
+        assert_eq!(guard_dot_segment("title"), "title");
+    }
+
+    /// B16 golden: the Windows value layer against the shipped yt-dlp
+    /// 2026.11.23 wheel — `sanitize_filename(s, restricted=False)` (the
+    /// default `is_id=NO_DEFAULT` new rules). Full-width mapping for
+    /// `" * : < > ? | / \`, `\n` → space through the NUL-marker dance,
+    /// other control chars and 127 deleted, timestamp colons → '_', and —
+    /// confirmed against the wheel — NO trailing strip, NO `__` collapse on
+    /// this default path. This test is the Windows CI lane's witness.
+    #[cfg(windows)]
+    #[test]
+    fn windows_value_layer_matches_the_pinned_yt_dlp() {
+        let golden = [
+            ("a?b", "a？b"),
+            ("a\"b", "a＂b"),
+            ("a:b", "a：b"),
+            ("a<b>c|d*e\\f/g", "a＜b＞c｜d＊e⧹f⧸g"),
+            ("line1\nline2", "line1 line2"),
+            ("a\u{1}b", "ab"),
+            ("a\u{7f}b", "ab"),
+            ("a\tb", "ab"),
+            ("1:23:45", "1_23_45"),
+            ("测试？标题", "测试？标题"),
+            ("", ""),
+            ("trailing..", "trailing.."),
+            ("a__b", "a__b"),
+            (".dotfile", ".dotfile"),
+        ];
+        for (input, expected) in golden {
+            assert_eq!(
+                sanitize_filename_yt_dlp_windows(input),
+                expected,
+                "input {input:?}"
+            );
+        }
+    }
+
+    /// B16 golden: the Windows path layer against `_sanitize_path_parts`
+    /// (`sanitize_path(force=True)` per segment) — ASCII-invalid chars and
+    /// one trailing whitespace/dot become '#'.
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_layer_matches_the_pinned_yt_dlp() {
+        let golden = [
+            ("tail. ", "tail.#"),
+            ("trailing..", "trailing.#"),
+            ("a<b", "a#b"),
+            ("a  b.", "a  b#"),
+            ("normal", "normal"),
+        ];
+        for (input, expected) in golden {
+            assert_eq!(yt_dlp_path_layer(input), expected, "input {input:?}");
+        }
+    }
+
+    /// B16: the non-Windows value layer touches only '/' (→ U+29F8, the big
+    /// solidus yt-dlp itself writes on macOS/Linux) and NULs. Everything a
+    /// Unix filesystem accepts — '?', '"', ':' — survives verbatim, exactly
+    /// as yt-dlp's plain default path leaves it.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_value_layer_leaves_unix_legal_characters_alone() {
+        assert_eq!(yt_dlp_value_sanitize("你好/世界"), "你好\u{29F8}世界");
+        assert_eq!(yt_dlp_value_sanitize("a?b:\"c|d*e"), "a?b:\"c|d*e");
+        assert_eq!(yt_dlp_value_sanitize("a\0b"), "ab");
     }
 
     #[test]
@@ -536,7 +840,31 @@ mod tests {
             1,
             &sample_local(),
         );
-        assert_eq!(name, "你好_世界 [BV1xx].mp4");
+        // Both platforms map '/' in a title to U+29F8 (the big solidus):
+        // yt-dlp's unix default replaces it explicitly, and the Windows
+        // full-width table sends it to the same codepoint. The prediction
+        // must match that, or skip-existing stat checks miss the file.
+        assert_eq!(name, "你好\u{29F8}世界 [BV1xx].mp4");
+    }
+
+    /// B16: unix-legal characters pass through untouched — the old
+    /// nine-character mapping used to rewrite them into `_` and made the
+    /// prediction diverge from yt-dlp's actual output (skip-existing then
+    /// missed existing files). Windows output differs (full-width twins);
+    /// pinned separately on the Windows lane.
+    #[cfg(not(windows))]
+    #[test]
+    fn preview_keeps_unix_legal_title_characters_verbatim() {
+        let name = preview_filename_at(
+            "%(title)s.%(ext)s",
+            "What? \"Is\" This: a|b<c>d*e",
+            "BV1xx",
+            "UP",
+            "mp4",
+            1,
+            &sample_local(),
+        );
+        assert_eq!(name, "What? \"Is\" This: a|b<c>d*e.mp4");
     }
 
     #[test]
