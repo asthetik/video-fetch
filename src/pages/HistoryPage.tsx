@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createListenerBag } from "../lib/listenerBag";
+import { loadJobsFromStore } from "../lib/jobListLoader";
 import { toast } from "sonner";
 import {
   FolderOpen,
@@ -78,20 +79,30 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
   const bulkBusyRef = useRef(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadJobs = useCallback(async () => {
-    try {
-      const list = await api.listJobs();
-      // Keep backend order (created_at DESC); no done/failed filtering here.
-      setAllJobs(list);
-      setLoadError(null);
-    } catch (err) {
-      // The persistent error state below replaces the old transient toast: a
-      // failed load must not masquerade as an empty history.
-      setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const loadJobs = useCallback(
+    async (options: { force?: boolean } = {}) => {
+      try {
+        // The shared loader merges concurrent reloads (terminal-event
+        // storms) into one list_jobs call; history keeps backend order.
+        // Mutations pass force: true — a coalesced snapshot taken before
+        // the mutation would hide restored rows.
+        const list = await loadJobsFromStore(
+          async () => api.listJobs(),
+          options,
+        );
+        // Keep backend order (created_at DESC); no done/failed filtering here.
+        setAllJobs(list);
+        setLoadError(null);
+      } catch (err) {
+        // The persistent error state below replaces the old transient toast:
+        // a failed load must not masquerade as an empty history.
+        setLoadError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     void loadJobs();
@@ -127,7 +138,8 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     // An undo on one surface must refresh the other: restore emits this
     // event instead of relying on the deleting page still being mounted.
     void listen<string>("download://restored", () => {
-      void loadJobs();
+      // A restore is a mutation (a row came back): force a fresh fetch.
+      void loadJobs({ force: true });
     }).then(listeners.track);
 
     return () => {
@@ -294,7 +306,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
       onJobsChanged?.();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-      await loadJobs();
+      await loadJobs({ force: true });
     }
   }
 
@@ -305,7 +317,7 @@ export function HistoryPage({ onJobsChanged, onGoHome }: HistoryPageProps) {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
-      await loadJobs();
+      await loadJobs({ force: true });
     }
   }
 
