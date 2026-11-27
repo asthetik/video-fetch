@@ -167,7 +167,11 @@ impl Db {
             tracing::info!(target: "core", "db: 迁移 jobs 表（新增 {}）", migrated.join("、"));
         }
         Self::purge_legacy_resolve_cache(&conn)?;
-        Self::sweep_resolve_cache(&conn)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Self::sweep_resolve_cache(&conn, now)?;
         Ok(Self { conn })
     }
 
@@ -198,12 +202,10 @@ impl Db {
     /// legacy-key purge and the read-time corrupt-row removal. Sweep expired
     /// rows and cap the table at open, when nothing else touches it. Recency
     /// is `fetched_at` (every upsert refreshes it), so the cap trims
-    /// LRU-by-write.
-    fn sweep_resolve_cache(conn: &Connection) -> AppResult<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+    /// LRU-by-write. `now` is a parameter, not an internal clock read: the
+    /// exact TTL boundary is only observable with a fixed clock (see
+    /// `the_ttl_boundary_is_strict`).
+    fn sweep_resolve_cache(conn: &Connection, now: i64) -> AppResult<()> {
         let cutoff = now.saturating_sub(resolve_cache::RESOLVE_CACHE_TTL_SECS as i64);
         let expired = conn.execute(
             "DELETE FROM resolve_cache WHERE fetched_at < ?1",
@@ -860,7 +862,11 @@ mod tests {
         let path = dir.path().join("jobs.db");
         // Anchor on the real clock: the sweep's cutoff is computed from
         // SystemTime at open, so a hardcoded timestamp would drift in or out
-        // of the TTL window as wall-clock time passes.
+        // of the TTL window as wall-clock time passes. Rows sit well inside
+        // their side of the boundary (±60s): the reopen sweep re-reads the
+        // clock, so an exact-boundary row cannot be observed reliably here —
+        // a second ticking over between the two opens moves the cutoff past
+        // it (this exact flake bit the Linux CI runner).
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -874,14 +880,6 @@ mod tests {
                 now - resolve_cache::RESOLVE_CACHE_TTL_SECS as i64 - 60,
             )
             .unwrap();
-            // ==cutoff: the sweep is strict (<) while is_fresh judges <= —
-            // the same row must survive the sweep and still read fresh.
-            db.upsert_resolve_cache(
-                "bilibili:edge:guest_g3",
-                &meta,
-                now - resolve_cache::RESOLVE_CACHE_TTL_SECS as i64,
-            )
-            .unwrap();
             db.upsert_resolve_cache("bilibili:fresh:guest_g3", &meta, now)
                 .unwrap();
         }
@@ -893,10 +891,54 @@ mod tests {
             "an expired row must be swept at open"
         );
         assert!(
+            db.get_resolve_cache("bilibili:fresh:guest_g3")
+                .unwrap()
+                .is_some(),
+            "a fresh row must survive the sweep"
+        );
+    }
+
+    /// B14: the TTL predicate is strict (`<`): a row exactly at the cutoff
+    /// stays and `is_fresh`'s `<=` still judges it fresh — the two boundaries
+    /// are complementary, so a just-expired row survives the sweep but reads
+    /// as stale. Pinned through the sweep's `now` seam with a fixed clock: a
+    /// reopen-based test cannot observe the exact boundary because the sweep
+    /// recomputes the clock at open time.
+    ///
+    /// Value: protects=the strict `<` in sweep_resolve_cache; fails_when=the
+    /// predicate becomes `<=` and the cutoff row is deleted;
+    /// why_new=fable review asked for the boundary; the first version pinned
+    /// it across a reopen and flaked on Linux when the wall clock ticked;
+    /// seam=sweep_resolve_cache's now parameter
+    #[test]
+    fn the_ttl_boundary_is_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_with_outcome(&dir.path().join("jobs.db"))
+            .unwrap()
+            .0;
+        let now = 1_800_000_000_i64;
+        let ttl = resolve_cache::RESOLVE_CACHE_TTL_SECS as i64;
+        let meta = sample_video_meta();
+        db.upsert_resolve_cache("bilibili:edge:guest_g3", &meta, now - ttl)
+            .unwrap();
+        db.upsert_resolve_cache("bilibili:old:guest_g3", &meta, now - ttl - 1)
+            .unwrap();
+        db.upsert_resolve_cache("bilibili:fresh:guest_g3", &meta, now)
+            .unwrap();
+
+        Db::sweep_resolve_cache(&db.conn, now).unwrap();
+
+        assert!(
             db.get_resolve_cache("bilibili:edge:guest_g3")
                 .unwrap()
                 .is_some(),
-            "a row exactly at the cutoff must survive the strict < sweep and read fresh"
+            "a row exactly at the cutoff must survive the strict < sweep"
+        );
+        assert!(
+            db.get_resolve_cache("bilibili:old:guest_g3")
+                .unwrap()
+                .is_none(),
+            "a row one second past the cutoff must be swept"
         );
         assert!(
             db.get_resolve_cache("bilibili:fresh:guest_g3")
