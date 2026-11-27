@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,11 +20,10 @@ use crate::models::{
 };
 use crate::naming;
 use crate::platform;
-use crate::playurl;
+use crate::platform::VideoPlatform as _;
 use crate::resolve_cache;
 use crate::settings as settings_store;
 use crate::sidecar;
-use crate::wbi;
 use crate::ytdlp::{self, YtDlpConfig};
 
 const BILIBILI_LOGIN_LABEL: &str = "bilibili-login";
@@ -78,11 +76,12 @@ pub struct AppState {
     /// reset history; surfaces once as a startup toast.
     pub db_notice: Option<String>,
     pub ytdlp: YtDlpConfig,
-    pub wbi_keys: wbi::WbiKeyCache,
+    /// B21: the resolve orchestration's platform seam. Bilibili-owned state
+    /// (wbi keys, space info cache) lives inside the implementation; the
+    /// generic orchestrator sees it only through the trait.
+    pub platform: std::sync::Arc<crate::platform::BilibiliPlatform>,
     /// Shared bilibili API client (UA + timeouts); reqwest clones are cheap.
     pub http_client: reqwest::Client,
-    /// In-process space_info cache: mid -> (uploader name, written-at instant), TTL 10 minutes.
-    pub space_info_cache: std::sync::Mutex<HashMap<u64, (String, std::time::Instant)>>,
     /// Latest resolve request id; stale in-flight results must not emit or write cache.
     pub active_resolve_id: AtomicU64,
     /// Local activity log writer (files under app_dir/logs).
@@ -110,60 +109,6 @@ pub struct ResolveMetaEvent {
 pub struct ResolveFormatsFailedEvent {
     pub request_id: u64,
     pub error: String,
-}
-
-/// Cap on concurrent playurl requests during multi-P sampling so bursts of API
-/// calls don't trip Bilibili risk control.
-const PLAYURL_SAMPLE_CONCURRENCY: usize = 4;
-
-/// Multi-page sampling: query all pages when <=16 parts, otherwise 8 sampled
-/// pages, at most `PLAYURL_SAMPLE_CONCURRENCY` at a time. Each completed page
-/// invokes `on_progress` with the cumulative result in completion order (the
-/// frontend replaces the whole list, so it stays idempotent).
-async fn multi_page_playurl_formats(
-    client: &reqwest::Client,
-    keys: &wbi::WbiKeys,
-    bvid: &str,
-    pages: &[models::PageItem],
-    cookie_header: Option<&str>,
-    on_progress: impl Fn(Vec<models::FormatOption>, Vec<models::FormatOption>),
-) -> Option<(Vec<models::FormatOption>, Vec<models::FormatOption>)> {
-    let max_samples = if pages.len() <= 16 { pages.len() } else { 8 };
-    let indices = ytdlp::sample_page_indices(pages.len() as u32, max_samples);
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(PLAYURL_SAMPLE_CONCURRENCY));
-    let mut tasks = tokio::task::JoinSet::new();
-    for index in indices {
-        let Some(page) = pages.get(index.saturating_sub(1) as usize) else {
-            continue;
-        };
-        let cid = page.page_id.clone();
-        let bvid = bvid.to_string();
-        let cookie_header = cookie_header.map(str::to_string);
-        let client = client.clone();
-        let keys = keys.clone();
-        let semaphore = semaphore.clone();
-        tasks.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .expect("playurl sample semaphore closed");
-            playurl::fetch_formats(&client, &keys, &bvid, &cid, cookie_header.as_deref(), true)
-                .await
-                .ok()
-        });
-    }
-    let mut observed_video: Vec<models::FormatOption> = Vec::new();
-    let mut observed_audio: Vec<models::FormatOption> = Vec::new();
-    while let Some(task) = tasks.join_next().await {
-        let Ok(Some((video, audio))) = task else {
-            continue;
-        };
-        playurl::merge_multi_page_options(&mut observed_video, video);
-        playurl::merge_multi_page_options(&mut observed_audio, audio);
-        on_progress(observed_video.clone(), observed_audio.clone());
-    }
-    (!observed_video.is_empty() || !observed_audio.is_empty())
-        .then_some((observed_video, observed_audio))
 }
 
 pub fn is_resolve_current(active_id: u64, request_id: u64) -> bool {
@@ -522,20 +467,34 @@ fn tauri_cookie_to_app(c: &tauri::webview::Cookie<'_>) -> Cookie {
 /// Pure URL classification, no network. Space URLs enter the list view;
 /// everything else keeps the existing resolve flow (and its errors).
 #[tauri::command]
-pub fn detect_url(url: String) -> models::UrlKind {
-    if let Some(mid) = platform::parse_space_mid(&url) {
-        return models::UrlKind::Space { mid };
+pub fn detect_url(state: State<'_, AppState>, url: String) -> models::UrlKind {
+    state.platform.classify_url(&url)
+}
+
+/// The resolve orchestration's production event sink: the Tauri app handle.
+struct TauriResolveEvents {
+    app: AppHandle,
+}
+
+impl platform::ResolveEvents for TauriResolveEvents {
+    fn emit_meta(&self, event: &'static str, request_id: u64, meta: &VideoMeta) {
+        let _ = self.app.emit(
+            event,
+            &ResolveMetaEvent {
+                request_id,
+                meta: meta.clone(),
+            },
+        );
     }
-    if let Ok(parsed) = Url::parse(url.trim())
-        && parsed.host_str() == Some("space.bilibili.com")
-    {
-        return models::UrlKind::InvalidSpace;
-    }
-    let canonical = platform::canonicalize_video_url(&url);
-    if platform::detect_platform(&canonical).is_some() {
-        models::UrlKind::Video
-    } else {
-        models::UrlKind::Unknown
+
+    fn emit_formats_failed(&self, request_id: u64, error: &str) {
+        let _ = self.app.emit(
+            RESOLVE_FORMATS_FAILED_EVENT,
+            &ResolveFormatsFailedEvent {
+                request_id,
+                error: error.to_string(),
+            },
+        );
     }
 }
 
@@ -561,11 +520,87 @@ pub async fn resolve_url(
     let cookies = state
         .auth
         .materialize_cookies_file_from(stored_cookies.as_deref())?;
-    let scope = resolve_cache::cache_scope(cookies.is_some());
+    let cookie_header = stored_cookies
+        .as_deref()
+        .map(cookies::cookie_header_for_bilibili)
+        .filter(|s| !s.is_empty());
+
+    // Same builder settings as the shared client (UA + 8s timeouts), so the
+    // clone is behavior-identical to the private build this used to do per
+    // resolve — one connection pool and DNS cache instead of fresh ones
+    // every call.
+    let client = state.http_client.clone();
+    let ctx = platform::ResolveCtx {
+        client: &client,
+        cookie_header: cookie_header.as_deref(),
+    };
+    let events = TauriResolveEvents { app };
+    run_resolve(ResolveTask {
+        platform: state.platform.as_ref(),
+        events: &events,
+        downloads: &state.downloads,
+        active: &state.active_resolve_id,
+        ytdlp_cfg: &state.ytdlp,
+        cookies_path: cookies.as_deref(),
+        ctx: &ctx,
+        url,
+        force,
+        request_id,
+        now,
+    })
+    .await
+}
+
+/// B21: the generic resolve orchestrator. Request-id lifecycle, the stale
+/// resolve sweep, cache TTL, event emission, the fallback gate, and the
+/// cache store are platform-independent; every bilibili-specific step sits
+/// behind the [`platform::VideoPlatform`] trait. Zero functional change
+/// from the pre-B21 inline flow — including event ordering (the partial
+/// event is gated on is_current, the per-sample progress events are not:
+/// the frontend filters stale request ids) and including the B12 gate: a
+/// resolve superseded while its fast path ran returns cancelled instead of
+/// spawning the full yt-dlp parse.
+/// Everything one resolve invocation needs: the long-lived dependencies
+/// (platform seam, event sink, download manager, active-id, sidecar config,
+/// cookie jar) plus the per-call inputs. One struct instead of an
+/// eleven-parameter function.
+struct ResolveTask<'a> {
+    platform: &'a dyn platform::VideoPlatform,
+    events: &'a dyn platform::ResolveEvents,
+    downloads: &'a DownloadManager,
+    active: &'a AtomicU64,
+    ytdlp_cfg: &'a YtDlpConfig,
+    cookies_path: Option<&'a std::path::Path>,
+    ctx: &'a platform::ResolveCtx<'a>,
+    url: String,
+    force: bool,
+    request_id: Option<u64>,
+    now: i64,
+}
+
+async fn run_resolve(task: ResolveTask<'_>) -> AppResult<VideoMeta> {
+    let ResolveTask {
+        platform,
+        events,
+        downloads,
+        active,
+        ytdlp_cfg,
+        cookies_path,
+        ctx,
+        url,
+        force,
+        request_id,
+        now,
+    } = task;
+    // The scope input is the materialized jar path, not the cookie header:
+    // a logged-in session whose jar write failed resolves under the guest
+    // scope (pre-B21 behavior — the header alone does not make the store
+    // authed).
+    let scope = platform.cache_scope(cookies_path.is_some());
 
     if !force {
-        for key in resolve_cache::lookup_cache_keys(&url, scope) {
-            if let Some((mut meta, fetched_at)) = state.downloads.get_resolve_cache(&key)?
+        for key in platform.cache_lookup_keys(&url, scope) {
+            if let Some((mut meta, fetched_at)) = downloads.get_resolve_cache(&key)?
                 && resolve_cache::is_fresh(fetched_at, now, resolve_cache::RESOLVE_CACHE_TTL_SECS)
             {
                 meta.formats = ytdlp::finalize_formats_for_pages(
@@ -578,161 +613,76 @@ pub async fn resolve_url(
         }
     }
 
-    let request_id = request_id.unwrap_or_else(|| allocate_resolve_id(&state.active_resolve_id));
+    let request_id = request_id.unwrap_or_else(|| allocate_resolve_id(active));
 
     // A new resolve supersedes the in-flight one: kill its full yt-dlp parse
     // instead of letting the most expensive call in the app run to
     // completion for a consumer that is already gone. (The fast view/playurl
     // path is HTTP-only and cheap; the is_current guards already discard its
     // stale results.)
-    crate::ytdlp::kill_stale_resolves(state.downloads.child_registry()).await;
+    crate::ytdlp::kill_stale_resolves(downloads.child_registry()).await;
 
-    let is_current =
-        || is_resolve_current(state.active_resolve_id.load(Ordering::SeqCst), request_id);
+    let is_current = || is_resolve_current(active.load(Ordering::SeqCst), request_id);
 
-    let log_bvid = resolve_cache::extract_bilibili_id(&url);
-    tracing::info!(target: "core", "resolve: 开始 {}", log_bvid.as_deref().unwrap_or("未知"));
+    tracing::info!(
+        target: "core",
+        "resolve: 开始 {}",
+        platform.log_subject(&url).as_deref().unwrap_or("未知")
+    );
 
-    // Same builder settings as the shared client (UA + 8s timeouts), so the
-    // clone is behavior-identical to the private build this used to do per
-    // resolve — one connection pool and DNS cache instead of fresh ones
-    // every call.
-    let client = state.http_client.clone();
-    let cookie_header = stored_cookies
-        .as_deref()
-        .map(cookies::cookie_header_for_bilibili)
-        .filter(|s| !s.is_empty());
-
-    // Fast path: single-part videos resolve via view -> playurl; failures fall back to yt-dlp.
-    let view_meta = match bilibili_view::resolve_view(&url, &client).await {
-        Ok(partial) if is_current() => {
-            let _ = app.emit(
-                RESOLVE_PARTIAL_EVENT,
-                &ResolveMetaEvent {
-                    request_id,
-                    meta: partial.clone(),
-                },
-            );
-            Some(partial)
-        }
-        _ => None,
-    };
-
-    let playurl_formats: Option<(Vec<models::FormatOption>, Vec<models::FormatOption>)> =
-        if let Some(view) = &view_meta {
-            let bvid = resolve_cache::extract_bilibili_id(&url);
-            let keys = match state
-                .wbi_keys
-                .get_or_fetch(&client, cookie_header.as_deref())
-                .await
-            {
-                Ok(keys) => Some(keys),
-                Err(e) => {
-                    tracing::warn!(target: "core", "resolve: wbi keys 失败，回退 yt-dlp: {e}");
-                    None
+    // Fast path: the platform's cheap HTTP resolution. emit_partial carries
+    // the orchestrator's is_current gate (false = superseded: the platform
+    // aborts, exactly like the old `Ok(partial) if is_current()` arm);
+    // emit_formats_progress is ungated, the frontend filters stale ids.
+    let fast = platform
+        .fast_metadata(
+            ctx,
+            &url,
+            &|partial: VideoMeta| -> bool {
+                if !is_current() {
+                    return false;
                 }
-            };
-            match (bvid, keys) {
-                (Some(bvid), Some(keys)) if view.pages.len() == 1 => {
-                    let cid = view.pages[0].page_id.clone();
-                    match playurl::fetch_formats(
-                        &client,
-                        &keys,
-                        &bvid,
-                        &cid,
-                        cookie_header.as_deref(),
-                        false,
-                    )
-                    .await
-                    {
-                        Ok((video, audio)) => Some((video, audio)),
-                        Err(e) => {
-                            tracing::warn!(target: "core", "resolve: playurl 失败，回退 yt-dlp: {e}");
-                            state.wbi_keys.invalidate();
-                            None
-                        }
-                    }
-                }
-                (Some(bvid), Some(keys)) => {
-                    let app_handle = app.clone();
-                    let progress_emit =
-                        move |formats: Vec<models::FormatOption>,
-                              audio_formats: Vec<models::FormatOption>| {
-                            let _ = app_handle.emit(
-                                RESOLVE_FORMATS_PROGRESS_EVENT,
-                                &ResolveMetaEvent {
-                                    request_id,
-                                    meta: models::VideoMeta {
-                                        formats,
-                                        audio_formats,
-                                        ..view.clone()
-                                    },
-                                },
-                            );
-                        };
-                    let result = multi_page_playurl_formats(
-                        &client,
-                        &keys,
-                        &bvid,
-                        &view.pages,
-                        cookie_header.as_deref(),
-                        progress_emit,
-                    )
-                    .await;
-                    if result.is_none() {
-                        state.wbi_keys.invalidate();
-                    }
-                    result
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+                events.emit_meta(RESOLVE_PARTIAL_EVENT, request_id, &partial);
+                true
+            },
+            &|progress_meta: VideoMeta| {
+                events.emit_meta(RESOLVE_FORMATS_PROGRESS_EVENT, request_id, &progress_meta);
+            },
+        )
+        .await;
 
-    let final_meta = match (view_meta, playurl_formats) {
-        (Some(mut view), Some((formats, audio_formats))) => {
-            view.formats = formats;
-            view.audio_formats = audio_formats;
-            view
+    let final_meta = match fast {
+        Some(platform::FastResolve {
+            mut meta,
+            formats: Some((formats, audio_formats)),
+        }) => {
+            meta.formats = formats;
+            meta.audio_formats = audio_formats;
+            meta
         }
         // Superseded between the sweep and this spawn (the HTTP fast path
         // can take seconds): a newer resolve owns the flow now, so do not
         // start a full parse nobody will consume — same verdict the killed
         // path below would reach, without burning the yt-dlp run.
-        (_view_meta, _) if !is_current() => {
+        _ if !is_current() => {
             return Err(AppError::with_kind(
                 crate::error::ErrorKind::Cancelled,
                 "解析已取消（有更新的请求）",
             ));
         }
-        (view_meta, _) => {
+        fast => {
             // Fallback: the existing full yt-dlp path.
-            let ytdlp_cfg = state.ytdlp.clone();
-            let ytdlp_url = url.clone();
-            let cookies_path = cookies.clone();
-            match ytdlp::resolve_meta(
-                state.downloads.child_registry(),
-                &ytdlp_cfg,
-                &ytdlp_url,
-                cookies_path.as_deref(),
-            )
-            .await
+            match ytdlp::resolve_meta(downloads.child_registry(), ytdlp_cfg, &url, cookies_path)
+                .await
             {
-                Ok(ytdlp_meta) => match view_meta {
-                    Some(view) => bilibili_view::merge_view_with_formats(view, ytdlp_meta),
+                Ok(ytdlp_meta) => match fast.map(|f| f.meta) {
+                    Some(partial) => platform.merge_fallback(partial, ytdlp_meta),
                     None => ytdlp_meta,
                 },
                 Err(e) => {
-                    if let Some(partial) = view_meta {
+                    if let Some(partial) = fast.map(|f| f.meta) {
                         // Keep the rendered card and tell the UI formats finished loading.
-                        let _ = app.emit(
-                            RESOLVE_FORMATS_FAILED_EVENT,
-                            &ResolveFormatsFailedEvent {
-                                request_id,
-                                error: e.to_string(),
-                            },
-                        );
+                        events.emit_formats_failed(request_id, &e.to_string());
                         return Ok(partial);
                     }
                     tracing::error!(
@@ -752,27 +702,15 @@ pub async fn resolve_url(
             "解析已取消（有更新的请求）",
         ));
     }
-    for key in resolve_cache::store_cache_keys(&url, &final_meta.id, scope) {
+    for key in platform.cache_store_keys(&url, &final_meta.id, scope) {
         finish_resolve_on_cache_write(
-            state.downloads.upsert_resolve_cache(&key, &final_meta, now),
+            downloads.upsert_resolve_cache(&key, &final_meta, now),
             |message| {
-                let _ = app.emit(
-                    RESOLVE_FORMATS_FAILED_EVENT,
-                    &ResolveFormatsFailedEvent {
-                        request_id,
-                        error: message.to_string(),
-                    },
-                );
+                events.emit_formats_failed(request_id, message);
             },
         )?;
     }
-    let _ = app.emit(
-        RESOLVE_COMPLETE_EVENT,
-        &ResolveMetaEvent {
-            request_id,
-            meta: final_meta.clone(),
-        },
-    );
+    events.emit_meta(RESOLVE_COMPLETE_EVENT, request_id, &final_meta);
     Ok(final_meta)
 }
 
@@ -799,7 +737,8 @@ pub async fn space_list_videos(
     let client = state.http_client.clone();
 
     let primary = match state
-        .wbi_keys
+        .platform
+        .wbi()
         .get_or_fetch(&client, cookie_header.as_deref())
         .await
     {
@@ -826,7 +765,7 @@ pub async fn space_list_videos(
                 "space: 主路径失败，尝试降级: {}",
                 primary_err
             );
-            state.wbi_keys.invalidate();
+            state.platform.wbi().invalidate();
             if !crate::space::fallback_allowed(&keyword, order) {
                 return Err(crate::space::degraded_reject_error(&keyword));
             }
@@ -852,38 +791,11 @@ pub async fn space_list_videos(
     }
 }
 
-/// Insert into the per-mid space-name cache, evicting the oldest entry
-/// when the cap is reached. The cache is keyed by visited space mid and
-/// otherwise only ever grows; entries carry their read time, so the
-/// oldest is the natural eviction victim. Updating an existing mid
-/// refreshes in place without evicting anyone.
-fn cache_space_name(
-    cache: &mut std::collections::HashMap<u64, (String, std::time::Instant)>,
-    mid: u64,
-    name: &str,
-    now: std::time::Instant,
-) {
-    const CAP: usize = 64;
-    if cache.len() >= CAP
-        && !cache.contains_key(&mid)
-        && let Some(oldest) = cache
-            .iter()
-            .min_by_key(|(_, (_, at))| *at)
-            .map(|(mid, _)| *mid)
-    {
-        cache.remove(&oldest);
-    }
-    cache.insert(mid, (name.to_string(), now));
-}
-
 #[tauri::command]
 pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<models::SpaceInfo> {
     const TTL: std::time::Duration = std::time::Duration::from_secs(600);
-    if let Ok(cache) = state.space_info_cache.lock()
-        && let Some((name, at)) = cache.get(&mid)
-        && at.elapsed() < TTL
-    {
-        return Ok(models::SpaceInfo { name: name.clone() });
+    if let Some(name) = state.platform.cached_space_name(mid, TTL) {
+        return Ok(models::SpaceInfo { name });
     }
 
     let stored_cookies = state.auth.cookies()?;
@@ -895,7 +807,8 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
 
     let fetched = async {
         let keys = state
-            .wbi_keys
+            .platform
+            .wbi()
             .get_or_fetch(&client, cookie_header.as_deref())
             .await?;
         crate::space::fetch_acc_info(&client, &keys, mid, cookie_header.as_deref()).await
@@ -906,10 +819,10 @@ pub async fn space_info(state: State<'_, AppState>, mid: u64) -> AppResult<model
         Ok(name) => {
             // An empty name means an anomalous payload, not a real value; do
             // not pin it in the cache where it would outlive the anomaly.
-            if !name.is_empty()
-                && let Ok(mut cache) = state.space_info_cache.lock()
-            {
-                cache_space_name(&mut cache, mid, &name, std::time::Instant::now());
+            if !name.is_empty() {
+                state
+                    .platform
+                    .remember_space_name(mid, &name, std::time::Instant::now());
             }
             Ok(models::SpaceInfo { name })
         }
@@ -2334,9 +2247,8 @@ pub fn build_app_state(app: &AppHandle) -> AppResult<AppState> {
         cookie_notice,
         db_notice,
         ytdlp,
-        wbi_keys: wbi::WbiKeyCache::new(),
+        platform: std::sync::Arc::new(crate::platform::BilibiliPlatform::new()),
         http_client,
-        space_info_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         active_resolve_id: AtomicU64::new(0),
         activity_log,
         window_theme: std::sync::Mutex::new(WindowTheme::System),
@@ -2810,14 +2722,16 @@ mod tests {
         // Normalize CRLF first: Windows checkouts hand include_str a
         // \r\n source and a \n needle would silently never match.
         let src = include_str!("commands.rs").replace("\r\n", "\n");
-        // B12: the stale-resolve sweep runs at id allocation, but the
-        // fallback yt-dlp spawn happens only after the HTTP fast path,
-        // which can take seconds. A resolve superseded inside that window
-        // would otherwise register afterwards and run a full parse to
-        // completion for a consumer that is gone: the spawn must be gated
-        // on is_current, and the gate must precede the spawn.
+        // B12 (re-pinned for B21: the fallback moved into the run_resolve
+        // orchestrator, so the needles name its shapes): the stale-resolve
+        // sweep runs at id allocation, but the fallback yt-dlp spawn happens
+        // only after the HTTP fast path, which can take seconds. A resolve
+        // superseded inside that window would otherwise register afterwards
+        // and run a full parse to completion for a consumer that is gone:
+        // the spawn must be gated on is_current, and the gate must precede
+        // the spawn.
         assert!(
-            src.contains("(_view_meta, _) if !is_current()"),
+            src.contains("if !is_current() => {\n            return Err(AppError::with_kind("),
             "the fallback yt-dlp spawn must be gated on is_current"
         );
         let before_spawn = src
@@ -2825,7 +2739,7 @@ mod tests {
             .next()
             .expect("the resolve_meta fallback call is present");
         assert!(
-            before_spawn.contains("(_view_meta, _) if !is_current()"),
+            before_spawn.contains("_ if !is_current()"),
             "the is_current gate must precede the ytdlp::resolve_meta spawn"
         );
     }
@@ -2833,31 +2747,41 @@ mod tests {
     #[test]
     fn the_space_name_cache_evicts_its_oldest_entry_at_the_cap() {
         use std::time::Duration;
-        let mut cache = std::collections::HashMap::new();
+        // B21: the cache lives inside BilibiliPlatform now; the eviction
+        // order stays deterministically testable through remember_space_name's
+        // now seam.
+        let platform = crate::platform::BilibiliPlatform::new();
         let t0 = std::time::Instant::now();
         for i in 0..64u64 {
-            cache_space_name(
-                &mut cache,
-                i,
-                &format!("s{i}"),
-                t0 + Duration::from_millis(i),
-            );
+            platform.remember_space_name(i, &format!("s{i}"), t0 + Duration::from_millis(i));
         }
-        assert_eq!(cache.len(), 64);
-        cache_space_name(&mut cache, 999, "new", t0 + Duration::from_millis(999));
-        assert_eq!(cache.len(), 64, "the cap holds");
-        assert!(!cache.contains_key(&0), "the oldest entry is evicted first");
-        assert!(cache.contains_key(&999));
+        platform.remember_space_name(999, "new", t0 + Duration::from_millis(999));
+        assert!(
+            platform.cached_space_name(0, Duration::ZERO).is_none(),
+            "the oldest entry is evicted first"
+        );
+        assert!(
+            platform
+                .cached_space_name(999, Duration::from_secs(3600))
+                .is_some()
+        );
         // Re-inserting an existing mid refreshes in place: nothing evicted.
         // The refreshed mid is deliberately not the oldest — with the
         // contains_key guard dropped, a defective implementation would
         // evict the oldest entry (mid 1) here and this would catch it.
-        cache_space_name(&mut cache, 40, "updated", t0 + Duration::from_millis(500));
-        assert_eq!(cache.len(), 64);
-        assert_eq!(cache.get(&40).unwrap().0, "updated");
+        platform.remember_space_name(40, "updated", t0 + Duration::from_millis(500));
         assert!(
-            cache.contains_key(&1),
+            platform
+                .cached_space_name(1, Duration::from_secs(3600))
+                .is_some(),
             "the oldest entry must survive an in-place refresh of another mid"
+        );
+        assert_eq!(
+            platform
+                .cached_space_name(40, Duration::from_secs(3600))
+                .as_deref(),
+            Some("updated"),
+            "an in-place refresh updates the stored name"
         );
     }
 
@@ -3168,9 +3092,8 @@ mod openable_roots_delete_tests {
                 yt_dlp_path: root.path().join("yt-dlp"),
                 ffmpeg_path: None,
             },
-            wbi_keys: wbi::WbiKeyCache::new(),
+            platform: std::sync::Arc::new(crate::platform::BilibiliPlatform::new()),
             http_client: reqwest::Client::new(),
-            space_info_cache: Mutex::new(HashMap::new()),
             active_resolve_id: AtomicU64::new(0),
             activity_log: crate::activity_log::ActivityLog::disabled(root.path().join("logs")),
             window_theme: Mutex::new(WindowTheme::System),
@@ -3277,18 +3200,22 @@ mod openable_roots_delete_tests {
 mod detect_url_tests {
     use super::*;
 
+    fn classify(url: &str) -> models::UrlKind {
+        crate::platform::BilibiliPlatform::new().classify_url(url)
+    }
+
     #[test]
     fn detect_url_classifies_three_kinds() {
         assert_eq!(
-            detect_url("https://space.bilibili.com/470995011?spm_id_from=x".into()),
+            classify("https://space.bilibili.com/470995011?spm_id_from=x"),
             models::UrlKind::Space { mid: 470995011 }
         );
         assert_eq!(
-            detect_url("https://www.bilibili.com/video/BV1xx411c7mD".into()),
+            classify("https://www.bilibili.com/video/BV1xx411c7mD"),
             models::UrlKind::Video
         );
         assert_eq!(
-            detect_url("https://example.com/nope".into()),
+            classify("https://example.com/nope"),
             models::UrlKind::Unknown
         );
     }
@@ -3296,15 +3223,15 @@ mod detect_url_tests {
     #[test]
     fn detect_url_invalid_space_mid() {
         assert_eq!(
-            detect_url("https://space.bilibili.com/abc".into()),
+            classify("https://space.bilibili.com/abc"),
             models::UrlKind::InvalidSpace
         );
         assert_eq!(
-            detect_url("https://space.bilibili.com/".into()),
+            classify("https://space.bilibili.com/"),
             models::UrlKind::InvalidSpace
         );
         assert_eq!(
-            detect_url("https://space.bilibili.com/470995011/video".into()),
+            classify("https://space.bilibili.com/470995011/video"),
             models::UrlKind::Space { mid: 470995011 }
         );
     }
@@ -3720,9 +3647,8 @@ mod restart_cookie_tests {
                 yt_dlp_path: root.path().join("yt-dlp"),
                 ffmpeg_path: None,
             },
-            wbi_keys: wbi::WbiKeyCache::new(),
+            platform: std::sync::Arc::new(crate::platform::BilibiliPlatform::new()),
             http_client: reqwest::Client::new(),
-            space_info_cache: Mutex::new(HashMap::new()),
             active_resolve_id: AtomicU64::new(0),
             activity_log: crate::activity_log::ActivityLog::disabled(root.path().join("logs")),
             window_theme: Mutex::new(WindowTheme::System),
@@ -4103,6 +4029,378 @@ mod webview_cookie_persist_guard {
             "materialize stays best-effort here: the saved login must still be \
              reported via Some(status) when the file write fails, with the warn \
              gated on the Err arm in between."
+        );
+    }
+}
+
+/// B21: the generic resolve orchestrator, driven end to end by a
+/// FakePlatform — the first time the resolve flow's invariants (is_current
+/// gating and its asymmetry, event sequence, cache TTL short-circuit) are
+/// testable without HTTP or an AppHandle (the gap the supplied-id test
+/// documented for years).
+#[cfg(test)]
+mod resolve_orchestrator_tests {
+    use super::*;
+    use crate::download::{ChannelProgressEmitter, Downloader};
+    use crate::models::UrlKind;
+    use crate::platform::{FastResolve, ResolveCtx, ResolveEvents, VideoPlatform};
+    use crate::ytdlp::ChildRegistry;
+    use crate::ytdlp::ProgressUpdate;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Never invoked: the orchestrator tests never enqueue a download.
+    struct UnusedDownloader;
+
+    #[async_trait::async_trait]
+    impl Downloader for UnusedDownloader {
+        async fn run(
+            &self,
+            _job: &DownloadJob,
+            _token: u64,
+            _on_progress: Box<dyn Fn(ProgressUpdate) + Send>,
+        ) -> Result<PathBuf, String> {
+            panic!("no download may start in these tests");
+        }
+    }
+
+    struct CapturedEvents {
+        metas: StdMutex<Vec<(&'static str, u64)>>,
+        formats_failed: StdMutex<Vec<String>>,
+    }
+
+    impl CapturedEvents {
+        fn new() -> Self {
+            Self {
+                metas: StdMutex::new(Vec::new()),
+                formats_failed: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn meta_events(&self) -> Vec<(&'static str, u64)> {
+            self.metas.lock().unwrap().clone()
+        }
+    }
+
+    impl ResolveEvents for CapturedEvents {
+        fn emit_meta(&self, event: &'static str, request_id: u64, _meta: &VideoMeta) {
+            self.metas.lock().unwrap().push((event, request_id));
+        }
+
+        fn emit_formats_failed(&self, _request_id: u64, error: &str) {
+            self.formats_failed.lock().unwrap().push(error.to_string());
+        }
+    }
+
+    fn fake_meta() -> VideoMeta {
+        VideoMeta {
+            id: "FAKE1".into(),
+            title: "fake title".into(),
+            uploader: None,
+            thumbnail: None,
+            duration_secs: None,
+            webpage_url: "https://fake.example/watch".into(),
+            pages: vec![],
+            formats: vec![],
+            audio_formats: vec![],
+            platform: "fake".into(),
+        }
+    }
+
+    /// Serves a canned fast-path result and counts invocations. Invokes the
+    /// callbacks exactly the way the bilibili implementation does: the gate
+    /// once, on the partial; progress per sample batch.
+    struct FakePlatform {
+        fast_formats: bool,
+        fast_calls: AtomicU64,
+        /// When set, the fake flips the orchestrator's active id to this
+        /// value right after a successful partial gate — simulating a newer
+        /// resolve landing while the fast path is mid-flight.
+        supersede_active_to: Option<(Arc<AtomicU64>, u64)>,
+    }
+
+    impl FakePlatform {
+        fn new(fast_formats: bool) -> Self {
+            Self {
+                fast_formats,
+                fast_calls: AtomicU64::new(0),
+                supersede_active_to: None,
+            }
+        }
+
+        fn calls(&self) -> u64 {
+            self.fast_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl VideoPlatform for FakePlatform {
+        fn classify_url(&self, _url: &str) -> UrlKind {
+            UrlKind::Video
+        }
+
+        fn cache_scope(&self, _has_cookies: bool) -> &'static str {
+            "guest_g3"
+        }
+
+        fn cache_lookup_keys(&self, url: &str, scope: &str) -> Vec<String> {
+            // Same shape family as the store keys — bilibili's lookup/store
+            // pair overlap the same way (url-form + id-form).
+            vec![format!("fake:{url}:{scope}"), format!("fake:FAKE1:{scope}")]
+        }
+
+        fn cache_store_keys(&self, _url: &str, video_id: &str, scope: &str) -> Vec<String> {
+            vec![format!("fake:{video_id}:{scope}")]
+        }
+
+        fn merge_fallback(&self, mut partial: VideoMeta, fallback: VideoMeta) -> VideoMeta {
+            partial.formats = fallback.formats;
+            partial.audio_formats = fallback.audio_formats;
+            partial
+        }
+
+        fn log_subject(&self, url: &str) -> Option<String> {
+            Some(url.to_string())
+        }
+
+        async fn fast_metadata(
+            &self,
+            _ctx: &ResolveCtx<'_>,
+            url: &str,
+            emit_partial: &(dyn Fn(VideoMeta) -> bool + Send + Sync),
+            emit_formats_progress: &(dyn Fn(VideoMeta) + Send + Sync),
+        ) -> Option<FastResolve> {
+            self.fast_calls.fetch_add(1, Ordering::SeqCst);
+            let meta = VideoMeta {
+                title: url.into(),
+                ..fake_meta()
+            };
+            // The impl calls the gate exactly once, on the partial, the way
+            // bilibili calls it when the view resolves.
+            if !emit_partial(meta.clone()) {
+                return None;
+            }
+            if let Some((active, target)) = &self.supersede_active_to {
+                active.store(*target, Ordering::SeqCst);
+            }
+            if self.fast_formats {
+                let progress = VideoMeta {
+                    formats: vec![models::FormatOption {
+                        format_id: "80".into(),
+                        label: "fake".into(),
+                        height: Some(1080),
+                        fps: Some(30),
+                        tbr: Some(2000.0),
+                        hires: false,
+                    }],
+                    ..meta.clone()
+                };
+                emit_formats_progress(progress);
+                Some(FastResolve {
+                    meta,
+                    formats: Some((vec![], vec![])),
+                })
+            } else {
+                Some(FastResolve {
+                    meta,
+                    formats: None,
+                })
+            }
+        }
+    }
+
+    struct Harness {
+        downloads: DownloadManager,
+        events: CapturedEvents,
+        active: Arc<AtomicU64>,
+        ytdlp_cfg: YtDlpConfig,
+        _root: tempfile::TempDir,
+    }
+
+    fn harness() -> Harness {
+        let root = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open_with_outcome(&root.path().join("jobs.db"))
+            .unwrap()
+            .0;
+        let (emitter, _rx) = ChannelProgressEmitter::new();
+        let settings = AppSettings {
+            save_dir: root.path().join("save").to_string_lossy().into(),
+            ..AppSettings::default()
+        };
+        let downloads = DownloadManager::new(
+            db,
+            settings,
+            Arc::new(UnusedDownloader),
+            Arc::new(emitter),
+            Arc::new(ChildRegistry::new()),
+            root.path().join("work"),
+        )
+        .unwrap();
+        Harness {
+            downloads,
+            events: CapturedEvents::new(),
+            active: Arc::new(AtomicU64::new(0)),
+            ytdlp_cfg: YtDlpConfig {
+                yt_dlp_path: root.path().join("no-such-yt-dlp"),
+                ffmpeg_path: None,
+            },
+            _root: root,
+        }
+    }
+
+    async fn run(
+        platform: &FakePlatform,
+        harness: &Harness,
+        force: bool,
+        request_id: Option<u64>,
+    ) -> AppResult<VideoMeta> {
+        let client = reqwest::Client::new();
+        let ctx = ResolveCtx {
+            client: &client,
+            cookie_header: None,
+        };
+        run_resolve(ResolveTask {
+            platform,
+            events: &harness.events,
+            downloads: &harness.downloads,
+            active: harness.active.as_ref(),
+            ytdlp_cfg: &harness.ytdlp_cfg,
+            cookies_path: None,
+            ctx: &ctx,
+            url: "https://fake.example/watch/FAKE1".into(),
+            force,
+            request_id,
+            now: 1_800_000_000,
+        })
+        .await
+    }
+
+    /// A fresh cache hit must short-circuit everything: no fast-path call,
+    /// no events (the pre-B21 inline flow returned before any emit too).
+    #[tokio::test]
+    async fn a_fresh_cache_hit_skips_the_fast_path_and_emits_nothing() {
+        let h = harness();
+        let cached = fake_meta();
+        h.downloads
+            .upsert_resolve_cache("fake:FAKE1:guest_g3", &cached, 1_800_000_000)
+            .unwrap();
+        let platform = FakePlatform::new(true);
+
+        let meta = run(&platform, &h, false, None).await.unwrap();
+
+        assert_eq!(meta.id, "FAKE1");
+        assert_eq!(platform.calls(), 0, "the fast path must not run");
+        assert!(
+            h.events.meta_events().is_empty(),
+            "a cache hit emits nothing: {:?}",
+            h.events.meta_events()
+        );
+    }
+
+    /// The happy fast path: partial (gated through), progress (ungated),
+    /// complete, and the cache write the next resolve's hit reads.
+    #[tokio::test]
+    async fn a_fast_resolve_emits_partial_progress_complete_and_writes_cache() {
+        let h = harness();
+        let platform = FakePlatform::new(true);
+
+        let meta = run(&platform, &h, true, None).await.unwrap();
+
+        assert_eq!(meta.id, "FAKE1");
+        let events = h.events.meta_events();
+        let names: Vec<&'static str> = events.iter().map(|(e, _)| *e).collect();
+        assert_eq!(
+            names,
+            [
+                RESOLVE_PARTIAL_EVENT,
+                RESOLVE_FORMATS_PROGRESS_EVENT,
+                RESOLVE_COMPLETE_EVENT
+            ],
+            "the event sequence must be partial → progress → complete: {names:?}"
+        );
+        let (_, complete_id) = events.last().unwrap();
+        assert_eq!(*complete_id, 1, "the orchestrator allocated id 1");
+        assert!(
+            h.downloads
+                .get_resolve_cache("fake:FAKE1:guest_g3")
+                .unwrap()
+                .is_some(),
+            "the resolve must write its cache entry"
+        );
+    }
+
+    /// B12's gate, now pinned behaviorally: a resolve whose id is already
+    /// stale returns cancelled before the fallback spawn (the sidecar path
+    /// in this harness does not exist — a spawn would surface a different
+    /// error), the partial event stays gated off, and no complete fires.
+    #[tokio::test]
+    async fn a_superseded_resolve_cancels_with_the_partial_gated_off() {
+        let h = harness();
+        let platform = FakePlatform::new(false);
+
+        let err = run(&platform, &h, true, Some(99)).await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("解析已取消"),
+            "the stale resolve must be cancelled, got: {err}"
+        );
+        let events = h.events.meta_events();
+        assert!(
+            !events.iter().any(|(e, _)| *e == RESOLVE_PARTIAL_EVENT),
+            "the partial event is gated on is_current: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|(e, _)| *e == RESOLVE_COMPLETE_EVENT),
+            "a cancelled resolve never completes: {events:?}"
+        );
+    }
+
+    /// The gating asymmetry, pinned: a resolve superseded mid-flight
+    /// (after the partial gate passed) still emits its progress events —
+    /// they are ungated, the frontend filters stale request ids — but the
+    /// complete event never fires and the run ends cancelled.
+    #[tokio::test]
+    async fn a_midflight_superseded_resolve_keeps_progress_but_never_completes() {
+        let h = harness();
+        let platform = FakePlatform {
+            fast_formats: true,
+            fast_calls: AtomicU64::new(0),
+            supersede_active_to: Some((Arc::clone(&h.active), 999)),
+        };
+
+        let err = run(&platform, &h, true, None).await.unwrap_err();
+
+        assert!(err.to_string().contains("解析已取消"));
+        let events = h.events.meta_events();
+        assert_eq!(
+            events,
+            vec![
+                (RESOLVE_PARTIAL_EVENT, 1),
+                (RESOLVE_FORMATS_PROGRESS_EVENT, 1)
+            ],
+            "partial (was current) and progress (ungated) fire; complete never does: {events:?}"
+        );
+    }
+
+    /// The fallback with a partial present: a failed yt-dlp run keeps the
+    /// rendered card (Ok) and tells the UI formats failed — the killed
+    /// resolve's contract, now driven by the fake.
+    #[tokio::test]
+    async fn a_failed_fallback_with_a_partial_emits_formats_failed_and_keeps_the_card() {
+        let h = harness();
+        let platform = FakePlatform::new(false);
+
+        let meta = run(&platform, &h, true, None).await.unwrap();
+
+        assert_eq!(meta.id, "FAKE1", "the partial must survive the failure");
+        assert!(
+            !h.events.formats_failed.lock().unwrap().is_empty(),
+            "formats_failed must tell the UI formats finished loading"
+        );
+        let events = h.events.meta_events();
+        assert!(
+            !events.iter().any(|(e, _)| *e == RESOLVE_COMPLETE_EVENT),
+            "a fallback failure never completes: {events:?}"
         );
     }
 }
